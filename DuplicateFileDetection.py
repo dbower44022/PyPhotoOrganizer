@@ -12,8 +12,10 @@ import tempfile
 
 from PIL import Image, UnidentifiedImageError
 from PIL.ExifTags import TAGS
+from tqdm import tqdm
 
 import utils
+from photo_filter import PhotoFilter
 
 # from pillow_heif import register_heif_opener
 
@@ -101,11 +103,23 @@ class PhotoDatabase:
         """
         Create the UniquePhotos table if it doesn't exist.
         This should be called after entering the context.
+
+        Schema includes:
+        - file_hash: Full SHA-256 hash (PRIMARY KEY)
+        - partial_hash: Hash of first N bytes (for quick lookup)
+        - partial_hash_bytes: Number of bytes used for partial hash
+        - file_size: File size in bytes
+        - file_name: Full path to file
+        - create_datetime, create_year, create_month, create_day: File metadata
         """
         try:
+            # Create table with partial hash support
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS UniquePhotos (
                     file_hash TEXT PRIMARY KEY,
+                    partial_hash TEXT,
+                    partial_hash_bytes INTEGER,
+                    file_size INTEGER,
                     file_name TEXT NOT NULL,
                     create_datetime TEXT,
                     create_year TEXT,
@@ -113,8 +127,21 @@ class PhotoDatabase:
                     create_day TEXT
                 )
             ''')
+
+            # Create index on partial_hash for fast lookups
+            self.cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_partial_hash
+                ON UniquePhotos(partial_hash)
+            ''')
+
+            # Create index on file_size for optimization decisions
+            self.cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_file_size
+                ON UniquePhotos(file_size)
+            ''')
+
             self.conn.commit()
-            logger.info("Database table initialized successfully")
+            logger.info("Database table and indexes initialized successfully")
         except Exception as e:
             logger.exception(f"Failed to initialize database tables: {e}")
             raise
@@ -135,24 +162,32 @@ class PhotoDatabase:
             logger.exception(f"Failed to retrieve hashes from database: {e}")
             raise
 
-    def insert_unique_photo(self, file_hash, file_path, create_datetime, create_year, create_month, create_day):
+    def insert_unique_photo(self, file_hash, file_path, create_datetime, create_year, create_month, create_day,
+                           partial_hash=None, partial_hash_bytes=None, file_size=None):
         """
         Insert a new unique photo record into the database.
 
         Parameters:
-            file_hash (str): SHA-256 hash of the file
+            file_hash (str): SHA-256 hash of the full file
             file_path (str): Full path to the file
             create_datetime (str): Creation date in YYYY-MM-DD format
             create_year (str): Year as string
             create_month (str): Month as zero-padded string
             create_day (str): Day as zero-padded string
+            partial_hash (str, optional): SHA-256 hash of first N bytes
+            partial_hash_bytes (int, optional): Number of bytes used for partial hash
+            file_size (int, optional): File size in bytes
         """
         try:
             self.cursor.execute(
-                "INSERT INTO UniquePhotos (file_hash, file_name, create_datetime, create_year, create_month, create_day) VALUES (?, ?, ?, ?, ?, ?)",
-                (file_hash, file_path, create_datetime, create_year, create_month, create_day)
+                """INSERT INTO UniquePhotos
+                   (file_hash, partial_hash, partial_hash_bytes, file_size, file_name,
+                    create_datetime, create_year, create_month, create_day)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (file_hash, partial_hash, partial_hash_bytes, file_size, file_path,
+                 create_datetime, create_year, create_month, create_day)
             )
-            logger.debug(f"Inserted unique photo: {file_path}")
+            logger.debug(f"Inserted unique photo: {file_path} (partial_hash: {partial_hash is not None})")
         except sqlite3.IntegrityError:
             # Hash already exists (PRIMARY KEY constraint)
             logger.warning(f"Attempted to insert duplicate hash: {file_hash}")
@@ -178,6 +213,28 @@ class PhotoDatabase:
             return result is not None
         except Exception as e:
             logger.exception(f"Failed to check if hash exists: {e}")
+            raise
+
+    def has_partial_hash(self, partial_hash):
+        """
+        Check if a partial hash exists in the database.
+        Returns list of full hashes that match this partial hash.
+
+        Parameters:
+            partial_hash (str): Partial SHA-256 hash to check
+
+        Returns:
+            list: List of full hashes that have matching partial hash
+        """
+        try:
+            self.cursor.execute(
+                "SELECT file_hash FROM UniquePhotos WHERE partial_hash = ?",
+                (partial_hash,)
+            )
+            results = self.cursor.fetchall()
+            return [row[0] for row in results]
+        except Exception as e:
+            logger.exception(f"Failed to check partial hash: {e}")
             raise
 
     def commit(self):
@@ -208,49 +265,55 @@ def get_file_list(sources, recursive=False, file_endings=None):
 
     """
     try:
-        logger.info("Initializing ensure_directory_exists")
+        logger.info("Initializing get_file_list")
         file_list = []
         logger.info(f"The list of directories passed = {sources}")
         if not sources:
             logger.info(f"There were no sources passed!")
             return None
-        for source in sources:
-            try:
-                logger.info(f"Processing the source = {source}")
-                if recursive:
-                    logger.info(f"Recursively processing {source}")
-                    for root, dirs, files in os.walk(source):
-                        logger.info(f"Processing root = {root}, and Subdirectories = {dirs}.")
-                        files_processed_count = 0
-                        files_added_count = 0
-                        for file in files:
-                            logger.info(f"Processing file {file} in {root}/{dirs}")
-                            files_processed_count = files_processed_count + 1
-                            verified_filename = VerifyFileType(os.path.join(root, file))
-                            if verified_filename:
-                                logger.info(f"Processing file {verified_filename}")
-                                if not file_endings or verified_filename.lower().endswith(tuple(file_endings)):
-                                    file_list.append(os.path.join(root, verified_filename))
-                                    files_added_count = files_added_count + 1
-                                    logger.info(f"appended - {verified_filename} to file_list")
+
+        # Progress bar for scanning directories
+        with tqdm(total=len(sources), desc="Scanning directories", unit="dir") as pbar:
+            for source in sources:
+                pbar.set_postfix_str(os.path.basename(source)[:50])
+                try:
+                    logger.info(f"Processing the source = {source}")
+                    if recursive:
+                        logger.info(f"Recursively processing {source}")
+                        for root, dirs, files in os.walk(source):
+                            logger.info(f"Processing root = {root}, and Subdirectories = {dirs}.")
+                            files_processed_count = 0
+                            files_added_count = 0
+                            for file in files:
+                                logger.info(f"Processing file {file} in {root}/{dirs}")
+                                files_processed_count = files_processed_count + 1
+                                verified_filename = VerifyFileType(os.path.join(root, file))
+                                if verified_filename:
+                                    logger.info(f"Processing file {verified_filename}")
+                                    if not file_endings or verified_filename.lower().endswith(tuple(file_endings)):
+                                        file_list.append(os.path.join(root, verified_filename))
+                                        files_added_count = files_added_count + 1
+                                        logger.info(f"appended - {verified_filename} to file_list")
+                                    else:
+                                        logger.info("hmmmm")
                                 else:
-                                    logger.info("hmmmm")
-                            else:
-                                logger.info(f"The verifyfiletype routine determined that the file is not a valid type!")
+                                    logger.info(f"The verifyfiletype routine determined that the file is not a valid type!")
 
-                        logger.debug(f"Processed {files_processed_count } and Added {files_added_count} files from {root}/{dirs} to the list to process.")
-                else:
-                    logger.info(f"EXCLUSIVELY processing {source}")
-                    with os.scandir(source) as entries:
-                        for entry in entries:
-                            if entry.is_file() and (
-                                not file_endings or entry.name.lower().endswith(tuple(file_endings))
-                            ):
-                                file_list.append(entry.path)
-                logger.debug(f"Added {len(file_list)} files from {source} to the list to process.")
+                            logger.debug(f"Processed {files_processed_count } and Added {files_added_count} files from {root}/{dirs} to the list to process.")
+                    else:
+                        logger.info(f"EXCLUSIVELY processing {source}")
+                        with os.scandir(source) as entries:
+                            for entry in entries:
+                                if entry.is_file() and (
+                                    not file_endings or entry.name.lower().endswith(tuple(file_endings))
+                                ):
+                                    file_list.append(entry.path)
+                    logger.debug(f"Added {len(file_list)} files from {source} to the list to process.")
+                    pbar.update(1)
 
-            except Exception as e:
-                logger.exception(f"\n Processing the source = {source} Failed : {sys.exc_info()} - {e}")
+                except Exception as e:
+                    logger.exception(f"\n Processing the source = {source} Failed : {sys.exc_info()} - {e}")
+                    pbar.update(1)
 
         logger.info("Completed processing all sources passed!")
         return file_list
@@ -410,9 +473,17 @@ def get_creation_date(file_path):
         return year, month, day
 
 def hash_file(filename):
-    """Calculates the SHA-256 hash of a file."""
+    """
+    Calculates the SHA-256 hash of an entire file.
+
+    Parameters:
+        filename (str): Path to the file to hash
+
+    Returns:
+        str: Hexadecimal SHA-256 hash of the file
+    """
     try:
-        logger.info(f"initiating hash_file")
+        logger.info(f"Initiating full hash for {filename}")
         hasher = hashlib.sha256()
         with open(filename, 'rb') as file:
             while True:
@@ -420,17 +491,64 @@ def hash_file(filename):
                 if not chunk:
                     break
                 hasher.update(chunk)
-        # when done reading the file return the hexidecimal hash version?
-        logger.info(f"Determined the hash for file {filename} is {hasher.hexdigest()}")
-
-        return hasher.hexdigest()
+        hash_result = hasher.hexdigest()
+        logger.info(f"Full hash for {filename}: {hash_result}")
+        return hash_result
 
     except Exception as duplicate_e:
-        logger.exception(f"The hash_file routine failed -{duplicate_e}")
+        logger.exception(f"The hash_file routine failed - {duplicate_e}")
+        raise
 
 
-def find_duplicates(files, hashes, database_path='PhotoDB.db', batch_size=100):
-    """ Looks through a list of files and returns a list of duplicate and original files in a list of directories based on their hash value.
+def hash_file_partial(filename, num_bytes=16384):
+    """
+    Calculates the SHA-256 hash of the first N bytes of a file.
+
+    This is used as a quick preliminary check before hashing the entire file.
+    If partial hashes don't match, files cannot be duplicates.
+    If partial hashes match, must verify with full hash.
+
+    Parameters:
+        filename (str): Path to the file to hash
+        num_bytes (int): Number of bytes from start of file to hash (default: 16KB)
+
+    Returns:
+        str: Hexadecimal SHA-256 hash of first num_bytes of the file
+    """
+    try:
+        logger.debug(f"Calculating partial hash ({num_bytes} bytes) for {filename}")
+        hasher = hashlib.sha256()
+        with open(filename, 'rb') as file:
+            # Read only the first num_bytes
+            chunk = file.read(num_bytes)
+            hasher.update(chunk)
+
+        hash_result = hasher.hexdigest()
+        logger.debug(f"Partial hash for {filename}: {hash_result}")
+        return hash_result
+
+    except Exception as e:
+        logger.exception(f"The hash_file_partial routine failed - {e}")
+        raise
+
+
+def find_duplicates(files, hashes, database_path='PhotoDB.db', batch_size=100,
+                   partial_hash_enabled=True, partial_hash_bytes=16384, partial_hash_min_file_size=1048576,
+                   config=None):
+    """ Looks through a list of files and returns a list of duplicate and original files using two-stage hashing.
+
+        Two-Stage Hashing Strategy:
+        1. For files >= partial_hash_min_file_size:
+           - Calculate quick partial hash (first N bytes)
+           - If partial hash not in DB: file is unique
+           - If partial hash in DB: calculate full hash to confirm
+        2. For files < partial_hash_min_file_size:
+           - Skip partial hash, calculate full hash directly
+
+        Photo Filtering:
+        - Before hashing, files are checked to determine if they are real photographs
+        - Filters out icons, web graphics, thumbnails based on size, dimensions, filename
+        - Filtered files are tracked separately and not added to the database
 
         Parameters:
         files - a list of files to be processed including the directory path to access the file
@@ -438,14 +556,20 @@ def find_duplicates(files, hashes, database_path='PhotoDB.db', batch_size=100):
         database_path - path to the SQLite database file (default: 'PhotoDB.db')
         batch_size - number of files to process before committing to database (default: 100)
                      Set to 0 to only commit at the end (not recommended for large batches)
+        partial_hash_enabled - whether to use partial hashing optimization (default: True)
+        partial_hash_bytes - number of bytes to hash for partial check (default: 16384 = 16KB)
+        partial_hash_min_file_size - minimum file size to use partial hashing (default: 1048576 = 1MB)
+        config - Config object with photo filter settings (optional, if None filtering is disabled)
 
         Returns:
             results - a dictionary containing:
                 duplicate_files - list of files that already exist in the database
                 original_files - list of new unique files that were added to database
+                filtered_files - list of files that were filtered out (not real photos)
                 status - "completed" if successful
                 files_processed - total number of files processed
                 files_skipped - number of files skipped (already in DB from previous run)
+                filter_statistics - statistics about filtering (if enabled)
 
         Resume Capability:
             If processing is interrupted, you can re-run with the same file list.
@@ -471,93 +595,206 @@ def find_duplicates(files, hashes, database_path='PhotoDB.db', batch_size=100):
 
         duplicate_files = []
         original_files = []
+        filtered_files = []
         files_processed = 0
         files_skipped = 0
         files_since_last_commit = 0
+
+        # Initialize photo filter if config provided
+        photo_filter = None
+        if config:
+            try:
+                photo_filter = PhotoFilter(config)
+                if photo_filter.enabled:
+                    logger.info("Photo filtering ENABLED - non-photos will be filtered out")
+                else:
+                    logger.info("Photo filtering DISABLED in config")
+            except Exception as e:
+                logger.warning(f"Failed to initialize PhotoFilter: {e}. Continuing without filtering.")
+                photo_filter = None
 
         logger.info(f"Starting to process {len(files)} files with batch_size={batch_size}")
 
         # Use the PhotoDatabase context manager
         with PhotoDatabase(database_path) as db:
-            for file_index, filename in enumerate(files, 1):
-                try:
-                    if not os.path.isfile(filename):
-                        logger.warning(f"Skipping non-file entry: {filename}")
-                        continue
-
-                    logger.info(f"Processing file {file_index}/{len(files)}: {filename}")
-
-                    # Hash the file
+            # Create progress bar for file processing
+            with tqdm(total=len(files), desc="Processing files", unit="file",
+                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+                for file_index, filename in enumerate(files, 1):
                     try:
-                        file_hash = hash_file(filename)
+                        # Update progress bar description with current file
+                        pbar.set_postfix_str(os.path.basename(filename)[:40])
+
+                        if not os.path.isfile(filename):
+                            logger.warning(f"Skipping non-file entry: {filename}")
+                            pbar.update(1)
+                            continue
+
+                        logger.info(f"Processing file {file_index}/{len(files)}: {filename}")
+
+                        # PHOTO FILTERING: Check if file is a real photograph
+                        if photo_filter and photo_filter.enabled:
+                            if not photo_filter.is_photo(filename):
+                                filter_reason = photo_filter.get_filter_reason(filename)
+                                logger.info(f"FILTERED OUT (non-photo): {filename} - Reason: {filter_reason}")
+                                filtered_file = {
+                                    "file_path": filename,
+                                    "filter_reason": filter_reason
+                                }
+                                filtered_files.append(filtered_file)
+                                pbar.update(1)
+                                continue
+
+                        # Get file size to decide on hashing strategy
+                        try:
+                            file_size = os.path.getsize(filename)
+                        except Exception as e:
+                            logger.exception(f"Failed to get file size for {filename}: {e}")
+                            pbar.update(1)
+                            continue
+
+                        # TWO-STAGE HASHING OPTIMIZATION
+                        file_hash = None
+                        partial_hash = None
+                        use_partial_hash = (partial_hash_enabled and
+                                           file_size >= partial_hash_min_file_size)
+
+                        if use_partial_hash:
+                            # STAGE 1: Quick partial hash check
+                            try:
+                                partial_hash = hash_file_partial(filename, partial_hash_bytes)
+                                logger.info(f"Partial hash calculated for {filename} ({utils.format_file_size(file_size)})")
+                            except Exception as e:
+                                logger.exception(f"Partial hash failed for {filename}: {e}")
+                                pbar.update(1)
+                                continue
+
+                            # Check if partial hash exists in database
+                            matching_full_hashes = db.has_partial_hash(partial_hash)
+
+                            if matching_full_hashes:
+                                # Potential duplicate - STAGE 2: Verify with full hash
+                                logger.info(f"Partial hash match found! Calculating full hash to confirm for {filename}")
+                                try:
+                                    file_hash = hash_file(filename)
+                                except Exception as e:
+                                    logger.exception(f"Full hash failed for {filename}: {e}")
+                                    pbar.update(1)
+                                    continue
+
+                                # Check if full hash matches any of the candidates
+                                if file_hash in matching_full_hashes:
+                                    logger.info(f"DUPLICATE CONFIRMED: Full hash matches for {filename}")
+                                    # This is a true duplicate
+                                    files_skipped += 1
+                                    duplicate_file = {
+                                        "file_hash": file_hash,
+                                        "file_path": filename,
+                                        "file_create_datetime": "N/A"
+                                    }
+                                    duplicate_files.append(duplicate_file)
+                                    files_processed += 1
+                                    pbar.update(1)
+                                    continue
+                                else:
+                                    # Partial hash collision - different files with same first N bytes
+                                    logger.info(f"Partial hash collision (rare!) - files differ: {filename}")
+                                    # Continue to save as unique file
+                            else:
+                                # No partial hash match - file is definitely unique
+                                # Calculate full hash for storage
+                                logger.info(f"No partial hash match - file is unique: {filename}")
+                                try:
+                                    file_hash = hash_file(filename)
+                                except Exception as e:
+                                    logger.exception(f"Full hash failed for {filename}: {e}")
+                                    pbar.update(1)
+                                    continue
+
+                        else:
+                            # Small file - skip partial hash, go straight to full hash
+                            logger.debug(f"Small file ({utils.format_file_size(file_size)}) - using full hash only: {filename}")
+                            try:
+                                file_hash = hash_file(filename)
+                            except Exception as e:
+                                logger.exception(f"Hash failed for {filename}: {e}")
+                                pbar.update(1)
+                                continue
+
+                            # Check if hash already exists in database
+                            if db.has_hash(file_hash):
+                                logger.info(f"File hash already in database: {filename}")
+                                files_skipped += 1
+                                duplicate_file = {
+                                    "file_hash": file_hash,
+                                    "file_path": filename,
+                                    "file_create_datetime": "N/A"
+                                }
+                                duplicate_files.append(duplicate_file)
+                                files_processed += 1
+                                pbar.update(1)
+                                continue
+
+                        # Check against in-memory hash list (current batch)
+                        if file_hash in hashes:
+                            logger.info(f"Duplicate in current batch: {filename}")
+                            duplicate_file = {
+                                "file_hash": file_hash,
+                                "file_path": filename,
+                                "file_create_datetime": "N/A"
+                            }
+                            duplicate_files.append(duplicate_file)
+                            files_processed += 1
+                            pbar.update(1)
+                        else:
+                            # NEW UNIQUE FILE - Save to database
+                            logger.info(f"Unique file - saving to database: {filename}")
+                            hashes.append(file_hash)
+
+                            # Get the create date
+                            file_year, file_month, file_day = get_creation_date(filename)
+                            file_create_date = f"{file_year}-{file_month}-{file_day}"
+
+                            original_file = {
+                                "file_hash": file_hash,
+                                "file_path": filename,
+                                "file_create_datetime": file_create_date,
+                                "file_create_year": file_year,
+                                "file_create_month": file_month,
+                                "file_create_day": file_day
+                            }
+                            original_files.append(original_file)
+
+                            # Add to database with partial hash info
+                            db.insert_unique_photo(
+                                file_hash,
+                                filename,
+                                file_create_date,
+                                file_year,
+                                file_month,
+                                file_day,
+                                partial_hash=partial_hash,  # Will be None for small files
+                                partial_hash_bytes=partial_hash_bytes if partial_hash else None,
+                                file_size=file_size
+                            )
+
+                            files_processed += 1
+                            files_since_last_commit += 1
+
+                            # Periodic commit to preserve progress
+                            if batch_size > 0 and files_since_last_commit >= batch_size:
+                                db.commit()
+                                logger.info(f"*** CHECKPOINT: Committed {files_since_last_commit} files to database. Progress: {files_processed}/{len(files)} ***")
+                                files_since_last_commit = 0
+
+                            # Update progress bar after successful processing
+                            pbar.update(1)
+
                     except Exception as e:
-                        logger.exception(f"The hash_file routine failed for {filename} - {e}")
-                        logger.warning(f"Skipping file due to hash failure: {filename}")
-                        continue
-
-                    # Check if hash already exists in database (resume capability)
-                    if db.has_hash(file_hash):
-                        logger.info(f"File hash already in database (from previous run or duplicate): {filename}")
-                        files_skipped += 1
-                        duplicate_file = {}
-                        duplicate_file["file_hash"] = file_hash
-                        duplicate_file["file_path"] = filename
-                        duplicate_file["file_create_datetime"] = "N/A"
-                        duplicate_files.append(duplicate_file)
-                        files_processed += 1
-                        continue
-
-                    # Check against in-memory hash list
-                    if file_hash in hashes:
-                        logger.info(f"The source file {filename} is a duplicate (in current batch)!")
-                        duplicate_file = {}
-                        duplicate_file["file_hash"] = file_hash
-                        duplicate_file["file_path"] = filename
-                        duplicate_file["file_create_datetime"] = "N/A"
-                        duplicate_files.append(duplicate_file)
-                        files_processed += 1
-                    else:
-                        logger.info(f"The source file {filename} is NOT a duplicate - adding to database")
-                        # Add the new photo hash to the in-memory list
-                        hashes.append(file_hash)
-
-                        # Get the create date of the new file
-                        file_year, file_month, file_day = get_creation_date(filename)
-                        file_create_date = f"{file_year}-{file_month}-{file_day}"
-
-                        original_file = {}
-                        original_file["file_hash"] = file_hash
-                        original_file["file_path"] = filename
-                        original_file["file_create_datetime"] = file_create_date
-                        original_file["file_create_year"] = file_year
-                        original_file["file_create_month"] = file_month
-                        original_file["file_create_day"] = file_day
-
-                        original_files.append(original_file)
-
-                        # Add the new photo to the database
-                        db.insert_unique_photo(
-                            original_file['file_hash'],
-                            original_file['file_path'],
-                            original_file['file_create_datetime'],
-                            original_file['file_create_year'],
-                            original_file['file_create_month'],
-                            original_file['file_create_day']
-                        )
-
-                        files_processed += 1
-                        files_since_last_commit += 1
-
-                        # Periodic commit to preserve progress
-                        if batch_size > 0 and files_since_last_commit >= batch_size:
-                            db.commit()
-                            logger.info(f"*** CHECKPOINT: Committed {files_since_last_commit} files to database. Progress: {files_processed}/{len(files)} ***")
-                            files_since_last_commit = 0
-
-                except Exception as e:
-                    logger.exception(f"Error processing file {filename}: {e}")
-                    logger.warning(f"Continuing with next file despite error in {filename}")
-                    # Continue processing other files even if one fails
+                        logger.exception(f"Error processing file {filename}: {e}")
+                        logger.warning(f"Continuing with next file despite error in {filename}")
+                        pbar.update(1)
+                        # Continue processing other files even if one fails
 
             # Final commit for any remaining uncommitted changes
             if files_since_last_commit > 0:
@@ -569,14 +806,25 @@ def find_duplicates(files, hashes, database_path='PhotoDB.db', batch_size=100):
             logger.info(f"Unique files added: {len(original_files)}")
             logger.info(f"Duplicates found: {len(duplicate_files)}")
             logger.info(f"Files skipped (already in DB): {files_skipped}")
+            if photo_filter and photo_filter.enabled:
+                logger.info(f"Files filtered (non-photos): {len(filtered_files)}")
+                photo_filter.print_statistics()
 
         # Return results
         results = {}
         results["duplicate_files"] = duplicate_files
         results["original_files"] = original_files
+        results["filtered_files"] = filtered_files
         results["status"] = "completed"
         results["files_processed"] = files_processed
         results["files_skipped"] = files_skipped
+
+        # Add filter statistics if filtering was enabled
+        if photo_filter and photo_filter.enabled:
+            results["filter_statistics"] = photo_filter.get_statistics()
+        else:
+            results["filter_statistics"] = None
+
         return results
 
     except Exception as duplicate_e:

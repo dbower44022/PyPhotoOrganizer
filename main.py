@@ -68,9 +68,11 @@ import pillow_heif  # https://github.com/bigcat88/pillow_heif
 from PIL.ExifTags import GPSTAGS
 import shutil
 import sys
+from tqdm import tqdm
 
 import DuplicateFileDetection
 import utils
+from config import Config
 
 # Configure logging using shared utility
 logger = utils.setup_logger(__name__, "main_app_error.log")
@@ -133,12 +135,12 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def organize_files(settings_data, files, database_path='PhotoDB.db', batch_size=100):
+def organize_files(config, files, database_path='PhotoDB.db', batch_size=100):
     """
     Organize files by moving or copying them to the Destination directory.
 
     Parameters:
-    settings_data (dict): Dictionary containing configuration settings
+    config (Config): Configuration object containing all settings
     files (list): List of file paths to organize.
     database_path (str): Path to the SQLite database file
     batch_size (int): Number of files to process before committing to database
@@ -150,71 +152,34 @@ def organize_files(settings_data, files, database_path='PhotoDB.db', batch_size=
 
     """
     try:
-        logger.info(f"Initializing organize_files with settings = {settings_data}")
+        logger.info(f"Initializing organize_files")
 
-        # process settings and verify required parameters.
-        ready_to_process = True
+        # Get settings from config object (already validated with defaults)
         total_files_processed = 0
         total_new_original_files = 0
         current_file_being_processed = 0
-        response = {}
 
-        if settings_data.get("source_directory"):
-            source_directory = settings_data["source_directory"]
-        else:
-            logger.info("Missing required parameter = source_directory. terminating processing.")
-            ready_to_process = False
-
-        if settings_data.get("destination_directory"):
-            destination_directory = settings_data["destination_directory"]
-        else:
-            logger.info("Missing required parameter = destination_directory. terminating processing.")
-            ready_to_process = False
-
-        if settings_data.get("destination_directory"):
-            destination_directory = settings_data["destination_directory"]
-        else:
-            logger.info("Missing required parameter = destination_directory. terminating processing.")
-            ready_to_process = False
-
-        # process optional parameters and add defaults if necessary.
-        if settings_data.get("group_by_year"):
-            group_by_year = settings_data["group_by_year"]
-        else:
-            group_by_year = True
-
-        if settings_data.get("group_by_day"):
-            group_by_day = settings_data["group_by_day"]
-        else:
-            group_by_day = True
-
-        if settings_data.get("copy_files"):
-            copy_files = settings_data["copy_files"]
-        else:
-            copy_files = True
-
-        if settings_data.get("move_files"):
-            move_files = settings_data["move_files"]
-        else:
-            move_files = False
-
-        if settings_data.get("destination_directory"):
-            destination_directory = settings_data["destination_directory"]
-        else:
-            logger.info("Missing required parameter = destination_directory. terminating processing.")
-
-        if not ready_to_process:
-            logger.error("The required parameters were in included in the passed parameters.  Terminating.")
-            response["status"] = "Error"
-            response["message"] = "Missing a required parameter so no values returned"
-            response["data"] = []
-
-            return response
+        # Extract settings from config
+        source_directory = config.source_directory
+        destination_directory = config.destination_directory
+        group_by_year = config.group_by_year
+        group_by_day = config.group_by_day
+        copy_files = config.copy_files
+        move_files = config.move_files
 
         try:
             hashes = DuplicateFileDetection.load_photo_hashes(database_path)
             logger.info("The load_photo_hashes completed and returned 'hashes' ")
-            results = DuplicateFileDetection.find_duplicates(files, hashes, database_path, batch_size)
+            results = DuplicateFileDetection.find_duplicates(
+                files,
+                hashes,
+                database_path,
+                batch_size,
+                partial_hash_enabled=config.partial_hash_enabled,
+                partial_hash_bytes=config.partial_hash_bytes,
+                partial_hash_min_file_size=config.partial_hash_min_file_size,
+                config=config  # Pass config for photo filtering
+            )
             logger.info(f"The DuplicateFileDetection.find_duplicates returned = {results}")
 
             # verify status of return
@@ -226,6 +191,19 @@ def organize_files(settings_data, files, database_path='PhotoDB.db', batch_size=
             duplicate_files = results['duplicate_files']
             # The files that are NOT duplicates, will be returned in original_files.  These need to be processed to be copied/moved
             original_files = results.get('original_files')
+            filtered_files = results.get('filtered_files', [])
+            filter_stats = results.get('filter_statistics')
+
+            # Log filter statistics if filtering was enabled
+            if filter_stats and filter_stats['total_filtered'] > 0:
+                logger.info("=" * 70)
+                logger.info(f"Photo filtering removed {filter_stats['total_filtered']} non-photo files")
+                logger.info(f"  - By file size: {filter_stats['filtered_by_size']}")
+                logger.info(f"  - By dimensions: {filter_stats['filtered_by_dimensions']}")
+                logger.info(f"  - By square icon: {filter_stats['filtered_by_square']}")
+                logger.info(f"  - By filename pattern: {filter_stats['filtered_by_filename']}")
+                logger.info("=" * 70)
+
             logger.info("Completed locating files to be moved/copied.")
 
         except Exception as e:
@@ -233,103 +211,119 @@ def organize_files(settings_data, files, database_path='PhotoDB.db', batch_size=
 
         if original_files:
             # process the list of original files passed to this routine in the 'files' list.
-            total_files_processed = len(original_files) + len(duplicate_files)
+            total_files_processed = len(original_files) + len(duplicate_files) + len(filtered_files)
             total_new_original_files = len(original_files)
-            logger.info(f"original_files contains new {total_files_processed} Photos, so they will be processed.")
-            for original_file in original_files:
-                current_file_being_processed = current_file_being_processed + 1
-                file_path = original_file["file_path"]
-                logger.info(f"file_path = {file_path}")
-                year, month, day = DuplicateFileDetection.get_creation_date(file_path)
-                # The year, month and day will be returned as strings.
-                if group_by_year:
-                    if group_by_day:
-                        # ex: c:\2024\11\25
-                        destination_folder = os.path.join(
-                            destination_directory, f"{year}", f"{month}", f"{day}"
-                        )
-                    else:
-                        # ex: c:\2024\11
-                        destination_folder = os.path.join(
-                            destination_directory, f"{year}", f"{month}"
-                        )
-                else:
-                    if group_by_day:
-                        # ex: c:\2024-11\25
-                        destination_folder = os.path.join(
-                            destination_directory, f"{year}-{month}", f"{day}"
-                        )
-                    else:
-                        # ex: c:\2024-11
-                        destination_folder = os.path.join(destination_directory, f"{year}-{month}")
+            logger.info(f"Total files examined: {total_files_processed}")
+            logger.info(f"  - New original photos: {len(original_files)}")
+            logger.info(f"  - Duplicates: {len(duplicate_files)}")
+            logger.info(f"  - Filtered (non-photos): {len(filtered_files)}")
+            logger.info(f"original_files contains {total_new_original_files} NEW photos to be processed.")
 
-                logger.info(f"The destination directory was set to: {destination_folder}")
-
-                # now verify if the destination folder exists, and if not, create it.
-                utils.ensure_directory_exists(destination_folder)
-                # join the destination folder with the base file path.
-                target_path = os.path.join(destination_folder, os.path.basename(file_path))
-
-                # now determine if the new file already exists in directory, and if so, verify if it is identical.  There could be two files with same name but different images.
-                if os.path.exists(target_path):
-                    # do a full file comparison of the two files
-                    logger.info(f"About to compare '{file_path}' with '{target_path}'.")
-                    if filecmp.cmp(file_path, target_path, shallow=False):
-                        logger.warning(f"File {target_path} already exists and is identical. Skipping file and continuing with next file.")
-                        continue
-                    else:
-                        ####
-                        # A file already exists in the Sorted file with the same name, but is not identical.  So store both of them so a human can figure out if they are different.
-                        ####
-                        new_target_path = utils.get_unique_filename(target_path)
-                        logger.info(f"File {target_path} already exists and is different. We will write a second file with the name {new_target_path}.")
-                        target_path = new_target_path
-                else:
-                    logger.info("The original file has an original name that is not in the Stored files.  So write the file and continue.")
-
-                try:
-                    if copy_files and not move_files:
-                        # use the copyfile not copy or copy2 in order to maintain the existing hash code of the original file!
-                        shutil.copyfile(file_path, target_path)
-                        logger.info(f"Copied {file_path} to {target_path}")
-                    elif move_files and not copy_files:
-                        # shutil.move(file_path, target_path)  # commented out to prevent damage during testing.
-                        logger.info(f"Moved {file_path} to {target_path}")
-                    else:
-                        logger.info("ERROR - Move and Copy files are not supported simultaneously")
-
-                    # if file = heic convert to jpeg
-                    try:
-                        if file_path.endswith(('.heic', '.heif', '.HEIC', '.HEIF')):
-                            try:
-                                heif_file = pillow_heif.read_heif(file_path)
-                                heic_image = Image.frombytes(
-                                    heif_file.mode,
-                                    heif_file.size,
-                                    heif_file.data,
-                                    "raw",
-                                )
-                            except Exception as e:
-                                logger.error(f"The open file for {file_path} failed with error = {e}")
-
-                            jpeg_file_path = f"{target_path[:-5]}.jpeg"
-                            logger.info(f"The new jpeg_file_path = '{jpeg_file_path}'")
-                            heic_image.save(jpeg_file_path, format("jpeg"))
+            # Progress bar for copying/moving files
+            with tqdm(total=len(original_files), desc="Organizing files", unit="file",
+                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+                for original_file in original_files:
+                    current_file_being_processed = current_file_being_processed + 1
+                    file_path = original_file["file_path"]
+                    pbar.set_postfix_str(os.path.basename(file_path)[:40])
+                    logger.info(f"file_path = {file_path}")
+                    year, month, day = DuplicateFileDetection.get_creation_date(file_path)
+                    # The year, month and day will be returned as strings.
+                    if group_by_year:
+                        if group_by_day:
+                            # ex: c:\2024\11\25
+                            destination_folder = os.path.join(
+                                destination_directory, f"{year}", f"{month}", f"{day}"
+                            )
                         else:
-                            logger.info("The file is NOT a HEIC format.")
+                            # ex: c:\2024\11
+                            destination_folder = os.path.join(
+                                destination_directory, f"{year}", f"{month}"
+                            )
+                    else:
+                        if group_by_day:
+                            # ex: c:\2024-11\25
+                            destination_folder = os.path.join(
+                                destination_directory, f"{year}-{month}", f"{day}"
+                            )
+                        else:
+                            # ex: c:\2024-11
+                            destination_folder = os.path.join(destination_directory, f"{year}-{month}")
+
+                    logger.info(f"The destination directory was set to: {destination_folder}")
+
+                    # now verify if the destination folder exists, and if not, create it.
+                    utils.ensure_directory_exists(destination_folder)
+                    # join the destination folder with the base file path.
+                    target_path = os.path.join(destination_folder, os.path.basename(file_path))
+
+                    # now determine if the new file already exists in directory, and if so, verify if it is identical.  There could be two files with same name but different images.
+                    if os.path.exists(target_path):
+                        # do a full file comparison of the two files
+                        logger.info(f"About to compare '{file_path}' with '{target_path}'.")
+                        if filecmp.cmp(file_path, target_path, shallow=False):
+                            logger.warning(f"File {target_path} already exists and is identical. Skipping file and continuing with next file.")
+                            pbar.update(1)
+                            continue
+                        else:
+                            ####
+                            # A file already exists in the Sorted file with the same name, but is not identical.  So store both of them so a human can figure out if they are different.
+                            ####
+                            new_target_path = utils.get_unique_filename(target_path)
+                            logger.info(f"File {target_path} already exists and is different. We will write a second file with the name {new_target_path}.")
+                            target_path = new_target_path
+                    else:
+                        logger.info("The original file has an original name that is not in the Stored files.  So write the file and continue.")
+
+                    try:
+                        if copy_files and not move_files:
+                            # use the copyfile not copy or copy2 in order to maintain the existing hash code of the original file!
+                            shutil.copyfile(file_path, target_path)
+                            logger.info(f"Copied {file_path} to {target_path}")
+                        elif move_files and not copy_files:
+                            # shutil.move(file_path, target_path)  # commented out to prevent damage during testing.
+                            logger.info(f"Moved {file_path} to {target_path}")
+                        else:
+                            logger.info("ERROR - Move and Copy files are not supported simultaneously")
+
+                        # if file = heic convert to jpeg
+                        try:
+                            if file_path.endswith(('.heic', '.heif', '.HEIC', '.HEIF')):
+                                try:
+                                    heif_file = pillow_heif.read_heif(file_path)
+                                    heic_image = Image.frombytes(
+                                        heif_file.mode,
+                                        heif_file.size,
+                                        heif_file.data,
+                                        "raw",
+                                    )
+                                except Exception as e:
+                                    logger.error(f"The open file for {file_path} failed with error = {e}")
+
+                                jpeg_file_path = f"{target_path[:-5]}.jpeg"
+                                logger.info(f"The new jpeg_file_path = '{jpeg_file_path}'")
+                                heic_image.save(jpeg_file_path, format("jpeg"))
+                            else:
+                                logger.info("The file is NOT a HEIC format.")
+                        except Exception as e:
+                            logger.exception(f"Exception in HEIC conversion = {e}")
+
+                        # image.save("./picture_name.png", format("png"))
+
                     except Exception as e:
-                        logger.exception(f"Exception in HEIC conversion = {e}")
-
-                    # image.save("./picture_name.png", format("png"))
-
-                except Exception as e:
-                    logger.exception(f"Failed to {'copy' if copy_files else 'move'} '{file_path}' to '{target_path}': {e}")
+                        logger.exception(f"Failed to {'copy' if copy_files else 'move'} '{file_path}' to '{target_path}': {e}")
+                    finally:
+                        # Update progress bar after each file (success or failure)
+                        pbar.update(1)
             logger.info(f"Processed {total_files_processed} original files, and located {total_new_original_files} that are not duplicates.")
         else:
-            total_files_processed = len(duplicate_files)
+            total_files_processed = len(duplicate_files) + len(filtered_files)
             total_new_original_files = 0
             logger.info("****************************************************************")
-            logger.info(f"Of the {total_files_processed} files processed, there were ZERO original files located!")
+            logger.info(f"Of the {total_files_processed} files examined, there were ZERO original files located!")
+            logger.info(f"  - All {len(duplicate_files)} files were duplicates")
+            if filtered_files:
+                logger.info(f"  - {len(filtered_files)} files were filtered out as non-photos")
             logger.info("****************************************************************")
 
         organize_files_return = {}
@@ -385,86 +379,35 @@ def main():
     # write settings:
     # write_settings("x")
 
-    # get a list of settings from the JSON file stored in executable directory
-    with open("settings.json", mode="r", encoding="utf-8") as read_file:
-        settings_data = json.load(read_file)
-
-    if "include_subdirectories" in settings_data:
-        logger.info(f"The include_subdirectories setting = {settings_data['include_subdirectories']}")
-    else:
-        settings_data['include_subdirectories'] = True
-
-    if "file_endings" in settings_data:
-        logger.info(f"The file_endings setting = {settings_data['file_endings']}")
-    else:
-        settings_data['file_endings'] = [".jpg", ".jpeg", ".png", ".tif", ".heic"]
-
-    if "source_directory" in settings_data:
-        logger.info(f"The source_directory setting = {settings_data['source_directory']}")
-    else:
-        settings_data['source_directory'] = 'W:\\Mylio_Vault'
-        settings_data['source_directory'] = 'W:\\All Photographs\\2024 Photos'
-
-    if "destination_directory" in settings_data:
-        logger.info(f"The destination_directory setting = {settings_data['destination_directory']}")
-    else:
-        settings_data['destination_directory'] = "I:\\SortedPhotos"
-
-    #  group_by_year = True
-    #         group_by_day = True
-    #         copy_files = True
-    #         move_files = False
-
-    if "group_by_year" in settings_data:
-        logger.info(f"The group_by_year setting = {settings_data['group_by_year']}")
-    else:
-        settings_data['group_by_year'] = True
-
-    if "group_by_day" in settings_data:
-        logger.info(f"The group_by_day setting = {settings_data['group_by_day']}")
-    else:
-        settings_data['group_by_day'] = True
-
-    if "copy_files" in settings_data:
-        logger.info(f"The copy_files setting = {settings_data['copy_files']}")
-    else:
-        settings_data['copy_files'] = True
-
-    if "move_files" in settings_data:
-        logger.info(f"The move_files setting = {settings_data['move_files']}")
-    else:
-        settings_data['move_files'] = False
-
-    if "database_path" in settings_data:
-        logger.info(f"The database_path setting = {settings_data['database_path']}")
-    else:
-        settings_data['database_path'] = "PhotoDB.db"
-
-    if "batch_size" in settings_data:
-        logger.info(f"The batch_size setting = {settings_data['batch_size']}")
-    else:
-        settings_data['batch_size'] = 100
-
-    # Ensure the source directory exists
-    #if not os.path.exists(settings_data['source_directory']):
-    #    logger.error(f"Source directory '{settings_data['source_directory']}' does not exist.")
-    #    return
-    #else:
-    #    logger.info(f"Source directory '{settings_data['source_directory']}' DOES  exist.")
+    # Load configuration using Config class
+    try:
+        config = Config("settings.json")
+        logger.info("Configuration loaded successfully")
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as e:
+        logger.exception(f"Failed to load configuration: {e}")
+        return
 
     # Ensure the Destination directory exists
-    utils.ensure_directory_exists(settings_data['destination_directory'])
+    utils.ensure_directory_exists(config.destination_directory)
 
     # List all files in the source directory
-    files = DuplicateFileDetection.get_file_list(settings_data['source_directory'], settings_data['include_subdirectories'], settings_data['file_endings'])
+    files = DuplicateFileDetection.get_file_list(
+        config.source_directory,
+        config.include_subdirectories,
+        config.file_endings
+    )
     logger.info("#############################################################################")
     logger.info(f"The get_file_list function returned {len(files)} files for processing.")
     logger.info("#############################################################################")
     logger.info(f"The get_file_list function returned =  {files}")
 
-
     # Organize files by moving or copying them to the destination directory
-    organize_files_return = organize_files(settings_data, files, settings_data['database_path'], settings_data['batch_size'])
+    organize_files_return = organize_files(
+        config,
+        files,
+        config.database_path,
+        config.batch_size
+    )
 
 
     logger.info("Completed Processing")
