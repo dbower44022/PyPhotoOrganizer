@@ -1,0 +1,1 @@
+{"source_directory": ["D:\\TestFilesWithoutExtensions"], "destination_directory": "I:\\IcloudBackup-SortedPhotos", "database_path": "PhotoDB.db", "batch_size": 100, "include_subdirectories": true, "file_endings": [".jpg", ".png", ".heic", ".jpeg", ".tif", ".mov", ".mp4"]}
