@@ -1,0 +1,19 @@
+# PyPhotoOrganizer Dependencies
+# Python 3.8+ required
+
+# Image processing and EXIF extraction
+Pillow>=10.0.0
+
+# HEIC/HEIF format support for Apple photos
+pillow-heif>=0.13.0
+
+# Progress bars for long-running operations
+tqdm>=4.65.0
+
+# Standard library modules (no installation needed):
+# - sqlite3 (database for tracking unique file hashes)
+# - hashlib (SHA-256 hashing for duplicate detection)
+# - json (configuration file parsing)
+# - logging (application logging)
+# - os, sys, shutil (file operations)
+# - tempfile (temporary file handling)
