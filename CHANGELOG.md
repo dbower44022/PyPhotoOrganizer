@@ -114,6 +114,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed splash screen not displaying until after heavy imports completed
 - Fixed blocking dialogs during application initialization
 
+**Database Statistics:**
+- Fixed total photos count always showing 0 in Database Tab and Database Selector
+- Added `refresh_total_photos()` method to count photos from UniquePhotos table
+- Automatic count update after processing completes
+- Manual refresh via "Refresh Statistics" button in Database Tab
+- Count now accurately reflects number of unique photos in database
+
 ## [2.0.0] - 2026-01-02
 
 ### Added - GUI Implementation

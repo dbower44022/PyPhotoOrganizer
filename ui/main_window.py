@@ -208,6 +208,12 @@ class MainWindow(QMainWindow):
         self.setup_tab.set_controls_enabled(True)
         self.status_bar.showMessage("Processing complete")
 
+        # Refresh database photo count from UniquePhotos table
+        if self.database_metadata:
+            self.database_metadata.refresh_total_photos()
+            # Refresh the database tab display to show updated count
+            self.database_tab.refresh_database_info()
+
         # Update results tab
         self.results_tab.display_results(results)
 
