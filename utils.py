@@ -191,6 +191,44 @@ def safe_get_file_size(file_path):
         return None
 
 
+def is_video_file(file_path):
+    """
+    Determine if a file is a video based on its extension.
+
+    Parameters:
+        file_path (str): Path to the file
+
+    Returns:
+        bool: True if file is a video, False otherwise
+
+    Note:
+        Uses the VIDEO_EXTENSIONS constant to determine file type.
+        Returns False for unrecognized extensions.
+    """
+    import constants
+    file_ext = os.path.splitext(file_path)[1].lower()
+    return file_ext in [ext.lower() for ext in constants.VIDEO_EXTENSIONS]
+
+
+def is_photo_file(file_path):
+    """
+    Determine if a file is a photo based on its extension.
+
+    Parameters:
+        file_path (str): Path to the file
+
+    Returns:
+        bool: True if file is a photo, False otherwise
+
+    Note:
+        Uses the PHOTO_EXTENSIONS constant to determine file type.
+        Returns False for unrecognized extensions.
+    """
+    import constants
+    file_ext = os.path.splitext(file_path)[1].lower()
+    return file_ext in [ext.lower() for ext in constants.PHOTO_EXTENSIONS]
+
+
 if __name__ == '__main__':
     """Test the utility functions"""
     print("Testing utils.py")
@@ -212,5 +250,9 @@ if __name__ == '__main__':
 
     # Test format_file_size
     print(f"✓ Format file size: {format_file_size(1536000)}")
+
+    # Test is_video_file
+    print(f"✓ Is video (.mp4): {is_video_file('test.mp4')}")
+    print(f"✓ Is video (.jpg): {is_video_file('test.jpg')}")
 
     print("All tests passed!")
