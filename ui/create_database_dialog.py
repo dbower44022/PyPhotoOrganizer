@@ -6,7 +6,7 @@ Wizard for creating a new photo archive database.
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QLineEdit, QTextEdit, QFileDialog,
-                               QMessageBox, QGroupBox, QFormLayout)
+                               QMessageBox, QGroupBox, QFormLayout, QApplication)
 from PySide6.QtCore import Qt
 from database_metadata import DatabaseMetadata
 import os
@@ -87,6 +87,42 @@ class CreateDatabaseDialog(QDialog):
         archive_group.setLayout(archive_layout)
         layout.addWidget(archive_group)
 
+        # Video Archive Location Group (Optional)
+        video_archive_group = QGroupBox("Video Archive Location (Optional)")
+        video_archive_layout = QVBoxLayout()
+
+        # Enable/disable checkbox
+        self.separate_video_check = QCheckBox("Store videos in a separate location from photos")
+        self.separate_video_check.setToolTip(
+            "When enabled, video files (.mp4, .mov, etc.) will be organized to a different location"
+        )
+        self.separate_video_check.stateChanged.connect(self.toggle_video_archive_controls)
+        video_archive_layout.addWidget(self.separate_video_check)
+
+        video_archive_info = QLabel(
+            "Optional: Set a different location for video files. Useful if you want to\n"
+            "store videos on a different drive or NAS while keeping photos local."
+        )
+        video_archive_info.setWordWrap(True)
+        video_archive_info.setStyleSheet("color: #666; font-size: 11px; margin-bottom: 5px;")
+        video_archive_layout.addWidget(video_archive_info)
+
+        video_select_layout = QHBoxLayout()
+        self.video_archive_edit = QLineEdit()
+        self.video_archive_edit.setPlaceholderText("Select video archive location (optional)...")
+        self.video_archive_edit.setReadOnly(True)
+        self.video_archive_edit.setEnabled(False)
+        video_select_layout.addWidget(self.video_archive_edit)
+
+        self.browse_video_btn = QPushButton("Browse...")
+        self.browse_video_btn.setEnabled(False)
+        self.browse_video_btn.clicked.connect(self.browse_video_archive_location)
+        video_select_layout.addWidget(self.browse_video_btn)
+
+        video_archive_layout.addLayout(video_select_layout)
+        video_archive_group.setLayout(video_archive_layout)
+        layout.addWidget(video_archive_group)
+
         # Database File Location Group
         file_group = QGroupBox("Database File Location")
         file_layout = QVBoxLayout()
@@ -129,6 +165,28 @@ class CreateDatabaseDialog(QDialog):
 
         self.setLayout(layout)
 
+        # Center dialog on parent or screen
+        self.center_on_parent()
+
+    def center_on_parent(self):
+        """Center the dialog on its parent window or screen."""
+        if self.parent():
+            # Center on parent window
+            parent_geometry = self.parent().frameGeometry()
+            dialog_geometry = self.frameGeometry()
+            center_point = parent_geometry.center()
+            dialog_geometry.moveCenter(center_point)
+            self.move(dialog_geometry.topLeft())
+        else:
+            # Center on screen if no parent
+            screen = QApplication.primaryScreen()
+            if screen:
+                screen_geometry = screen.availableGeometry()
+                dialog_geometry = self.frameGeometry()
+                center_point = screen_geometry.center()
+                dialog_geometry.moveCenter(center_point)
+                self.move(dialog_geometry.topLeft())
+
     def update_database_filename(self):
         """Update the database filename based on the name."""
         name = self.name_edit.text().strip()
@@ -152,10 +210,32 @@ class CreateDatabaseDialog(QDialog):
         if folder:
             self.archive_edit.setText(folder)
 
+    def toggle_video_archive_controls(self):
+        """Enable/disable video archive controls based on checkbox."""
+        enabled = self.separate_video_check.isChecked()
+        self.video_archive_edit.setEnabled(enabled)
+        self.browse_video_btn.setEnabled(enabled)
+
+        if not enabled:
+            self.video_archive_edit.clear()
+
+    def browse_video_archive_location(self):
+        """Browse for video archive location."""
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Video Archive Location (Where organized videos will be stored)",
+            os.path.expanduser("~")
+        )
+
+        if folder:
+            self.video_archive_edit.setText(folder)
+
     def validate_inputs(self):
         """Validate user inputs."""
         name = self.name_edit.text().strip()
         archive = self.archive_edit.text().strip()
+        video_archive = self.video_archive_edit.text().strip()
+        separate_video = self.separate_video_check.isChecked()
 
         if not name:
             QMessageBox.warning(
@@ -185,6 +265,35 @@ class CreateDatabaseDialog(QDialog):
             )
             return False
 
+        # Validate video archive if enabled
+        if separate_video:
+            if not video_archive:
+                QMessageBox.warning(
+                    self,
+                    "Missing Video Archive Location",
+                    "You enabled separate video storage but didn't select a location.\n\n"
+                    "Please select a video archive location or uncheck the option."
+                )
+                return False
+
+            if not os.path.isabs(video_archive):
+                QMessageBox.warning(
+                    self,
+                    "Invalid Path",
+                    "Video archive location must be an absolute path.\n\n"
+                    f"Current path: {video_archive}"
+                )
+                return False
+
+            if video_archive == archive:
+                QMessageBox.warning(
+                    self,
+                    "Same Location",
+                    "Video archive location cannot be the same as photo archive location.\n\n"
+                    "Please select a different folder or disable separate video storage."
+                )
+                return False
+
         # Check if archive location exists, offer to create it
         if not os.path.exists(archive):
             response = QMessageBox.question(
@@ -204,6 +313,30 @@ class CreateDatabaseDialog(QDialog):
                         self,
                         "Failed to Create Folder",
                         f"Could not create archive folder:\n\n{str(e)}"
+                    )
+                    return False
+            else:
+                return False
+
+        # Check if video archive location exists (if enabled), offer to create it
+        if separate_video and video_archive and not os.path.exists(video_archive):
+            response = QMessageBox.question(
+                self,
+                "Create Video Archive Folder?",
+                f"The video archive folder does not exist:\n\n{video_archive}\n\n"
+                f"Would you like to create it now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+
+            if response == QMessageBox.Yes:
+                try:
+                    os.makedirs(video_archive, exist_ok=True)
+                except Exception as e:
+                    QMessageBox.critical(
+                        self,
+                        "Failed to Create Folder",
+                        f"Could not create video archive folder:\n\n{str(e)}"
                     )
                     return False
             else:
@@ -233,6 +366,8 @@ class CreateDatabaseDialog(QDialog):
         name = self.name_edit.text().strip()
         description = self.description_edit.toPlainText().strip()
         archive = self.archive_edit.text().strip()
+        video_archive = self.video_archive_edit.text().strip()
+        separate_video = self.separate_video_check.isChecked()
         db_filename = self.filename_label.text()
         db_path = os.path.join(os.getcwd(), db_filename)
 
@@ -248,14 +383,28 @@ class CreateDatabaseDialog(QDialog):
             if success:
                 self.created_database_path = db_path
 
-                QMessageBox.information(
-                    self,
-                    "Database Created",
+                # Set video archive if enabled
+                if separate_video and video_archive:
+                    db_metadata = DatabaseMetadata(db_path)
+                    db_metadata.set_video_archive(video_archive, enabled=True)
+
+                # Build success message
+                success_msg = (
                     f"Successfully created new database:\n\n"
                     f"Name: {name}\n"
                     f"Archive: {archive}\n"
+                )
+                if separate_video and video_archive:
+                    success_msg += f"Video Archive: {video_archive}\n"
+                success_msg += (
                     f"Database: {db_filename}\n\n"
                     f"You can now start organizing your photos!"
+                )
+
+                QMessageBox.information(
+                    self,
+                    "Database Created",
+                    success_msg
                 )
                 self.accept()
             else:

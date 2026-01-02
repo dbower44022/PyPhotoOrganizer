@@ -6,8 +6,8 @@ Implements the main application window with tab-based interface.
 
 from PySide6.QtWidgets import (QMainWindow, QTabWidget, QMessageBox,
                                QApplication, QStatusBar)
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
+from PySide6.QtCore import Qt, QSettings, QRect, QPoint, QTimer
+from PySide6.QtGui import QAction, QScreen
 import sys
 
 from ui.setup_tab import SetupTab
@@ -25,20 +25,37 @@ from database_metadata import DatabaseMetadata
 class MainWindow(QMainWindow):
     """Main application window with tab-based interface."""
 
-    def __init__(self):
+    def __init__(self, splash_callback=None):
         super().__init__()
         self.worker = None
         self.current_database_path = None
         self.database_metadata = None
+        self.settings = QSettings("PyPhotoOrganizer", "MainWindow")
+        self.splash_callback = splash_callback
+
+        if self.splash_callback:
+            self.splash_callback("Creating tabs...")
+
         self.init_ui()
 
-        # Show database selector - user must select database before proceeding
-        self.select_database_on_startup()
+        if self.splash_callback:
+            self.splash_callback("Restoring window position...")
+
+        # Restore window geometry or center on screen
+        self.restore_window_geometry()
+
+        if self.splash_callback:
+            self.splash_callback("Loading settings...")
+
+        # Show database selector - deferred until after splash closes
+        # Use QTimer to show it after the splash screen finishes
+        QTimer.singleShot(100, self.select_database_on_startup)
 
     def init_ui(self):
         """Initialize the user interface."""
         self.setWindowTitle("PyPhotoOrganizer")
-        self.setGeometry(100, 100, 1200, 800)
+        # Set default size (will be overridden by restore_window_geometry if saved position exists)
+        self.resize(1200, 800)
 
         # Create menu bar
         self._create_menu_bar()
@@ -284,6 +301,76 @@ class MainWindow(QMainWindow):
         """Handle database change from Database tab."""
         self.set_database(new_database_path)
 
+    def restore_window_geometry(self):
+        """
+        Restore window geometry from saved settings.
+        If no saved geometry exists, center the window on screen.
+        Ensures window title bar is always accessible.
+        """
+        # Try to restore saved geometry
+        geometry = self.settings.value("geometry")
+
+        if geometry:
+            # Restore saved geometry
+            self.restoreGeometry(geometry)
+
+            # Ensure window is within screen bounds
+            self.ensure_window_on_screen()
+        else:
+            # No saved geometry - center window on screen
+            self.center_on_screen()
+
+    def center_on_screen(self):
+        """Center the window on the primary screen."""
+        screen = QApplication.primaryScreen()
+        if screen:
+            screen_geometry = screen.availableGeometry()
+            window_geometry = self.frameGeometry()
+
+            # Calculate center point
+            center_point = screen_geometry.center()
+            window_geometry.moveCenter(center_point)
+
+            # Move window to centered position
+            self.move(window_geometry.topLeft())
+
+    def ensure_window_on_screen(self):
+        """
+        Ensure the window's title bar is accessible and on screen.
+        Adjusts position if window is off-screen.
+        """
+        screen = QApplication.primaryScreen()
+        if not screen:
+            return
+
+        screen_geometry = screen.availableGeometry()
+        window_geometry = self.frameGeometry()
+
+        # Minimum visible title bar height (50 pixels)
+        min_title_bar_visible = 50
+
+        # Adjust horizontal position
+        if window_geometry.left() < screen_geometry.left():
+            # Window is too far left
+            self.move(screen_geometry.left(), window_geometry.top())
+            window_geometry = self.frameGeometry()
+        elif window_geometry.right() > screen_geometry.right():
+            # Window is too far right
+            self.move(screen_geometry.right() - window_geometry.width(), window_geometry.top())
+            window_geometry = self.frameGeometry()
+
+        # Adjust vertical position - ensure title bar is visible
+        if window_geometry.top() < screen_geometry.top():
+            # Window is too far up - title bar not accessible
+            self.move(window_geometry.left(), screen_geometry.top())
+        elif window_geometry.top() > screen_geometry.bottom() - min_title_bar_visible:
+            # Window is too far down - move it up
+            self.move(window_geometry.left(), screen_geometry.bottom() - min_title_bar_visible)
+
+    def save_window_geometry(self):
+        """Save current window geometry to settings."""
+        self.settings.setValue("geometry", self.saveGeometry())
+
     def closeEvent(self, event):
         """Handle window close event."""
         if self.worker and self.worker.isRunning():
@@ -295,8 +382,10 @@ class MainWindow(QMainWindow):
             if response == QMessageBox.Yes:
                 self.worker.stop()
                 self.worker.wait()  # Wait for thread to finish
+                self.save_window_geometry()  # Save position before closing
                 event.accept()
             else:
                 event.ignore()
         else:
+            self.save_window_geometry()  # Save position before closing
             event.accept()

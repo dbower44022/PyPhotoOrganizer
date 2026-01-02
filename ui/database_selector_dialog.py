@@ -6,7 +6,7 @@ Allows users to select an existing database or create a new one.
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QListWidget, QListWidgetItem,
-                               QMessageBox, QTextEdit)
+                               QMessageBox, QTextEdit, QApplication)
 from PySide6.QtCore import Qt, Signal
 from database_metadata import DatabaseMetadata
 import os
@@ -84,6 +84,28 @@ class DatabaseSelectorDialog(QDialog):
         layout.addLayout(button_layout)
 
         self.setLayout(layout)
+
+        # Center dialog on parent or screen
+        self.center_on_parent()
+
+    def center_on_parent(self):
+        """Center the dialog on its parent window or screen."""
+        if self.parent():
+            # Center on parent window
+            parent_geometry = self.parent().frameGeometry()
+            dialog_geometry = self.frameGeometry()
+            center_point = parent_geometry.center()
+            dialog_geometry.moveCenter(center_point)
+            self.move(dialog_geometry.topLeft())
+        else:
+            # Center on screen if no parent
+            screen = QApplication.primaryScreen()
+            if screen:
+                screen_geometry = screen.availableGeometry()
+                dialog_geometry = self.frameGeometry()
+                center_point = screen_geometry.center()
+                dialog_geometry.moveCenter(center_point)
+                self.move(dialog_geometry.topLeft())
 
     def load_databases(self):
         """Load and display available databases."""

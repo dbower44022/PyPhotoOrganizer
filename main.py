@@ -256,26 +256,44 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                     logger.info(f"file_path = {file_path}")
                     year, month, day = DuplicateFileDetection.get_creation_date(file_path)
                     # The year, month and day will be returned as strings.
+
+                    # Determine base destination directory (photo archive or video archive)
+                    # Check if file is a video and if separate video archive is enabled
+                    from database_metadata import DatabaseMetadata
+                    db_meta = DatabaseMetadata(database_path)
+                    is_video = utils.is_video_file(file_path)
+                    video_archive_enabled = db_meta.is_separate_video_archive_enabled()
+                    video_archive_location = db_meta.get_video_archive_location()
+
+                    if is_video and video_archive_enabled and video_archive_location:
+                        # Route video to video archive
+                        base_destination = video_archive_location
+                        logger.info(f"Routing video file to video archive: {base_destination}")
+                    else:
+                        # Route to photo archive (default)
+                        base_destination = destination_directory
+                        logger.debug(f"Routing file to photo archive: {base_destination}")
+
                     if group_by_year:
                         if group_by_day:
                             # ex: c:\2024\11\25
                             destination_folder = os.path.join(
-                                destination_directory, f"{year}", f"{month}", f"{day}"
+                                base_destination, f"{year}", f"{month}", f"{day}"
                             )
                         else:
                             # ex: c:\2024\11
                             destination_folder = os.path.join(
-                                destination_directory, f"{year}", f"{month}"
+                                base_destination, f"{year}", f"{month}"
                             )
                     else:
                         if group_by_day:
                             # ex: c:\2024-11\25
                             destination_folder = os.path.join(
-                                destination_directory, f"{year}-{month}", f"{day}"
+                                base_destination, f"{year}-{month}", f"{day}"
                             )
                         else:
                             # ex: c:\2024-11
-                            destination_folder = os.path.join(destination_directory, f"{year}-{month}")
+                            destination_folder = os.path.join(base_destination, f"{year}-{month}")
 
                     logger.info(f"The destination directory was set to: {destination_folder}")
 
