@@ -85,6 +85,10 @@ VALID_IMAGE_EXTENSIONS = ['.jpg', '.png', '.gif', '.tif', '.bmp', '.webp', '.ico
 # Default file extensions to process
 DEFAULT_FILE_ENDINGS = ['.jpg', '.jpeg', '.png', '.heic', '.tif', '.mov', '.mp4']
 
+# Default excluded filename patterns (for photo filtering)
+# Files with these patterns in their names are likely icons/thumbnails/web graphics
+DEFAULT_EXCLUDED_PATTERNS = ['favicon', 'icon', 'logo', 'thumb', 'button', 'badge', 'sprite']
+
 # HEIC/HEIF file extensions (Apple photos)
 HEIC_EXTENSIONS = ('.heic', '.heif', '.HEIC', '.HEIF')
 

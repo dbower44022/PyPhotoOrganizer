@@ -66,15 +66,16 @@ class Config:
         'destination_directory',
     ]
 
-    def __init__(self, config_file: str = 'settings.json'):
+    def __init__(self, config_file: str = 'settings.json', settings_dict: Dict[str, Any] = None):
         """
-        Initialize configuration from JSON file.
+        Initialize configuration from JSON file or dictionary.
 
         Parameters:
-            config_file (str): Path to the JSON configuration file
+            config_file (str): Path to the JSON configuration file (default: 'settings.json')
+            settings_dict (dict): Optional dictionary of settings (bypasses file loading)
 
         Raises:
-            FileNotFoundError: If config file doesn't exist
+            FileNotFoundError: If config file doesn't exist and settings_dict not provided
             json.JSONDecodeError: If config file is invalid JSON
             ValueError: If required settings are missing
         """
@@ -82,7 +83,15 @@ class Config:
         self._settings: Dict[str, Any] = {}
         self.logger = logging.getLogger(__name__)
 
-        self.load()
+        # Load from dictionary if provided, otherwise from file
+        if settings_dict is not None:
+            # Start with defaults, then overlay provided settings
+            self._settings = self.DEFAULTS.copy()
+            self._settings.update(settings_dict)
+            self.logger.info("Configuration loaded from dictionary")
+        else:
+            self.load()
+
         self.validate()
 
     def load(self) -> None:
