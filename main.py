@@ -136,7 +136,7 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME, batch_size=constants.DEFAULT_BATCH_SIZE):
+def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME, batch_size=constants.DEFAULT_BATCH_SIZE, progress_callback=None):
     """
     Organize files by moving or copying them to the Destination directory.
 
@@ -145,6 +145,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
     files (list): List of file paths to organize.
     database_path (str): Path to the SQLite database file
     batch_size (int): Number of files to process before committing to database
+    progress_callback (callable): Optional callback function(organized, total, current_file, bytes_copied, total_bytes) for progress updates
 
     Returns:
     dict: Dictionary containing:
@@ -220,13 +221,38 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             logger.info(f"  - Filtered (non-photos): {len(filtered_files)}")
             logger.info(f"original_files contains {total_new_original_files} NEW photos to be processed.")
 
+            # Calculate total bytes for progress tracking (used by GUI)
+            total_bytes = 0
+            if progress_callback:
+                try:
+                    for f in original_files:
+                        fp = f["file_path"]
+                        if os.path.exists(fp):
+                            total_bytes += os.path.getsize(fp)
+                except:
+                    total_bytes = 0  # If calculation fails, just use 0
+
             # Progress bar for copying/moving files
+            bytes_copied = 0
             with tqdm(total=len(original_files), desc="Organizing files", unit="file",
                      bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
                 for original_file in original_files:
                     current_file_being_processed = current_file_being_processed + 1
                     file_path = original_file["file_path"]
                     pbar.set_postfix_str(os.path.basename(file_path)[:constants.MAX_FILENAME_DISPLAY_LENGTH])
+
+                    # Progress callback for GUI
+                    if progress_callback:
+                        progress_callback(current_file_being_processed, len(original_files),
+                                        file_path, bytes_copied, total_bytes)
+
+                    # Track bytes for next iteration
+                    if progress_callback and os.path.exists(file_path):
+                        try:
+                            bytes_copied += os.path.getsize(file_path)
+                        except:
+                            pass
+
                     logger.info(f"file_path = {file_path}")
                     year, month, day = DuplicateFileDetection.get_creation_date(file_path)
                     # The year, month and day will be returned as strings.

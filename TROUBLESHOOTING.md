@@ -725,10 +725,156 @@ Run through this checklist for optimal performance:
 
 ---
 
+---
+
+## GUI Issues
+
+### GUI Won't Launch
+
+**Problem:** `python main_gui.py` fails
+
+**Solutions:**
+
+**1. PySide6 not installed**
+```bash
+# Check if installed
+python3 -c "import PySide6; print('OK')"
+
+# Install if missing
+pip install PySide6>=6.4.0
+```
+
+**2. No display available (headless system)**
+```bash
+# Check DISPLAY variable
+echo $DISPLAY
+
+# Solution: Use CLI instead
+python main.py
+```
+
+**3. Import errors**
+```bash
+# Ensure you're in correct directory
+cd /path/to/PyPhotoOrganizer
+python main_gui.py
+```
+
+---
+
+### GUI Freezes During Processing
+
+**Problem:** GUI becomes unresponsive
+
+**Diagnosis:**
+- This should NOT happen (worker thread design)
+- If it does, there's a bug
+
+**Solutions:**
+1. Check Logs tab for errors
+2. Check `main_app_error.log` for exceptions
+3. Kill and restart: `Ctrl+C` then relaunch
+4. Processing should resume from last checkpoint
+
+---
+
+### Progress Not Updating
+
+**Problem:** Progress bars stuck at 0%
+
+**Possible Causes:**
+
+**1. No files to process**
+- Check source directories exist
+- Check file extensions match `file_endings` setting
+
+**2. Worker thread crashed**
+- Check Logs tab for errors
+- Look for red error messages
+
+**3. Callback not being invoked**
+- Check `main_app_error.log`
+- Should see progress messages
+
+---
+
+### Settings Won't Save
+
+**Problem:** Settings changes don't persist
+
+**Solution:**
+1. Click "Save to File" button in Settings tab
+2. Check file permissions on `settings.json`
+3. Verify JSON is valid (click "Validate Settings")
+
+---
+
+### Export Results Fails
+
+**Problem:** Can't export to CSV/JSON
+
+**Solutions:**
+- Check destination folder has write permissions
+- Ensure filename doesn't contain invalid characters
+- Check disk space available
+
+---
+
+### Log Viewer Empty
+
+**Problem:** Logs tab shows no entries
+
+**Solutions:**
+1. Click "Refresh" button
+2. Check log file exists: `ls main_app_error.log`
+3. Start processing to generate new logs
+4. Check log level filter (set to "All")
+
+---
+
+### Time Estimates Inaccurate
+
+**Problem:** "Remaining time" is way off
+
+**Expected Behavior:**
+- First 10-20 seconds: "Calculating..."
+- After warmup: Should be accurate within ±20%
+- Large files may cause temporary spikes
+
+**Not a bug:** EMA algorithm needs time to stabilize
+
+---
+
+### GUI Specific Error Messages
+
+**Error: "QApplication: Cannot create a QApplication"**
+
+**Solution:** Already running a Qt application
+```bash
+# Kill existing instance
+killall python main_gui.py
+# Or restart system
+```
+
+**Error: "qt.qpa.plugin: Could not load the Qt platform plugin"**
+
+**Solution:** Missing Qt platform plugin
+```bash
+# Ubuntu/Debian
+sudo apt install libxcb-xinerama0
+
+# Or reinstall PySide6
+pip uninstall PySide6
+pip install PySide6
+```
+
+---
+
 **Still having issues?** Check:
 - [README.md](README.md) - Overview
 - [CONFIGURATION.md](CONFIGURATION.md) - Settings
 - [API.md](API.md) - Code reference
+- [GUI_TESTING_GUIDE.md](GUI_TESTING_GUIDE.md) - GUI testing procedures
 - [GitHub Issues](https://github.com/your-repo/issues)
 
 ---

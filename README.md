@@ -11,15 +11,24 @@ PyPhotoOrganizer helps you consolidate photos from multiple devices and location
 
 ### Key Features
 
+**Core Features:**
 - **Intelligent Duplicate Detection**: Two-stage SHA-256 hashing with partial hash optimization for large files
 - **Photo Filtering**: Automatically excludes icons, thumbnails, and web graphics
 - **Date-Based Organization**: Organizes files by creation date (YYYY/MM/DD structure)
 - **HEIC Support**: Converts Apple HEIC/HEIF images to JPEG with metadata preservation
 - **Resume Capability**: Batch commits allow safe interruption and resumption of long-running processes
-- **Progress Tracking**: Real-time progress bars for all operations
 - **File Type Verification**: Validates file extensions match actual file format
 - **Multiple Source Support**: Process multiple directories in a single run
 - **Flexible Operations**: Copy or move files to destination
+
+**GUI Features (New in v2.0):**
+- **Graphical Interface**: Full-featured PySide6 GUI with tab-based navigation
+- **Real-Time Progress**: Live updates with accurate time estimates using EMA algorithm
+- **Easy Folder Selection**: Browse buttons for quick source/destination configuration
+- **Settings Editor**: Interactive configuration with live preview and validation
+- **Results Dashboard**: Statistics, breakdowns, and CSV/JSON export capabilities
+- **Integrated Log Viewer**: Real-time logs with filtering, search, and auto-scroll
+- **Responsive Design**: Background worker thread keeps UI responsive during processing
 
 ### Use Cases
 
@@ -49,6 +58,23 @@ pip install -r requirements.txt
 
 ### Basic Usage
 
+**Option A: Graphical Interface (Recommended)**
+
+```bash
+python main_gui.py
+```
+
+**GUI Workflow:**
+1. **Setup Tab**: Click "Add Folder..." to select source directories
+2. **Setup Tab**: Click "Browse..." to select destination directory
+3. **Settings Tab** (optional): Adjust batch size, filtering, and organization settings
+4. **Setup Tab**: Click "Start Processing"
+5. **Progress Tab**: Monitor real-time progress with time estimates
+6. **Results Tab**: View statistics and export results to CSV/JSON
+7. **Logs Tab**: Check detailed processing logs
+
+**Option B: Command Line Interface**
+
 1. **Create configuration file** (`settings.json`):
 
 ```json
@@ -77,11 +103,13 @@ Organizing files: 100%|████████| 850/850 [02:15<00:00, 6.3file/s
 
 📚 **Comprehensive guides available:**
 
-- **[Architecture Guide](ARCHITECTURE.md)** - System design and technical details
+- **[Architecture Guide](ARCHITECTURE.md)** - System design and technical details (includes GUI architecture)
 - **[Configuration Guide](CONFIGURATION.md)** - Complete settings reference
 - **[API Documentation](API.md)** - Code reference and API details
 - **[Development Guide](DEVELOPMENT.md)** - Contributing and development setup
-- **[Troubleshooting](TROUBLESHOOTING.md)** - Common issues and solutions
+- **[Troubleshooting](TROUBLESHOOTING.md)** - Common issues and solutions (includes GUI troubleshooting)
+- **[Quick Reference](QUICKREF.md)** - One-page cheat sheet (includes GUI commands)
+- **[GUI Testing Guide](GUI_TESTING_GUIDE.md)** - Comprehensive GUI testing procedures
 
 ## How It Works
 
@@ -344,18 +372,26 @@ MIT License - See LICENSE file for details
 
 ## Roadmap
 
+### Completed Features (v2.0)
+
+- [x] GUI interface with PySide6
+- [x] Real-time progress tracking with time estimates
+- [x] Interactive settings management
+- [x] Export duplicate report (JSON/CSV)
+- [x] Integrated log viewer
+
 ### Planned Features
 
-- [ ] Cross-platform path support (Linux/macOS)
-- [ ] GUI interface
+- [ ] Cross-platform path support improvements (Linux/macOS)
 - [ ] Parallel processing for multi-core systems
 - [ ] Video metadata extraction
 - [ ] Automatic database backup
 - [ ] Undo/rollback functionality
 - [ ] Duplicate file deletion mode
-- [ ] Export duplicate report
 - [ ] Cloud storage support (Google Photos, iCloud)
 - [ ] Machine learning for photo quality scoring
+- [ ] Dark theme for GUI
+- [ ] Pause/Resume functionality in GUI
 
 ---
 

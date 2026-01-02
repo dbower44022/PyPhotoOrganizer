@@ -1,6 +1,6 @@
 # Quick Reference Guide
 
-> One-page cheat sheet for PyPhotoOrganizer
+> One-page cheat sheet for PyPhotoOrganizer (GUI + CLI)
 
 **Last Updated:** 2026-01-02
 
@@ -12,9 +12,31 @@
 pip install -r requirements.txt
 ```
 
+This installs:
+- Pillow (image processing)
+- pillow-heif (HEIC support)
+- tqdm (CLI progress bars)
+- PySide6 (GUI interface)
+
 ---
 
 ## Quick Start
+
+### GUI Mode (Recommended)
+
+**Launch:**
+```bash
+python main_gui.py
+```
+
+**Workflow:**
+1. **Setup Tab** → Add source folders → Select destination
+2. **Settings Tab** (optional) → Adjust configuration
+3. **Setup Tab** → Click "Start Processing"
+4. **Progress Tab** → Monitor real-time progress
+5. **Results Tab** → View statistics and export
+
+### CLI Mode
 
 **1. Create settings.json:**
 ```json
@@ -135,7 +157,12 @@ python main.py
 
 ## Commands
 
-### Run Application
+### Run GUI
+```bash
+python main_gui.py
+```
+
+### Run CLI
 ```bash
 python main.py
 ```
@@ -153,6 +180,8 @@ SELECT COUNT(*) FROM UniquePhotos;
 type main_app_error.log
 # Linux/Mac
 tail -f main_app_error.log
+
+# Or use GUI Logs tab for real-time viewing
 ```
 
 ---
@@ -380,6 +409,40 @@ Everything else uses defaults from `constants.py`.
 
 ---
 
+## GUI Quick Reference
+
+### Setup Tab
+- **Add Folder**: Select source directories
+- **Remove Selected**: Remove selected source
+- **Browse**: Choose destination directory
+- **Copy/Move**: Choose operation mode
+- **Start/Stop**: Control processing
+
+### Progress Tab
+- **Overall Progress**: Total completion percentage
+- **Stage Progress**: Current stage (Scanning/Processing/Organizing)
+- **Time Estimates**: Elapsed and remaining time
+- **Status Log**: Recent events with timestamps
+
+### Results Tab
+- **Summary Statistics**: Files examined, originals, duplicates, filtered
+- **Breakdown Tree**: Expandable categories
+- **Export Results**: Save to JSON or CSV
+
+### Logs Tab
+- **Level Filter**: Filter by DEBUG/INFO/WARNING/ERROR
+- **Search**: Find specific log entries
+- **Auto-scroll**: Follow latest logs
+- **Refresh**: Reload from log files
+
+### Settings Tab
+- **Load/Save**: Manage settings.json
+- **Restore Defaults**: Reset to defaults
+- **Validate**: Check settings validity
+- **Preview**: See folder structure example
+
+---
+
 ## Getting Help
 
 **Documentation:**
@@ -389,6 +452,7 @@ Everything else uses defaults from `constants.py`.
 - [API.md](API.md) - Code reference
 - [DEVELOPMENT.md](DEVELOPMENT.md) - Contributing
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) - Fix issues
+- [GUI_TESTING_GUIDE.md](GUI_TESTING_GUIDE.md) - GUI testing
 
 **Support:**
 - GitHub Issues
