@@ -73,6 +73,7 @@ from tqdm import tqdm
 import DuplicateFileDetection
 import utils
 from config import Config
+import constants
 
 # Configure logging using shared utility
 logger = utils.setup_logger(__name__, "main_app_error.log")
@@ -135,7 +136,7 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def organize_files(config, files, database_path='PhotoDB.db', batch_size=100):
+def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME, batch_size=constants.DEFAULT_BATCH_SIZE):
     """
     Organize files by moving or copying them to the Destination directory.
 
@@ -225,7 +226,7 @@ def organize_files(config, files, database_path='PhotoDB.db', batch_size=100):
                 for original_file in original_files:
                     current_file_being_processed = current_file_being_processed + 1
                     file_path = original_file["file_path"]
-                    pbar.set_postfix_str(os.path.basename(file_path)[:40])
+                    pbar.set_postfix_str(os.path.basename(file_path)[:constants.MAX_FILENAME_DISPLAY_LENGTH])
                     logger.info(f"file_path = {file_path}")
                     year, month, day = DuplicateFileDetection.get_creation_date(file_path)
                     # The year, month and day will be returned as strings.
@@ -288,7 +289,7 @@ def organize_files(config, files, database_path='PhotoDB.db', batch_size=100):
 
                         # if file = heic convert to jpeg
                         try:
-                            if file_path.endswith(('.heic', '.heif', '.HEIC', '.HEIF')):
+                            if file_path.endswith(constants.HEIC_EXTENSIONS):
                                 try:
                                     heif_file = pillow_heif.read_heif(file_path)
                                     heic_image = Image.frombytes(

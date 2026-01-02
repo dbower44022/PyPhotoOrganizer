@@ -10,6 +10,8 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
+import constants
+
 
 class Config:
     """
@@ -32,26 +34,26 @@ class Config:
     DEFAULTS = {
         'source_directory': [],
         'destination_directory': '',
-        'database_path': 'PhotoDB.db',
-        'batch_size': 100,
+        'database_path': constants.DEFAULT_DATABASE_NAME,
+        'batch_size': constants.DEFAULT_BATCH_SIZE,
         'include_subdirectories': True,
-        'file_endings': ['.jpg', '.jpeg', '.png', '.heic', '.tif', '.mov', '.mp4'],
+        'file_endings': constants.DEFAULT_FILE_ENDINGS,
         'group_by_year': True,
         'group_by_day': True,
         'copy_files': True,
         'move_files': False,
         # Partial hashing optimization (for large files)
         'partial_hash_enabled': True,
-        'partial_hash_bytes': 16384,  # 16KB - good balance of speed vs accuracy
-        'partial_hash_min_file_size': 1048576,  # 1MB - only use partial hash for files >= 1MB
+        'partial_hash_bytes': constants.PARTIAL_HASH_BYTES,  # 16KB - good balance of speed vs accuracy
+        'partial_hash_min_file_size': constants.PARTIAL_HASH_MIN_FILE_SIZE,  # 1MB - only use partial hash for files >= 1MB
         # Photo filtering (exclude icons, web graphics, thumbnails)
         'photo_filter_enabled': True,
-        'min_file_size': 51200,  # 50KB - real photos are usually larger
-        'min_width': 800,  # Minimum width in pixels
-        'min_height': 600,  # Minimum height in pixels
-        'max_width': 50000,  # Maximum width (exclude huge graphics)
-        'max_height': 50000,  # Maximum height
-        'exclude_square_smaller_than': 400,  # Exclude squares < 400x400 (likely icons)
+        'min_file_size': constants.MIN_PHOTO_FILE_SIZE,  # 50KB - real photos are usually larger
+        'min_width': constants.MIN_PHOTO_WIDTH,  # Minimum width in pixels
+        'min_height': constants.MIN_PHOTO_HEIGHT,  # Minimum height in pixels
+        'max_width': constants.MAX_PHOTO_WIDTH,  # Maximum width (exclude huge graphics)
+        'max_height': constants.MAX_PHOTO_HEIGHT,  # Maximum height
+        'exclude_square_smaller_than': constants.MIN_SQUARE_SIZE,  # Exclude squares < 400x400 (likely icons)
         'require_exif': False,  # If True, only accept images with EXIF data
         'excluded_filename_patterns': ['favicon', 'icon', 'logo', 'thumb', 'button', 'badge', 'sprite'],
         'move_filtered_files': False,  # If True, move filtered files to separate folder
@@ -191,7 +193,7 @@ class Config:
         Ensures paths don't contain potentially dangerous patterns like '..'
         which could be used to access files outside intended directories.
         """
-        dangerous_patterns = ['..']
+        dangerous_patterns = constants.DANGEROUS_PATH_PATTERNS
 
         # Validate all source directories
         for source_dir in self._settings['source_directory']:
