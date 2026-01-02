@@ -84,7 +84,8 @@ class ProcessingWorker(QThread):
                 'total_duplicates': final_results.get('total_duplicates', 0),
                 'total_filtered': final_results.get('total_filtered', 0),
                 'processing_time': processing_time,
-                'filter_statistics': final_results.get('filter_statistics', {})
+                'filter_statistics': final_results.get('filter_statistics', {}),
+                'filtered_files': final_results.get('filtered_files', [])
             }
 
             self.status_update.emit("info", "Processing complete!")

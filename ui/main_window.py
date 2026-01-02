@@ -16,6 +16,7 @@ from ui.results_tab import ResultsTab
 from ui.logs_tab import LogsTab
 from ui.settings_tab import SettingsTab
 from ui.database_tab import DatabaseTab
+from ui.filtered_files_tab import FilteredFilesTab
 from ui.database_selector_dialog import DatabaseSelectorDialog
 from ui.worker import ProcessingWorker
 from database_metadata import DatabaseMetadata
@@ -55,6 +56,7 @@ class MainWindow(QMainWindow):
         self.setup_tab = SetupTab()
         self.progress_tab = ProgressTab()
         self.results_tab = ResultsTab()
+        self.filtered_files_tab = FilteredFilesTab()
         self.logs_tab = LogsTab()
         self.settings_tab = SettingsTab()
         self.database_tab = DatabaseTab()
@@ -63,6 +65,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.setup_tab, "Setup")
         self.tabs.addTab(self.progress_tab, "Progress")
         self.tabs.addTab(self.results_tab, "Results")
+        self.tabs.addTab(self.filtered_files_tab, "Filtered Files")
         self.tabs.addTab(self.logs_tab, "Logs")
         self.tabs.addTab(self.settings_tab, "Settings")
         self.tabs.addTab(self.database_tab, "Database")
@@ -190,6 +193,11 @@ class MainWindow(QMainWindow):
 
         # Update results tab
         self.results_tab.display_results(results)
+
+        # Update filtered files tab
+        filtered_files = results.get('filtered_files', [])
+        filter_statistics = results.get('filter_statistics', {})
+        self.filtered_files_tab.display_filtered_files(filtered_files, filter_statistics)
 
         # Switch to results tab
         self.tabs.setCurrentWidget(self.results_tab)

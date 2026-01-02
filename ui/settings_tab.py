@@ -141,6 +141,68 @@ class SettingsTab(QWidget):
         filter_group.setLayout(filter_layout)
         layout.addWidget(filter_group)
 
+        # Filename Pattern Filtering
+        pattern_group = QGroupBox("Filename Pattern Filtering")
+        pattern_layout = QVBoxLayout()
+
+        # Description
+        pattern_desc = QLabel(
+            "Files containing these patterns in their filename will be filtered out.\n"
+            "Common examples: favicon, icon, logo, thumbnail, etc."
+        )
+        pattern_desc.setWordWrap(True)
+        pattern_desc.setStyleSheet("font-style: italic; color: gray; padding: 5px;")
+        pattern_layout.addWidget(pattern_desc)
+
+        # Enable/disable checkbox
+        self.filename_filter_check = QCheckBox("Enable filename pattern filtering")
+        self.filename_filter_check.setChecked(True)
+        self.filename_filter_check.stateChanged.connect(self.update_pattern_controls)
+        pattern_layout.addWidget(self.filename_filter_check)
+
+        # Pattern list
+        pattern_list_layout = QHBoxLayout()
+
+        # List widget
+        list_container = QVBoxLayout()
+        list_container.addWidget(QLabel("Excluded Patterns:"))
+        self.pattern_list = QListWidget()
+        self.pattern_list.setMaximumHeight(150)
+        list_container.addWidget(self.pattern_list)
+        pattern_list_layout.addLayout(list_container)
+
+        # Control buttons
+        pattern_buttons = QVBoxLayout()
+
+        self.add_pattern_input = QLineEdit()
+        self.add_pattern_input.setPlaceholderText("Enter pattern to exclude...")
+        pattern_buttons.addWidget(self.add_pattern_input)
+
+        self.add_pattern_btn = QPushButton("Add Pattern")
+        self.add_pattern_btn.clicked.connect(self.add_pattern)
+        pattern_buttons.addWidget(self.add_pattern_btn)
+
+        self.remove_pattern_btn = QPushButton("Remove Selected")
+        self.remove_pattern_btn.clicked.connect(self.remove_pattern)
+        pattern_buttons.addWidget(self.remove_pattern_btn)
+
+        self.default_patterns_btn = QPushButton("Restore Default Patterns")
+        self.default_patterns_btn.clicked.connect(self.restore_default_patterns)
+        pattern_buttons.addWidget(self.default_patterns_btn)
+
+        pattern_buttons.addStretch()
+        pattern_list_layout.addLayout(pattern_buttons)
+
+        pattern_layout.addLayout(pattern_list_layout)
+
+        # Statistics label
+        self.pattern_count_label = QLabel()
+        self.pattern_count_label.setStyleSheet("font-style: italic; color: gray;")
+        pattern_layout.addWidget(self.pattern_count_label)
+
+        pattern_group.setLayout(pattern_layout)
+        layout.addWidget(pattern_group)
+
         # Buttons
         button_layout = QHBoxLayout()
 
@@ -173,6 +235,73 @@ class SettingsTab(QWidget):
         main_layout.addWidget(scroll)
         self.setLayout(main_layout)
 
+        # Initialize pattern count
+        self.update_pattern_count()
+
+    def update_pattern_controls(self):
+        """Enable/disable pattern controls based on checkbox."""
+        enabled = self.filename_filter_check.isChecked()
+        self.pattern_list.setEnabled(enabled)
+        self.add_pattern_input.setEnabled(enabled)
+        self.add_pattern_btn.setEnabled(enabled)
+        self.remove_pattern_btn.setEnabled(enabled)
+        self.default_patterns_btn.setEnabled(enabled)
+
+    def add_pattern(self):
+        """Add a new pattern to the list."""
+        pattern = self.add_pattern_input.text().strip()
+        if not pattern:
+            QMessageBox.warning(self, "Empty Pattern",
+                              "Please enter a pattern to add.")
+            return
+
+        # Check if already exists
+        for i in range(self.pattern_list.count()):
+            if self.pattern_list.item(i).text().lower() == pattern.lower():
+                QMessageBox.information(self, "Pattern Exists",
+                                      f"Pattern '{pattern}' already exists in the list.")
+                return
+
+        # Add to list
+        self.pattern_list.addItem(pattern)
+        self.add_pattern_input.clear()
+        self.update_pattern_count()
+
+    def remove_pattern(self):
+        """Remove selected pattern from the list."""
+        current_item = self.pattern_list.currentItem()
+        if not current_item:
+            QMessageBox.information(self, "No Selection",
+                                  "Please select a pattern to remove.")
+            return
+
+        # Remove the selected item
+        row = self.pattern_list.row(current_item)
+        self.pattern_list.takeItem(row)
+        self.update_pattern_count()
+
+    def restore_default_patterns(self):
+        """Restore default filename patterns."""
+        reply = QMessageBox.question(
+            self,
+            "Restore Defaults",
+            "This will replace all current patterns with the default patterns.\n\n"
+            "Are you sure?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            self.pattern_list.clear()
+            for pattern in constants.DEFAULT_EXCLUDED_PATTERNS:
+                self.pattern_list.addItem(pattern)
+            self.update_pattern_count()
+
+    def update_pattern_count(self):
+        """Update the pattern count label."""
+        count = self.pattern_list.count()
+        self.pattern_count_label.setText(f"Total patterns: {count}")
+
     def update_folder_preview(self):
         """Update folder structure preview."""
         group_by_year = self.group_by_year_check.isChecked()
@@ -191,6 +320,12 @@ class SettingsTab(QWidget):
 
     def get_config(self):
         """Get configuration as dictionary."""
+        # Get excluded patterns from list widget
+        excluded_patterns = []
+        if self.filename_filter_check.isChecked():
+            for i in range(self.pattern_list.count()):
+                excluded_patterns.append(self.pattern_list.item(i).text())
+
         config = {
             'include_subdirectories': self.include_subdirs_check.isChecked(),
             'batch_size': self.batch_size_spin.value(),
@@ -209,7 +344,7 @@ class SettingsTab(QWidget):
             'require_exif': self.require_exif_check.isChecked(),
             'database_path': constants.DEFAULT_DATABASE_NAME,
             'file_endings': constants.DEFAULT_FILE_ENDINGS,
-            'excluded_filename_patterns': constants.DEFAULT_EXCLUDED_PATTERNS,
+            'excluded_filename_patterns': excluded_patterns,
             'move_filtered_files': False,
             'filtered_files_folder': "filtered_non_photos"
         }
@@ -236,6 +371,19 @@ class SettingsTab(QWidget):
         self.exclude_square_spin.setValue(
             config.get('exclude_square_smaller_than', constants.MIN_SQUARE_SIZE))
         self.require_exif_check.setChecked(config.get('require_exif', False))
+
+        # Load excluded patterns
+        patterns = config.get('excluded_filename_patterns', constants.DEFAULT_EXCLUDED_PATTERNS)
+        self.pattern_list.clear()
+        for pattern in patterns:
+            self.pattern_list.addItem(pattern)
+
+        # Enable/disable filename filtering (default: True if patterns exist)
+        has_patterns = len(patterns) > 0
+        self.filename_filter_check.setChecked(has_patterns)
+        self.update_pattern_controls()
+        self.update_pattern_count()
+
         self.update_folder_preview()
 
     def load_from_file(self):
@@ -307,7 +455,8 @@ class SettingsTab(QWidget):
             'max_width': constants.MAX_PHOTO_WIDTH,
             'max_height': constants.MAX_PHOTO_HEIGHT,
             'exclude_square_smaller_than': constants.MIN_SQUARE_SIZE,
-            'require_exif': False
+            'require_exif': False,
+            'excluded_filename_patterns': constants.DEFAULT_EXCLUDED_PATTERNS
         }
         self.set_config(config)
         QMessageBox.information(self, "Defaults Restored",
