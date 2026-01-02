@@ -140,6 +140,18 @@ class PhotoDatabase:
                 ON UniquePhotos(file_size)
             ''')
 
+            # Create composite index on date fields for date-based queries
+            self.cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_date
+                ON UniquePhotos(create_year, create_month, create_day)
+            ''')
+
+            # Create index on file_name for path lookups
+            self.cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_file_name
+                ON UniquePhotos(file_name)
+            ''')
+
             self.conn.commit()
             logger.info("Database table and indexes initialized successfully")
         except Exception as e:
@@ -855,45 +867,6 @@ def load_photo_hashes(database_path='PhotoDB.db'):
         return []
 
 
-def sql_light():
-    try:
-        # Get the sql lite database file from the json settings file stored in the exe directory.
-        settings = {
-            'username': 'user1',
-            'api_key': 'your_api_key'
-        }
-
-        # Save settings to file
-        with open('settings.json', 'w') as f:
-            json.dump(settings, f)
-
-        # Load settings from file
-        with open('settings.json', 'r') as f:
-            loaded_settings = json.load(f)
-
-        print(loaded_settings['username'])
-
-        # Connect to an SQLite database (or create it if it doesn't exist)
-        conn = sqlite3.connect('D:\\Dropbox\\Projects\\python Projects\\PhotoOrganizer\\PhotoDB.db')
-
-        # Create a cursor object using the cursor() method
-        cursor = conn.cursor()
-
-        # Create table
-        #cursor.execute('''CREATE TABLE IF NOT EXISTS stocks
-        #             (date text, trans text, symbol text, qty real, price real)''')
-
-        # Insert a row of data
-        cursor.execute("INSERT INTO UniquePhotos VALUES ('hash1','d:\photo.jpg','2024-11-27 01:32:00')")
-
-        # Save (commit) the changes
-        conn.commit()
-
-        # Close the connection
-        conn.close()
-    except Exception as e:
-        logger.exception(f"The error {e} occurred in sql_light")
-
 def VerifyFileType(filename):
     """ This routine takes a filename, and then verifies that the file extension matches the file type.
     This is specifically used to assign a file extension to files that do not have an extension!
@@ -1003,6 +976,7 @@ def VerifyFileType(filename):
                 return None
 
             # Create a temporary directory to test file variants
+            valid_extension_found = None
             with tempfile.TemporaryDirectory() as temp_dir:
                 for ext in valid_extensions:
                     temp_path = os.path.join(temp_dir, 'temp' + ext)
@@ -1012,12 +986,26 @@ def VerifyFileType(filename):
                             f.write(content)
                         with Image.open(temp_path) as img:
                             img.verify()  # This confirms the image is valid
-                            return temp_path
-                        logger.info(f"We found a valid format!!! - {img.format}")
+                            valid_extension_found = ext
+                            logger.info(f"We found a valid format!!! - {img.format} with extension {ext}")
+                            break
                     except (UnidentifiedImageError, OSError):
                         continue
-            logger.info(f"We did not find a valid file format for {filename}")
-            return filename
+
+            # Now outside the temp directory context, handle the file appropriately
+            if valid_extension_found:
+                # Create a new filepath with the correct extension
+                new_filepath = f"{filename}{valid_extension_found}"
+                try:
+                    safe_rename_or_copy(filename, new_filepath)
+                    logger.info(f"File extension added: {filename} -> {new_filepath}")
+                    return new_filepath
+                except Exception as e:
+                    logger.error(f"Failed to rename file with new extension: {e}")
+                    return None
+            else:
+                logger.info(f"We did not find a valid file format for {filename}")
+                return filename
 
     except Exception as e:
         logger.exception(f"The error {e} occurred in VerifyFileType")

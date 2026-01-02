@@ -132,6 +132,8 @@ class Config:
 
         # Validate specific settings
         self._validate_source_directory()
+        self._validate_destination_directory()
+        self._validate_paths()
         self._validate_file_endings()
         self._validate_batch_size()
         self._validate_copy_move_settings()
@@ -174,12 +176,71 @@ class Config:
                 f"batch_size must be a non-negative integer, got {batch_size}"
             )
 
+    def _validate_destination_directory(self) -> None:
+        """Ensure destination_directory is a string."""
+        dest_dir = self._settings['destination_directory']
+        if not isinstance(dest_dir, str):
+            raise ValueError(
+                f"destination_directory must be a string, got {type(dest_dir)}"
+            )
+
+    def _validate_paths(self) -> None:
+        """
+        Validate paths to prevent directory traversal attacks.
+
+        Ensures paths don't contain potentially dangerous patterns like '..'
+        which could be used to access files outside intended directories.
+        """
+        dangerous_patterns = ['..']
+
+        # Validate all source directories
+        for source_dir in self._settings['source_directory']:
+            # Normalize the path to resolve any '..' sequences
+            normalized_path = os.path.normpath(source_dir)
+
+            # Check if the path contains parent directory references
+            if '..' in source_dir:
+                raise ValueError(
+                    f"Potentially dangerous path pattern '..' found in source directory: {source_dir}\n"
+                    f"This could allow access to files outside the intended directory.\n"
+                    f"Please use absolute paths without parent directory references."
+                )
+
+        # Validate destination directory
+        dest_dir = self._settings['destination_directory']
+        if '..' in dest_dir:
+            raise ValueError(
+                f"Potentially dangerous path pattern '..' found in destination directory: {dest_dir}\n"
+                f"This could allow access to files outside the intended directory.\n"
+                f"Please use absolute paths without parent directory references."
+            )
+
+        # Validate database path
+        db_path = self._settings['database_path']
+        if '..' in db_path:
+            raise ValueError(
+                f"Potentially dangerous path pattern '..' found in database path: {db_path}\n"
+                f"This could allow access to files outside the intended directory.\n"
+                f"Please use absolute or simple relative paths without parent directory references."
+            )
+
     def _validate_copy_move_settings(self) -> None:
-        """Ensure copy_files and move_files are not both True."""
-        if self._settings['copy_files'] and self._settings['move_files']:
+        """Ensure copy_files and move_files settings are valid."""
+        copy_files = self._settings['copy_files']
+        move_files = self._settings['move_files']
+
+        # Check if both are True
+        if copy_files and move_files:
             raise ValueError(
                 "copy_files and move_files cannot both be True. "
                 "Choose either copy or move operation."
+            )
+
+        # Check if both are False
+        if not copy_files and not move_files:
+            raise ValueError(
+                "Either copy_files or move_files must be True. "
+                "Please enable at least one operation mode."
             )
 
     def _log_settings(self) -> None:

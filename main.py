@@ -281,7 +281,7 @@ def organize_files(config, files, database_path='PhotoDB.db', batch_size=100):
                             shutil.copyfile(file_path, target_path)
                             logger.info(f"Copied {file_path} to {target_path}")
                         elif move_files and not copy_files:
-                            # shutil.move(file_path, target_path)  # commented out to prevent damage during testing.
+                            shutil.move(file_path, target_path)
                             logger.info(f"Moved {file_path} to {target_path}")
                         else:
                             logger.info("ERROR - Move and Copy files are not supported simultaneously")
@@ -302,7 +302,7 @@ def organize_files(config, files, database_path='PhotoDB.db', batch_size=100):
 
                                 jpeg_file_path = f"{target_path[:-5]}.jpeg"
                                 logger.info(f"The new jpeg_file_path = '{jpeg_file_path}'")
-                                heic_image.save(jpeg_file_path, format("jpeg"))
+                                heic_image.save(jpeg_file_path, format="JPEG")
                             else:
                                 logger.info("The file is NOT a HEIC format.")
                         except Exception as e:
@@ -336,7 +336,7 @@ def organize_files(config, files, database_path='PhotoDB.db', batch_size=100):
         organize_files_return = {}
         organize_files_return["total_files_processed"] = total_files_processed
         organize_files_return["total_new_original_files"] = total_new_original_files
-        return 0, 0
+        return organize_files_return
 
 
 def write_settings(existing_settings):

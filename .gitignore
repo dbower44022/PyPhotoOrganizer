@@ -122,3 +122,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+.idea/PhotoOrganizer.iml
+
+.idea/misc.xml
+
+.idea/modules.xml

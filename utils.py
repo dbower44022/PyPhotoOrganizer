@@ -178,13 +178,17 @@ def safe_get_file_size(file_path):
         file_path (str): Path to the file
 
     Returns:
-        int: File size in bytes, or 0 if file doesn't exist or error occurs
+        int or None: File size in bytes, or None if file doesn't exist or error occurs
+
+    Note:
+        Returns None instead of 0 to distinguish between actual 0-byte files
+        and files that couldn't be accessed.
     """
     try:
         return os.path.getsize(file_path)
     except (OSError, FileNotFoundError) as e:
         logging.warning(f"Could not get size of {file_path}: {e}")
-        return 0
+        return None
 
 
 if __name__ == '__main__':
