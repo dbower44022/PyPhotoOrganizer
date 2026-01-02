@@ -10,6 +10,9 @@ pillow-heif>=0.13.0
 # Progress bars for long-running operations
 tqdm>=4.65.0
 
+# GUI framework for graphical user interface
+PySide6>=6.4.0
+
 # Standard library modules (no installation needed):
 # - sqlite3 (database for tracking unique file hashes)
 # - hashlib (SHA-256 hashing for duplicate detection)

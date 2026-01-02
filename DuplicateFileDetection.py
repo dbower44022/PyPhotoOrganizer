@@ -264,7 +264,7 @@ class PhotoDatabase:
             raise
 
 
-def get_file_list(sources, recursive=False, file_endings=None):
+def get_file_list(sources, recursive=False, file_endings=None, progress_callback=None):
     """
     Create a list all files in the source directory, and subdirectories if the recursive parameter is true.
 
@@ -272,6 +272,7 @@ def get_file_list(sources, recursive=False, file_endings=None):
     source (list of strings that contain valid directory path): The source directory path.
     recursive (bool): If True, list files recursively. Default is False.
     file_endings (list): List of file endings/extensions to include. Default is None.
+    progress_callback (callable): Optional callback function(dirs_scanned, total_dirs, current_dir) for progress updates.
 
     Returns:
     file_list: A list of file paths contained in the source folder provided.
@@ -287,8 +288,13 @@ def get_file_list(sources, recursive=False, file_endings=None):
 
         # Progress bar for scanning directories
         with tqdm(total=len(sources), desc="Scanning directories", unit="dir") as pbar:
-            for source in sources:
+            for idx, source in enumerate(sources):
                 pbar.set_postfix_str(os.path.basename(source)[:constants.MAX_FILENAME_DISPLAY_LENGTH_SCAN])
+
+                # Progress callback for GUI
+                if progress_callback:
+                    progress_callback(idx + 1, len(sources), source)
+
                 try:
                     logger.info(f"Processing the source = {source}")
                     if recursive:
@@ -548,7 +554,7 @@ def hash_file_partial(filename, num_bytes=constants.PARTIAL_HASH_BYTES):
 def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME, batch_size=constants.DEFAULT_BATCH_SIZE,
                    partial_hash_enabled=True, partial_hash_bytes=constants.PARTIAL_HASH_BYTES,
                    partial_hash_min_file_size=constants.PARTIAL_HASH_MIN_FILE_SIZE,
-                   config=None):
+                   config=None, progress_callback=None):
     """ Looks through a list of files and returns a list of duplicate and original files using two-stage hashing.
 
         Two-Stage Hashing Strategy:
@@ -638,6 +644,15 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                     try:
                         # Update progress bar description with current file
                         pbar.set_postfix_str(os.path.basename(filename)[:constants.MAX_FILENAME_DISPLAY_LENGTH])
+
+                        # Progress callback for GUI
+                        if progress_callback:
+                            stats = {
+                                'unique': len(original_files),
+                                'duplicates': len(duplicate_files),
+                                'filtered': len(filtered_files)
+                            }
+                            progress_callback(file_index, len(files), filename, stats)
 
                         if not os.path.isfile(filename):
                             logger.warning(f"Skipping non-file entry: {filename}")

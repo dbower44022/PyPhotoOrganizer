@@ -812,3 +812,77 @@ timestamp - module - level - function - line --- message
 **Document Maintainer:** Architecture Team
 **Last Review:** 2026-01-02
 **Next Review:** 2026-04-01
+
+---
+
+## GUI Architecture (v2.0)
+
+### Overview
+
+The GUI is built with **PySide6** (Qt for Python) using a Model-View-Controller (MVC) pattern with Qt Signals/Slots for thread-safe communication.
+
+### Component Architecture
+
+**Main Window** → **Tab Widget** → **Worker Thread** → **Business Logic**
+
+```
+┌─────────────────────────────────────────────┐
+│           Main Window (QMainWindow)          │
+│  ┌────────┬──────────┬────────┬────────┐   │
+│  │ Setup  │ Progress │Results │ Logs   │   │
+│  └────────┴──────────┴────────┴────────┘   │
+└──────────────┬──────────────────────────────┘
+               │ Qt Signals/Slots
+               ▼
+┌──────────────────────────────────────────────┐
+│     ProcessingWorker (QThread)               │
+│  Scanning → Processing → Organizing          │
+│  Emits signals to update UI                  │
+└──────────────────────────────────────────────┘
+```
+
+### Key Components
+
+1. **UI Tabs** (`ui/*.py`): Setup, Progress, Results, Logs, Settings
+2. **Worker Thread** (`ui/worker.py`): Background processing with signals
+3. **Main Window** (`ui/main_window.py`): Application controller
+
+### Thread Safety
+
+- Worker runs in QThread (background)
+- Emits Qt signals for progress
+- Signals marshaled to main thread automatically
+- UI updates executed safely on main thread
+
+### Progress Integration
+
+Added **optional** `progress_callback` parameters to:
+- `DuplicateFileDetection.get_file_list()`
+- `DuplicateFileDetection.find_duplicates()`
+- `main.organize_files()`
+
+Total changes: ~30 lines, all backward compatible.
+
+### Time Estimation
+
+Uses **Exponential Moving Average** (EMA):
+- α = 0.3 (30% weight to new samples)
+- Warmup: 10-20 seconds
+- Accuracy: ±20% after warmup
+
+### File Structure
+
+```
+ui/
+├── __init__.py
+├── main_window.py    (212 lines) - Main application
+├── setup_tab.py      (161 lines) - Folder selection
+├── progress_tab.py   (246 lines) - Progress visualization
+├── results_tab.py    (192 lines) - Results display
+├── logs_tab.py       (192 lines) - Log viewer
+├── settings_tab.py   (301 lines) - Settings editor
+└── worker.py         (186 lines) - Background processing
+```
+
+**Total**: ~1,500 lines of new GUI code, fully isolated from business logic.
+
