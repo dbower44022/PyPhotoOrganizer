@@ -358,7 +358,8 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             "total_new_original_files": total_new_original_files,
             "total_duplicates": len(duplicate_files),
             "total_filtered": len(filtered_files),
-            "filter_statistics": filter_stats or {}
+            "filter_statistics": filter_stats or {},
+            "filtered_files": filtered_files
         }
         return organize_files_return
 
@@ -369,7 +370,8 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             "total_new_original_files": total_new_original_files,
             "total_duplicates": len(duplicate_files),
             "total_filtered": len(filtered_files),
-            "filter_statistics": filter_stats or {}
+            "filter_statistics": filter_stats or {},
+            "filtered_files": filtered_files
         }
         return organize_files_return
 

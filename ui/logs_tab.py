@@ -68,13 +68,15 @@ class LogsTab(QWidget):
         self.stats_critical.clicked.connect(lambda: self.filter_by_stat("CRITICAL"))
 
         # Style the stat labels
+        from PySide6.QtCore import Qt
         for stat_label in [self.stats_debug, self.stats_info, self.stats_warning,
                            self.stats_error, self.stats_critical]:
-            stat_label.setStyleSheet("padding: 5px; border: 1px solid #ccc; cursor: pointer;")
+            stat_label.setStyleSheet("padding: 5px; border: 1px solid #ccc;")
+            stat_label.setCursor(Qt.PointingHandCursor)  # Set hand cursor properly
 
-        self.stats_warning.setStyleSheet("padding: 5px; border: 1px solid #ccc; background-color: #fff3cd; cursor: pointer;")
-        self.stats_error.setStyleSheet("padding: 5px; border: 1px solid #ccc; background-color: #f8d7da; cursor: pointer;")
-        self.stats_critical.setStyleSheet("padding: 5px; border: 1px solid #ccc; background-color: #dc3545; color: white; cursor: pointer;")
+        self.stats_warning.setStyleSheet("padding: 5px; border: 1px solid #ccc; background-color: #fff3cd;")
+        self.stats_error.setStyleSheet("padding: 5px; border: 1px solid #ccc; background-color: #f8d7da;")
+        self.stats_critical.setStyleSheet("padding: 5px; border: 1px solid #ccc; background-color: #dc3545; color: white;")
 
         stats_layout.addWidget(self.stats_debug)
         stats_layout.addWidget(self.stats_info)

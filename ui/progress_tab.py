@@ -49,7 +49,7 @@ class ProgressTab(QWidget):
         overall_layout.addLayout(stats_layout)
 
         overall_group.setLayout(overall_layout)
-        layout.addWidget(overall_group)
+        layout.addWidget(overall_group, 0)  # Fixed size (stretch=0)
 
         # Current stage group
         stage_group = QGroupBox("Current Stage")
@@ -73,7 +73,7 @@ class ProgressTab(QWidget):
         stage_layout.addWidget(self.stats_label)
 
         stage_group.setLayout(stage_layout)
-        layout.addWidget(stage_group)
+        layout.addWidget(stage_group, 0)  # Fixed size (stretch=0)
 
         # Status log group
         log_group = QGroupBox("Status Log (Last 100 events)")
@@ -81,11 +81,11 @@ class ProgressTab(QWidget):
 
         self.status_log = QTextEdit()
         self.status_log.setReadOnly(True)
-        self.status_log.setMaximumHeight(200)
+        self.status_log.setMinimumHeight(150)  # Minimum height instead of maximum
         log_layout.addWidget(self.status_log)
 
         log_group.setLayout(log_layout)
-        layout.addWidget(log_group)
+        layout.addWidget(log_group, 1)  # Expandable (stretch=1)
 
         self.setLayout(layout)
 

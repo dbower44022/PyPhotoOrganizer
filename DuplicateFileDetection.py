@@ -666,10 +666,54 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                             if not photo_filter.is_photo(filename):
                                 filter_reason = photo_filter.get_filter_reason(filename)
                                 logger.info(f"FILTERED OUT (non-photo): {filename} - Reason: {filter_reason}")
+
+                                # Gather comprehensive file information for UI display
                                 filtered_file = {
                                     "file_path": filename,
                                     "filter_reason": filter_reason
                                 }
+
+                                # Get file size
+                                try:
+                                    filtered_file["file_size"] = os.path.getsize(filename)
+                                except:
+                                    filtered_file["file_size"] = 0
+
+                                # Get image properties
+                                try:
+                                    from PIL import Image
+                                    with Image.open(filename) as img:
+                                        filtered_file["width"] = img.size[0]
+                                        filtered_file["height"] = img.size[1]
+                                        filtered_file["format"] = img.format or "Unknown"
+                                        filtered_file["mode"] = img.mode
+
+                                        # Check for EXIF data
+                                        try:
+                                            exif_data = img._getexif()
+                                            filtered_file["has_exif"] = exif_data is not None and len(exif_data) > 0
+                                        except:
+                                            filtered_file["has_exif"] = False
+                                except Exception as e:
+                                    # If we can't open the image, set defaults
+                                    filtered_file["width"] = 0
+                                    filtered_file["height"] = 0
+                                    filtered_file["format"] = "Unknown"
+                                    filtered_file["mode"] = "Unknown"
+                                    filtered_file["has_exif"] = False
+
+                                # Individual filter check results (for detailed review)
+                                filtered_file["passes_size"] = photo_filter._check_file_size(filename)
+                                try:
+                                    with Image.open(filename) as img:
+                                        filtered_file["passes_dimensions"] = photo_filter._check_dimensions(img, filename)
+                                        filtered_file["passes_square_check"] = photo_filter._check_square_icon(img, filename)
+                                except:
+                                    filtered_file["passes_dimensions"] = False
+                                    filtered_file["passes_square_check"] = False
+
+                                filtered_file["passes_filename"] = photo_filter._check_filename(filename)
+
                                 filtered_files.append(filtered_file)
                                 pbar.update(1)
                                 continue
