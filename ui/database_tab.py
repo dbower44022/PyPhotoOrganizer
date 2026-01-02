@@ -215,6 +215,9 @@ class DatabaseTab(QWidget):
             self.clear_display()
             return
 
+        # Refresh the total photos count from UniquePhotos table
+        self.database_metadata.refresh_total_photos()
+
         metadata = self.database_metadata.get_metadata()
 
         if not metadata:

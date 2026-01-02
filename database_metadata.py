@@ -280,6 +280,33 @@ class DatabaseMetadata:
         except Exception as e:
             logger.error(f"Failed to update total_photos: {e}")
 
+    def refresh_total_photos(self):
+        """
+        Refresh the total photos count by querying the UniquePhotos table.
+        This should be called after processing files to update the count.
+        """
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                # Count rows in UniquePhotos table
+                cursor.execute("SELECT COUNT(*) FROM UniquePhotos")
+                count = cursor.fetchone()[0]
+
+                # Update the metadata
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET total_photos = ?
+                    WHERE id = 1
+                """, (count,))
+                conn.commit()
+
+                logger.info(f"Refreshed total_photos to {count} from UniquePhotos table")
+                return count
+        except Exception as e:
+            logger.error(f"Failed to refresh total_photos: {e}")
+            return 0
+
     def update_archive_location(self, new_location: str) -> bool:
         """
         Update the archive location (for future migration feature).
