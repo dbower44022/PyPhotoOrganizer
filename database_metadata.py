@@ -25,6 +25,8 @@ class DatabaseMetadata:
             database_name TEXT NOT NULL,
             description TEXT,
             archive_location TEXT NOT NULL,
+            video_archive_location TEXT,
+            separate_video_archive INTEGER DEFAULT 0,
             created_date TEXT NOT NULL,
             last_used_date TEXT,
             schema_version INTEGER DEFAULT 1,
@@ -43,15 +45,33 @@ class DatabaseMetadata:
         self._ensure_metadata_table()
 
     def _ensure_metadata_table(self):
-        """Ensure the metadata table exists in the database."""
+        """Ensure the metadata table exists in the database with all columns."""
         try:
             with sqlite3.connect(self.database_path) as conn:
                 cursor = conn.cursor()
+
+                # Create table if it doesn't exist
                 cursor.execute(self.METADATA_TABLE_SCHEMA)
+
+                # Check if new columns exist (for upgrading old databases)
+                cursor.execute("PRAGMA table_info(DatabaseMetadata)")
+                columns = [row[1] for row in cursor.fetchall()]
+
+                # Add video_archive_location column if missing
+                if 'video_archive_location' not in columns:
+                    logger.info("Upgrading database: adding video_archive_location column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN video_archive_location TEXT")
+
+                # Add separate_video_archive column if missing
+                if 'separate_video_archive' not in columns:
+                    logger.info("Upgrading database: adding separate_video_archive column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN separate_video_archive INTEGER DEFAULT 0")
+
                 conn.commit()
                 logger.debug(f"Metadata table ensured in {self.database_path}")
+
         except Exception as e:
-            logger.error(f"Failed to create metadata table: {e}")
+            logger.error(f"Failed to create/upgrade metadata table: {e}")
             raise
 
     def ensure_all_tables(self):
@@ -133,8 +153,8 @@ class DatabaseMetadata:
             with sqlite3.connect(self.database_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT database_name, description, archive_location,
-                           created_date, last_used_date, schema_version, total_photos
+                    SELECT database_name, description, archive_location, video_archive_location,
+                           separate_video_archive, created_date, last_used_date, schema_version, total_photos
                     FROM DatabaseMetadata WHERE id = 1
                 """)
 
@@ -144,10 +164,12 @@ class DatabaseMetadata:
                         'database_name': row[0],
                         'description': row[1],
                         'archive_location': row[2],
-                        'created_date': row[3],
-                        'last_used_date': row[4],
-                        'schema_version': row[5],
-                        'total_photos': row[6]
+                        'video_archive_location': row[3],
+                        'separate_video_archive': bool(row[4]),
+                        'created_date': row[5],
+                        'last_used_date': row[6],
+                        'schema_version': row[7],
+                        'total_photos': row[8]
                     }
                 return None
 
@@ -168,6 +190,60 @@ class DatabaseMetadata:
         """
         metadata = self.get_metadata()
         return metadata['archive_location'] if metadata else None
+
+    def get_video_archive_location(self) -> Optional[str]:
+        """
+        Get the video archive location for this database.
+
+        Returns:
+            Video archive location path or None if not set
+        """
+        metadata = self.get_metadata()
+        return metadata.get('video_archive_location') if metadata else None
+
+    def is_separate_video_archive_enabled(self) -> bool:
+        """
+        Check if separate video archive is enabled.
+
+        Returns:
+            True if separate video archive is enabled, False otherwise
+        """
+        metadata = self.get_metadata()
+        return metadata.get('separate_video_archive', False) if metadata else False
+
+    def set_video_archive(self, video_archive_location: str, enabled: bool = True) -> bool:
+        """
+        Set or update the video archive location.
+
+        Args:
+            video_archive_location: Path to video archive folder
+            enabled: Whether to enable separate video archive
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Validate path if enabling
+            if enabled and video_archive_location:
+                if not os.path.isabs(video_archive_location):
+                    raise ValueError("Video archive location must be an absolute path")
+
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET video_archive_location = ?,
+                        separate_video_archive = ?
+                    WHERE id = 1
+                """, (video_archive_location if enabled else None, 1 if enabled else 0))
+                conn.commit()
+
+                logger.info(f"Video archive {'enabled' if enabled else 'disabled'}: {video_archive_location if enabled else 'N/A'}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to set video archive: {e}")
+            return False
 
     def update_last_used(self):
         """Update the last used timestamp."""

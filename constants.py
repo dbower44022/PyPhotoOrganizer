@@ -85,6 +85,12 @@ VALID_IMAGE_EXTENSIONS = ['.jpg', '.png', '.gif', '.tif', '.bmp', '.webp', '.ico
 # Default file extensions to process
 DEFAULT_FILE_ENDINGS = ['.jpg', '.jpeg', '.png', '.heic', '.tif', '.mov', '.mp4']
 
+# Photo file extensions (for routing to photo archive)
+PHOTO_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.heic', '.heif', '.tif', '.tiff', '.bmp', '.gif', '.webp']
+
+# Video file extensions (for routing to video archive)
+VIDEO_EXTENSIONS = ['.mov', '.mp4', '.avi', '.mkv', '.wmv', '.flv', '.mpg', '.mpeg', '.m4v', '.3gp']
+
 # Default excluded filename patterns (for photo filtering)
 # Files with these patterns in their names are likely icons/thumbnails/web graphics
 DEFAULT_EXCLUDED_PATTERNS = ['favicon', 'icon', 'logo', 'thumb', 'button', 'badge', 'sprite']
