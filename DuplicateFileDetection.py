@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 import utils
 from photo_filter import PhotoFilter
+import constants
 
 # from pillow_heif import register_heif_opener
 
@@ -34,7 +35,7 @@ class PhotoDatabase:
             results = cursor.fetchall()
     """
 
-    def __init__(self, database_path='PhotoDB.db'):
+    def __init__(self, database_path=constants.DEFAULT_DATABASE_NAME):
         """
         Initialize the PhotoDatabase connection manager.
 
@@ -287,7 +288,7 @@ def get_file_list(sources, recursive=False, file_endings=None):
         # Progress bar for scanning directories
         with tqdm(total=len(sources), desc="Scanning directories", unit="dir") as pbar:
             for source in sources:
-                pbar.set_postfix_str(os.path.basename(source)[:50])
+                pbar.set_postfix_str(os.path.basename(source)[:constants.MAX_FILENAME_DISPLAY_LENGTH_SCAN])
                 try:
                     logger.info(f"Processing the source = {source}")
                     if recursive:
@@ -479,9 +480,9 @@ def get_creation_date(file_path):
         logger.exception(f"\n When processing file {file_path},  get_creation_date process Failed : {sys.exc_info()} == {e}")
         if im:
             im.close()
-        year = "1000"
-        month = "01"
-        day = "01"
+        year = constants.INVALID_DATE_YEAR
+        month = constants.INVALID_DATE_MONTH
+        day = constants.INVALID_DATE_DAY
         return year, month, day
 
 def hash_file(filename):
@@ -499,7 +500,7 @@ def hash_file(filename):
         hasher = hashlib.sha256()
         with open(filename, 'rb') as file:
             while True:
-                chunk = file.read(4096)  # Read file in chunks
+                chunk = file.read(constants.FILE_READ_CHUNK_SIZE)  # Read file in chunks
                 if not chunk:
                     break
                 hasher.update(chunk)
@@ -512,7 +513,7 @@ def hash_file(filename):
         raise
 
 
-def hash_file_partial(filename, num_bytes=16384):
+def hash_file_partial(filename, num_bytes=constants.PARTIAL_HASH_BYTES):
     """
     Calculates the SHA-256 hash of the first N bytes of a file.
 
@@ -544,8 +545,9 @@ def hash_file_partial(filename, num_bytes=16384):
         raise
 
 
-def find_duplicates(files, hashes, database_path='PhotoDB.db', batch_size=100,
-                   partial_hash_enabled=True, partial_hash_bytes=16384, partial_hash_min_file_size=1048576,
+def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME, batch_size=constants.DEFAULT_BATCH_SIZE,
+                   partial_hash_enabled=True, partial_hash_bytes=constants.PARTIAL_HASH_BYTES,
+                   partial_hash_min_file_size=constants.PARTIAL_HASH_MIN_FILE_SIZE,
                    config=None):
     """ Looks through a list of files and returns a list of duplicate and original files using two-stage hashing.
 
@@ -565,12 +567,12 @@ def find_duplicates(files, hashes, database_path='PhotoDB.db', batch_size=100,
         Parameters:
         files - a list of files to be processed including the directory path to access the file
         hashes - a list of all previously located file hashes.
-        database_path - path to the SQLite database file (default: 'PhotoDB.db')
-        batch_size - number of files to process before committing to database (default: 100)
+        database_path - path to the SQLite database file (default: constants.DEFAULT_DATABASE_NAME)
+        batch_size - number of files to process before committing to database (default: constants.DEFAULT_BATCH_SIZE)
                      Set to 0 to only commit at the end (not recommended for large batches)
         partial_hash_enabled - whether to use partial hashing optimization (default: True)
-        partial_hash_bytes - number of bytes to hash for partial check (default: 16384 = 16KB)
-        partial_hash_min_file_size - minimum file size to use partial hashing (default: 1048576 = 1MB)
+        partial_hash_bytes - number of bytes to hash for partial check (default: constants.PARTIAL_HASH_BYTES = 16KB)
+        partial_hash_min_file_size - minimum file size to use partial hashing (default: constants.PARTIAL_HASH_MIN_FILE_SIZE = 1MB)
         config - Config object with photo filter settings (optional, if None filtering is disabled)
 
         Returns:
@@ -635,7 +637,7 @@ def find_duplicates(files, hashes, database_path='PhotoDB.db', batch_size=100,
                 for file_index, filename in enumerate(files, 1):
                     try:
                         # Update progress bar description with current file
-                        pbar.set_postfix_str(os.path.basename(filename)[:40])
+                        pbar.set_postfix_str(os.path.basename(filename)[:constants.MAX_FILENAME_DISPLAY_LENGTH])
 
                         if not os.path.isfile(filename):
                             logger.warning(f"Skipping non-file entry: {filename}")
@@ -876,7 +878,7 @@ def VerifyFileType(filename):
     try:
         logger.info(f"About to process file '{filename}'!")
 
-        valid_extensions = ['.jpg', '.png', '.gif', '.tif', '.bmp', '.webp', '.ico', '.ppm', '.eps', '.pdf']
+        valid_extensions = constants.VALID_IMAGE_EXTENSIONS
         EXTENSIONS_MAP = {
             'JPEG': ['.jpg', '.jpeg'],
             'PNG': ['.png', '.png'],
@@ -1066,8 +1068,8 @@ if __name__ == '__main__':
             logger.exception(f"\n list_files process Failed : {sys.exc_info()} - {e}")
 
         try:
-            database_path = "PhotoDB.db"  # Can be loaded from settings if needed
-            batch_size = 100  # Commit every 100 files
+            database_path = constants.DEFAULT_DATABASE_NAME  # Can be loaded from settings if needed
+            batch_size = constants.DEFAULT_BATCH_SIZE  # Commit every N files
             logger.info(f"About to run load_photo_hashes.")
             existing_hashes = load_photo_hashes(database_path)
         except Exception as e:

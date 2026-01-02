@@ -11,6 +11,7 @@ from typing import Tuple, Optional
 from PIL import Image
 
 import utils
+import constants
 
 # Configure logging using shared utility
 logger = utils.setup_logger(__name__, "photo_filter.log")
@@ -44,12 +45,12 @@ class PhotoFilter:
         """
         self.config = config
         self.enabled = config.get('photo_filter_enabled', True)
-        self.min_file_size = config.get('min_file_size', 51200)  # 50KB
-        self.min_width = config.get('min_width', 800)
-        self.min_height = config.get('min_height', 600)
-        self.max_width = config.get('max_width', 50000)
-        self.max_height = config.get('max_height', 50000)
-        self.exclude_square_smaller_than = config.get('exclude_square_smaller_than', 400)
+        self.min_file_size = config.get('min_file_size', constants.MIN_PHOTO_FILE_SIZE)  # 50KB
+        self.min_width = config.get('min_width', constants.MIN_PHOTO_WIDTH)
+        self.min_height = config.get('min_height', constants.MIN_PHOTO_HEIGHT)
+        self.max_width = config.get('max_width', constants.MAX_PHOTO_WIDTH)
+        self.max_height = config.get('max_height', constants.MAX_PHOTO_HEIGHT)
+        self.exclude_square_smaller_than = config.get('exclude_square_smaller_than', constants.MIN_SQUARE_SIZE)
         self.require_exif = config.get('require_exif', False)
         self.excluded_patterns = config.get('excluded_filename_patterns', [])
         self.move_filtered_files = config.get('move_filtered_files', False)
