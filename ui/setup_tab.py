@@ -47,16 +47,33 @@ class SetupTab(QWidget):
         layout.addWidget(source_group)
 
         # Destination folder group
-        dest_group = QGroupBox("Destination Folder")
-        dest_layout = QHBoxLayout()
+        dest_group = QGroupBox("Destination Folder (Archive Location)")
+        dest_layout = QVBoxLayout()
+
+        # Info label
+        dest_info = QLabel(
+            "The destination folder is controlled by your database.\n"
+            "To change it, use the Database tab."
+        )
+        dest_info.setWordWrap(True)
+        dest_info.setStyleSheet("color: #666; font-size: 11px; margin-bottom: 5px;")
+        dest_layout.addWidget(dest_info)
+
+        # Destination path with browse button
+        dest_path_layout = QHBoxLayout()
 
         self.dest_edit = QLineEdit()
-        self.dest_edit.setPlaceholderText("Select destination folder...")
-        dest_layout.addWidget(self.dest_edit)
+        self.dest_edit.setPlaceholderText("Archive location from database...")
+        self.dest_edit.setReadOnly(True)
+        self.dest_edit.setStyleSheet("background-color: #f5f5f5;")
+        dest_path_layout.addWidget(self.dest_edit)
 
         self.browse_dest_btn = QPushButton("Browse...")
+        self.browse_dest_btn.setToolTip("Destination is managed by the database")
         self.browse_dest_btn.clicked.connect(self.browse_destination)
-        dest_layout.addWidget(self.browse_dest_btn)
+        dest_path_layout.addWidget(self.browse_dest_btn)
+
+        dest_layout.addLayout(dest_path_layout)
 
         dest_group.setLayout(dest_layout)
         layout.addWidget(dest_group)
@@ -119,10 +136,28 @@ class SetupTab(QWidget):
             self.source_list.takeItem(current_row)
 
     def browse_destination(self):
-        """Browse for destination folder."""
-        folder = QFileDialog.getExistingDirectory(self, "Select Destination Folder")
-        if folder:
-            self.dest_edit.setText(folder)
+        """Show informative dialog - destination is managed by database."""
+        current_dest = self.dest_edit.text()
+
+        QMessageBox.information(
+            self,
+            "Destination Managed by Database",
+            f"The destination folder (archive location) is controlled by the database.\n\n"
+            f"Current archive: {current_dest if current_dest else 'Not set'}\n\n"
+            f"To change the archive location:\n"
+            f"1. Go to the 'Database' tab\n"
+            f"2. Use 'Change Archive Location' (coming soon)\n\n"
+            f"This ensures your photo archive stays connected to the correct database."
+        )
+
+    def set_destination_folder(self, folder):
+        """
+        Set the destination folder (called by main window when database loads).
+
+        Args:
+            folder: Destination folder path
+        """
+        self.dest_edit.setText(folder)
 
     def get_source_folders(self):
         """Get list of source folders."""
@@ -144,8 +179,8 @@ class SetupTab(QWidget):
         """Enable or disable controls during processing."""
         self.add_source_btn.setEnabled(enabled)
         self.remove_source_btn.setEnabled(enabled)
-        self.browse_dest_btn.setEnabled(enabled)
-        self.dest_edit.setEnabled(enabled)
+        # Note: browse_dest_btn always stays enabled (active UI principle)
+        # It shows an informative dialog instead
         self.copy_radio.setEnabled(enabled)
         self.move_radio.setEnabled(enabled)
         self.start_btn.setEnabled(enabled)

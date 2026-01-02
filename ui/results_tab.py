@@ -6,7 +6,7 @@ Displays processing results and statistics.
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QLabel, QTreeWidget, QTreeWidgetItem, QPushButton,
-                               QFileDialog, QMessageBox)
+                               QFileDialog, QMessageBox, QTextEdit, QApplication)
 from PySide6.QtCore import Qt
 import json
 import csv
@@ -28,19 +28,25 @@ class ResultsTab(QWidget):
         summary_group = QGroupBox("Summary Statistics")
         summary_layout = QVBoxLayout()
 
-        self.total_label = QLabel("Total files examined: 0")
-        self.originals_label = QLabel("New original photos: 0 (0%)")
-        self.duplicates_label = QLabel("Duplicate files: 0 (0%)")
-        self.filtered_label = QLabel("Filtered files: 0 (0%)")
-        self.time_label = QLabel("Processing time: 00:00:00")
-        self.speed_label = QLabel("Average speed: 0.0 files/sec")
+        # Make statistics copyable using QTextEdit
+        self.summary_text = QTextEdit()
+        self.summary_text.setReadOnly(True)
+        self.summary_text.setMaximumHeight(150)
+        self.summary_text.setStyleSheet("background-color: #f5f5f5; font-family: monospace;")
+        self.summary_text.setPlainText(
+            "Total files examined: 0\n"
+            "New original photos: 0 (0%)\n"
+            "Duplicate files: 0 (0%)\n"
+            "Filtered files: 0 (0%)\n"
+            "Processing time: 00:00:00\n"
+            "Average speed: 0.0 files/sec"
+        )
+        summary_layout.addWidget(self.summary_text)
 
-        summary_layout.addWidget(self.total_label)
-        summary_layout.addWidget(self.originals_label)
-        summary_layout.addWidget(self.duplicates_label)
-        summary_layout.addWidget(self.filtered_label)
-        summary_layout.addWidget(self.time_label)
-        summary_layout.addWidget(self.speed_label)
+        # Copy to clipboard button
+        copy_btn = QPushButton("Copy Statistics to Clipboard")
+        copy_btn.clicked.connect(self.copy_statistics)
+        summary_layout.addWidget(copy_btn)
 
         summary_group.setLayout(summary_layout)
         layout.addWidget(summary_group)
@@ -80,25 +86,33 @@ class ResultsTab(QWidget):
         filtered = results.get('total_filtered', 0)
         processing_time = results.get('processing_time', 0)
 
-        self.total_label.setText(f"Total files examined: {total}")
+        # Build summary text
+        summary_lines = []
+        summary_lines.append(f"Total files examined: {total}")
 
         if total > 0:
             orig_pct = (originals / total) * 100
             dup_pct = (duplicates / total) * 100
             filt_pct = (filtered / total) * 100
-            self.originals_label.setText(f"New original photos: {originals} ({orig_pct:.1f}%)")
-            self.duplicates_label.setText(f"Duplicate files: {duplicates} ({dup_pct:.1f}%)")
-            self.filtered_label.setText(f"Filtered files: {filtered} ({filt_pct:.1f}%)")
+            summary_lines.append(f"New original photos: {originals} ({orig_pct:.1f}%)")
+            summary_lines.append(f"Duplicate files: {duplicates} ({dup_pct:.1f}%)")
+            summary_lines.append(f"Filtered files: {filtered} ({filt_pct:.1f}%)")
 
             if processing_time > 0:
                 avg_speed = total / processing_time
-                self.speed_label.setText(f"Average speed: {avg_speed:.2f} files/sec")
+                summary_lines.append(f"Average speed: {avg_speed:.2f} files/sec")
+            else:
+                summary_lines.append(f"Average speed: 0.0 files/sec")
         else:
-            self.originals_label.setText(f"New original photos: 0 (0%)")
-            self.duplicates_label.setText(f"Duplicate files: 0 (0%)")
-            self.filtered_label.setText(f"Filtered files: 0 (0%)")
+            summary_lines.append(f"New original photos: 0 (0%)")
+            summary_lines.append(f"Duplicate files: 0 (0%)")
+            summary_lines.append(f"Filtered files: 0 (0%)")
+            summary_lines.append(f"Average speed: 0.0 files/sec")
 
-        self.time_label.setText(f"Processing time: {self._format_time(processing_time)}")
+        summary_lines.append(f"Processing time: {self._format_time(processing_time)}")
+
+        # Update the summary text widget
+        self.summary_text.setPlainText("\n".join(summary_lines))
 
         # Update breakdown tree
         self.breakdown_tree.clear()
@@ -183,6 +197,13 @@ class ResultsTab(QWidget):
                 writer.writerow(['Original %', f"{(originals/total)*100:.1f}"])
                 writer.writerow(['Duplicate %', f"{(duplicates/total)*100:.1f}"])
                 writer.writerow(['Filtered %', f"{(filtered/total)*100:.1f}"])
+
+    def copy_statistics(self):
+        """Copy summary statistics to clipboard."""
+        clipboard = QApplication.clipboard()
+        clipboard.setText(self.summary_text.toPlainText())
+        QMessageBox.information(self, "Copied",
+                               "Statistics copied to clipboard!")
 
     def _format_time(self, seconds):
         """Format seconds as HH:MM:SS."""

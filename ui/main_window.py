@@ -15,7 +15,10 @@ from ui.progress_tab import ProgressTab
 from ui.results_tab import ResultsTab
 from ui.logs_tab import LogsTab
 from ui.settings_tab import SettingsTab
+from ui.database_tab import DatabaseTab
+from ui.database_selector_dialog import DatabaseSelectorDialog
 from ui.worker import ProcessingWorker
+from database_metadata import DatabaseMetadata
 
 
 class MainWindow(QMainWindow):
@@ -24,7 +27,12 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.worker = None
+        self.current_database_path = None
+        self.database_metadata = None
         self.init_ui()
+
+        # Show database selector - user must select database before proceeding
+        self.select_database_on_startup()
 
     def init_ui(self):
         """Initialize the user interface."""
@@ -49,6 +57,7 @@ class MainWindow(QMainWindow):
         self.results_tab = ResultsTab()
         self.logs_tab = LogsTab()
         self.settings_tab = SettingsTab()
+        self.database_tab = DatabaseTab()
 
         # Add tabs
         self.tabs.addTab(self.setup_tab, "Setup")
@@ -56,10 +65,12 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.results_tab, "Results")
         self.tabs.addTab(self.logs_tab, "Logs")
         self.tabs.addTab(self.settings_tab, "Settings")
+        self.tabs.addTab(self.database_tab, "Database")
 
         # Connect signals
         self.setup_tab.start_clicked.connect(self.start_processing)
         self.setup_tab.stop_clicked.connect(self.stop_processing)
+        self.database_tab.database_changed.connect(self.on_database_changed)
 
     def _create_menu_bar(self):
         """Create the menu bar."""
@@ -90,23 +101,33 @@ class MainWindow(QMainWindow):
     def start_processing(self):
         """Start the photo processing."""
         try:
+            # Ensure we have a database
+            if not self.current_database_path:
+                QMessageBox.warning(self, "Error", "No database selected")
+                return
+
             # Get configuration from settings tab
             config = self.settings_tab.get_config()
 
             # Update config with folder selections from setup tab
             source_folders = self.setup_tab.get_source_folders()
-            destination_folder = self.setup_tab.get_destination_folder()
+
+            # Get destination from database
+            destination_folder = self.database_metadata.get_archive_location()
 
             if not source_folders:
                 QMessageBox.warning(self, "Error", "Please select at least one source folder")
                 return
 
             if not destination_folder:
-                QMessageBox.warning(self, "Error", "Please select a destination folder")
+                QMessageBox.warning(self, "Error",
+                                  "No archive location configured for this database.\n\n"
+                                  "This should not happen. Please check the Database tab.")
                 return
 
             config['source_directory'] = source_folders
             config['destination_directory'] = destination_folder
+            config['database_path'] = self.current_database_path
             config['copy_files'] = self.setup_tab.is_copy_mode()
             config['move_files'] = self.setup_tab.is_move_mode()
 
@@ -195,6 +216,65 @@ class MainWindow(QMainWindow):
         # Show error message
         QMessageBox.critical(self, "Processing Error",
                            f"An error occurred during processing:\n\n{error_msg}")
+
+    def select_database_on_startup(self):
+        """Show database selector on startup - user must select database."""
+        dialog = DatabaseSelectorDialog(self)
+        result = dialog.exec()
+
+        if result:
+            # User selected a database
+            database_path = dialog.get_selected_database()
+            if database_path:
+                self.set_database(database_path)
+        else:
+            # User cancelled - cannot proceed without database
+            QMessageBox.warning(
+                self,
+                "Database Required",
+                "PyPhotoOrganizer requires a database to operate.\n\n"
+                "You must either:\n"
+                "• Select an existing database\n"
+                "• Create a new database\n\n"
+                "The application will now close."
+            )
+            QApplication.quit()
+
+    def set_database(self, database_path):
+        """
+        Set the current database and update all tabs.
+
+        Args:
+            database_path: Path to the database file
+        """
+        self.current_database_path = database_path
+        self.database_metadata = DatabaseMetadata(database_path)
+
+        # Ensure all required tables exist (handles old databases)
+        self.database_metadata.ensure_all_tables()
+
+        # Update database tab
+        self.database_tab.set_database(database_path)
+
+        # Get archive location from database
+        archive_location = self.database_metadata.get_archive_location()
+
+        # Update setup tab with archive location
+        if archive_location:
+            self.setup_tab.set_destination_folder(archive_location)
+
+        # Update window title
+        metadata = self.database_metadata.get_metadata()
+        if metadata:
+            db_name = metadata.get('database_name', 'Unknown')
+            self.setWindowTitle(f"PyPhotoOrganizer - {db_name}")
+
+        # Update status bar
+        self.status_bar.showMessage(f"Database loaded: {db_name}")
+
+    def on_database_changed(self, new_database_path):
+        """Handle database change from Database tab."""
+        self.set_database(new_database_path)
 
     def closeEvent(self, event):
         """Handle window close event."""

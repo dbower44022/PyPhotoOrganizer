@@ -353,16 +353,24 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                 logger.info(f"  - {len(filtered_files)} files were filtered out as non-photos")
             logger.info("****************************************************************")
 
-        organize_files_return = {}
-        organize_files_return["total_files_processed"] = total_files_processed
-        organize_files_return["total_new_original_files"] = total_new_original_files
+        organize_files_return = {
+            "total_files_processed": total_files_processed,
+            "total_new_original_files": total_new_original_files,
+            "total_duplicates": len(duplicate_files),
+            "total_filtered": len(filtered_files),
+            "filter_statistics": filter_stats or {}
+        }
         return organize_files_return
 
     except Exception as e_organize_files:
         logger.exception(f"\n organize_files Failed : {sys.exc_info()} - {e_organize_files}")
-        organize_files_return = {}
-        organize_files_return["total_files_processed"] = total_files_processed
-        organize_files_return["total_new_original_files"] = total_new_original_files
+        organize_files_return = {
+            "total_files_processed": total_files_processed,
+            "total_new_original_files": total_new_original_files,
+            "total_duplicates": len(duplicate_files),
+            "total_filtered": len(filtered_files),
+            "filter_statistics": filter_stats or {}
+        }
         return organize_files_return
 
 

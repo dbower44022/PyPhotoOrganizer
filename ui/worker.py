@@ -40,8 +40,8 @@ class ProcessingWorker(QThread):
         try:
             self.start_time = time.time()
 
-            # Create Config object
-            self.config = Config(self.config_dict)
+            # Create Config object from dictionary
+            self.config = Config(settings_dict=self.config_dict)
 
             # Stage 1: Scanning
             if self._should_stop:
@@ -65,44 +65,26 @@ class ProcessingWorker(QThread):
 
             self.status_update.emit("info", f"Found {len(files)} files to process")
 
-            # Stage 2: Processing (Duplicate Detection)
+            # Stage 2 & 3: Processing (Duplicate Detection) and Organizing
+            # Note: organize_files handles both duplicate detection AND organization
             if self._should_stop:
                 return
 
-            self.stage_changed.emit("Processing Files (Duplicate Detection)")
-            self.status_update.emit("info", "Detecting duplicates...")
+            self.stage_changed.emit("Processing and Organizing Files")
+            self.status_update.emit("info", "Processing files and organizing...")
 
-            results = self._process_files(files)
-
-            original_files = results.get('original_files', [])
-            self.status_update.emit("info",
-                                   f"Found {len(original_files)} unique files")
-
-            # Stage 3: Organizing
-            if self._should_stop:
-                return
-
-            if original_files:
-                self.stage_changed.emit("Organizing Files")
-                self.status_update.emit("info", "Organizing unique files...")
-
-                final_results = self._organize_files(original_files)
-            else:
-                final_results = {
-                    'total_files_processed': 0,
-                    'total_new_original_files': 0
-                }
+            final_results = self._organize_files(files)
 
             # Compile final results
             processing_time = time.time() - self.start_time
 
             complete_results = {
-                'total_files_examined': len(files),
+                'total_files_examined': final_results.get('total_files_processed', len(files)),
                 'total_new_original_files': final_results.get('total_new_original_files', 0),
-                'total_duplicates': len(results.get('duplicate_files', [])),
-                'total_filtered': len(results.get('filtered_files', [])),
+                'total_duplicates': final_results.get('total_duplicates', 0),
+                'total_filtered': final_results.get('total_filtered', 0),
                 'processing_time': processing_time,
-                'filter_statistics': results.get('filter_statistics', {})
+                'filter_statistics': final_results.get('filter_statistics', {})
             }
 
             self.status_update.emit("info", "Processing complete!")
@@ -117,8 +99,8 @@ class ProcessingWorker(QThread):
         """Scan directories for files."""
         try:
             files = DuplicateFileDetection.get_file_list(
-                source_directory=self.config.source_directory,
-                include_subdirectories=self.config.include_subdirectories,
+                sources=self.config.source_directory,
+                recursive=self.config.include_subdirectories,
                 file_endings=self.config.file_endings,
                 progress_callback=self._scanning_callback
             )
