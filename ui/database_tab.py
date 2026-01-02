@@ -6,7 +6,7 @@ Displays database information and allows database management.
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QGroupBox, QFormLayout, QLineEdit,
-                               QTextEdit, QMessageBox, QFileDialog)
+                               QTextEdit, QMessageBox, QFileDialog, QCheckBox)
 from PySide6.QtCore import Qt, Signal
 from database_metadata import DatabaseMetadata
 import os
@@ -100,6 +100,55 @@ class DatabaseTab(QWidget):
 
         archive_group.setLayout(archive_layout)
         layout.addWidget(archive_group)
+
+        # Video Archive Location Group
+        video_archive_group = QGroupBox("Video Archive Location (Optional)")
+        video_archive_layout = QVBoxLayout()
+
+        # Enable/disable checkbox
+        self.separate_video_archive_check = QCheckBox("Store videos in separate location")
+        self.separate_video_archive_check.setToolTip(
+            "When enabled, video files will be organized to a different location than photos"
+        )
+        self.separate_video_archive_check.stateChanged.connect(self.on_separate_video_changed)
+        video_archive_layout.addWidget(self.separate_video_archive_check)
+
+        video_archive_info = QLabel(
+            "Videos can be stored separately from photos. Useful for NAS storage or\n"
+            "when you want photos and videos in different locations."
+        )
+        video_archive_info.setWordWrap(True)
+        video_archive_info.setStyleSheet("color: #666; font-size: 11px; margin-bottom: 5px;")
+        video_archive_layout.addWidget(video_archive_info)
+
+        video_archive_path_layout = QHBoxLayout()
+        self.video_archive_path_edit = QLineEdit()
+        self.video_archive_path_edit.setReadOnly(True)
+        self.video_archive_path_edit.setPlaceholderText("No video archive location set")
+        self.video_archive_path_edit.setStyleSheet("background-color: #f5f5f5;")
+        video_archive_path_layout.addWidget(self.video_archive_path_edit)
+
+        self.browse_video_archive_btn = QPushButton("Browse...")
+        self.browse_video_archive_btn.setEnabled(False)
+        self.browse_video_archive_btn.clicked.connect(self.on_browse_video_archive_clicked)
+        video_archive_path_layout.addWidget(self.browse_video_archive_btn)
+
+        self.set_video_archive_btn = QPushButton("Set")
+        self.set_video_archive_btn.setEnabled(False)
+        self.set_video_archive_btn.setToolTip("Apply the selected video archive location")
+        self.set_video_archive_btn.clicked.connect(self.on_set_video_archive_clicked)
+        video_archive_path_layout.addWidget(self.set_video_archive_btn)
+
+        video_archive_layout.addLayout(video_archive_path_layout)
+
+        # Video archive status
+        self.video_archive_status_label = QLabel("")
+        self.video_archive_status_label.setWordWrap(True)
+        self.video_archive_status_label.setStyleSheet("font-size: 10px; color: #666; margin-top: 5px;")
+        video_archive_layout.addWidget(self.video_archive_status_label)
+
+        video_archive_group.setLayout(video_archive_layout)
+        layout.addWidget(video_archive_group)
 
         # Statistics Group
         stats_group = QGroupBox("Statistics")
@@ -223,6 +272,28 @@ class DatabaseTab(QWidget):
         schema_version = metadata.get('schema_version', 1)
         self.schema_version_label.setText(str(schema_version))
 
+        # Update video archive information
+        video_archive_location = metadata.get('video_archive_location', '')
+        separate_video_archive = metadata.get('separate_video_archive', False)
+
+        self.separate_video_archive_check.setChecked(separate_video_archive)
+        self.video_archive_path_edit.setText(video_archive_location if video_archive_location else "")
+
+        # Update video archive status
+        if separate_video_archive and video_archive_location:
+            if os.path.exists(video_archive_location):
+                self.video_archive_status_label.setText("✓ Video archive folder exists")
+                self.video_archive_status_label.setStyleSheet("font-size: 10px; color: green; margin-top: 5px;")
+            else:
+                self.video_archive_status_label.setText("⚠ Warning: Video archive folder does not exist!")
+                self.video_archive_status_label.setStyleSheet("font-size: 10px; color: red; margin-top: 5px;")
+        elif separate_video_archive:
+            self.video_archive_status_label.setText("⚠ Separate video archive enabled but no location set")
+            self.video_archive_status_label.setStyleSheet("font-size: 10px; color: orange; margin-top: 5px;")
+        else:
+            self.video_archive_status_label.setText("Videos will be stored in the same location as photos")
+            self.video_archive_status_label.setStyleSheet("font-size: 10px; color: #666; margin-top: 5px;")
+
         # Update last used timestamp
         self.database_metadata.update_last_used()
 
@@ -235,6 +306,9 @@ class DatabaseTab(QWidget):
         self.description_display.clear()
         self.archive_path_edit.clear()
         self.archive_status_label.clear()
+        self.video_archive_path_edit.clear()
+        self.video_archive_status_label.clear()
+        self.separate_video_archive_check.setChecked(False)
         self.total_photos_label.setText("0")
         self.schema_version_label.setText("-")
 
@@ -286,3 +360,105 @@ class DatabaseTab(QWidget):
         if self.database_metadata:
             return self.database_metadata.get_archive_location()
         return None
+
+    def on_separate_video_changed(self, state):
+        """Handle separate video archive checkbox state change."""
+        enabled = (state == Qt.CheckState.Checked.value)
+        self.browse_video_archive_btn.setEnabled(enabled)
+
+        if not enabled:
+            # Disable separate video archive in database
+            if self.database_metadata:
+                try:
+                    self.database_metadata.set_video_archive("", enabled=False)
+                    self.refresh_database_info()
+                    QMessageBox.information(
+                        self,
+                        "Video Archive Disabled",
+                        "Videos will now be stored in the same location as photos."
+                    )
+                except Exception as e:
+                    QMessageBox.critical(
+                        self,
+                        "Error",
+                        f"Failed to disable video archive:\n\n{str(e)}"
+                    )
+                    # Revert checkbox
+                    self.separate_video_archive_check.setChecked(True)
+
+    def on_browse_video_archive_clicked(self):
+        """Handle browse video archive button click."""
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Video Archive Location",
+            os.path.expanduser("~")
+        )
+
+        if folder:
+            self.video_archive_path_edit.setText(folder)
+            self.set_video_archive_btn.setEnabled(True)
+
+    def on_set_video_archive_clicked(self):
+        """Handle set video archive button click."""
+        video_archive_location = self.video_archive_path_edit.text().strip()
+
+        if not video_archive_location:
+            QMessageBox.warning(
+                self,
+                "No Location Selected",
+                "Please select a video archive location first."
+            )
+            return
+
+        # Validate path is absolute
+        if not os.path.isabs(video_archive_location):
+            QMessageBox.warning(
+                self,
+                "Invalid Path",
+                f"Video archive location must be an absolute path.\n\n"
+                f"Current path: {video_archive_location}"
+            )
+            return
+
+        # Check if folder exists, offer to create
+        if not os.path.exists(video_archive_location):
+            response = QMessageBox.question(
+                self,
+                "Create Video Archive Folder?",
+                f"The video archive folder does not exist:\n\n{video_archive_location}\n\n"
+                f"Would you like to create it now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+
+            if response == QMessageBox.Yes:
+                try:
+                    os.makedirs(video_archive_location, exist_ok=True)
+                except Exception as e:
+                    QMessageBox.critical(
+                        self,
+                        "Failed to Create Folder",
+                        f"Could not create video archive folder:\n\n{str(e)}"
+                    )
+                    return
+            else:
+                return
+
+        # Set video archive in database
+        try:
+            self.database_metadata.set_video_archive(video_archive_location, enabled=True)
+            self.refresh_database_info()
+            self.set_video_archive_btn.setEnabled(False)
+
+            QMessageBox.information(
+                self,
+                "Video Archive Set",
+                f"Video archive location has been set:\n\n{video_archive_location}\n\n"
+                f"Videos will now be organized to this location."
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to set video archive location:\n\n{str(e)}"
+            )

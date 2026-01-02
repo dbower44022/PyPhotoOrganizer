@@ -3,7 +3,9 @@
     "allow": [
       "Bash(apt-cache search:*)",
       "Bash(cd /home/doug/Dropbox/Projects/python\\\\ Projects/PyPhotoOrganizer/PyPhotoOrganizer && python3 -m py_compile main_gui.py ui/*.py:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(cd:*)",
+      "Bash(.venv/bin/python --version)"
     ]
   }
 }

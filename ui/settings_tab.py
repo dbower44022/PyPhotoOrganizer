@@ -22,7 +22,7 @@ class SettingsTab(QWidget):
         super().__init__()
         self.settings_file = "settings.json"
         self.init_ui()
-        self.load_from_file()
+        self.load_from_file(show_dialog=False)  # Suppress dialog during initialization
 
     def init_ui(self):
         """Initialize the user interface."""
@@ -386,11 +386,16 @@ class SettingsTab(QWidget):
 
         self.update_folder_preview()
 
-    def load_from_file(self):
-        """Load settings from file."""
+    def load_from_file(self, show_dialog=True):
+        """Load settings from file.
+
+        Args:
+            show_dialog (bool): If True, show success/error dialogs. If False, load silently.
+        """
         if not os.path.exists(self.settings_file):
-            QMessageBox.information(self, "No Settings File",
-                                   f"{self.settings_file} not found. Using defaults.")
+            if show_dialog:
+                QMessageBox.information(self, "No Settings File",
+                                       f"{self.settings_file} not found. Using defaults.")
             self.restore_defaults()
             return
 
@@ -398,11 +403,13 @@ class SettingsTab(QWidget):
             with open(self.settings_file, 'r') as f:
                 config = json.load(f)
             self.set_config(config)
-            QMessageBox.information(self, "Settings Loaded",
-                                   "Settings loaded successfully from file.")
+            if show_dialog:
+                QMessageBox.information(self, "Settings Loaded",
+                                       "Settings loaded successfully from file.")
         except Exception as e:
-            QMessageBox.critical(self, "Load Error",
-                               f"Failed to load settings:\n\n{str(e)}")
+            if show_dialog:
+                QMessageBox.critical(self, "Load Error",
+                                   f"Failed to load settings:\n\n{str(e)}")
 
     def save_to_file(self):
         """Save settings to file."""

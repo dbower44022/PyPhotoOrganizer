@@ -5,6 +5,115 @@ All notable changes to PyPhotoOrganizer will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-01-02
+
+### Added - Window Positioning Management
+
+**Intelligent Window Placement:**
+- All windows center on screen on first launch (no more upper-left corner)
+- Main window position persistence using Qt QSettings
+- Automatic position restoration on application restart
+- Title bar protection ensures window is always accessible (minimum 50px visible)
+- Screen bounds checking on all four edges
+- Dialog centering on parent window (or screen if no parent)
+- Works across multi-monitor setups
+
+**Files Modified:**
+- `ui/main_window.py` - Added geometry save/restore with QSettings
+- `ui/database_selector_dialog.py` - Added center_on_parent() method
+- `ui/create_database_dialog.py` - Added center_on_parent() method
+
+**Settings Storage:** `~/.config/PyPhotoOrganizer/MainWindow.conf`
+
+### Added - Separate Photo/Video Archive (Complete Implementation)
+
+**Database Tab - Video Archive Management:**
+- New "Video Archive Location (Optional)" group box
+- Enable/disable checkbox: "Store videos in separate location"
+- Browse button to select video archive folder
+- Set button to apply selected location
+- Real-time status indicator showing folder existence
+- Automatic folder creation with user confirmation
+- Validation prevents same location for photos and videos
+- Clear visual feedback (green checkmark, red warning, orange info)
+
+**Create Database Dialog - Video Archive Setup:**
+- Optional video archive configuration during database creation
+- Checkbox: "Store videos in a separate location from photos"
+- Browse button for video archive location (enabled when checkbox checked)
+- Comprehensive validation:
+  - Ensures paths are absolute
+  - Prevents duplicate photo/video archive locations
+  - Offers to create folders if they don't exist
+- Automatically sets video archive in database metadata
+- Success message shows both photo and video archive locations
+
+**File Routing Logic (main.py):**
+- Intelligent file type detection using `utils.is_video_file()`
+- Automatic routing decisions:
+  - Videos → video archive (if enabled and location set)
+  - Photos → photo archive (default)
+- Same date-based folder structure for both (YYYY/MM/DD)
+- Clear logging of routing decisions for each file
+- Seamless integration with existing processing pipeline
+
+**Supported File Types:**
+- **Photos**: `.jpg`, `.jpeg`, `.png`, `.heic`, `.heif`, `.tif`, `.tiff`, `.bmp`, `.gif`, `.webp`
+- **Videos**: `.mov`, `.mp4`, `.avi`, `.mkv`, `.wmv`, `.flv`, `.mpg`, `.mpeg`, `.m4v`, `.3gp`
+
+**Use Cases:**
+- Store videos on NAS while keeping photos local
+- Separate high-resolution videos to external drive
+- Keep photos on SSD for fast access, videos on HDD for storage
+- Maintain single database for both media types
+
+**Files Modified:**
+- `ui/database_tab.py` - Added video archive UI (+ QCheckBox import)
+- `ui/create_database_dialog.py` - Added optional video archive during creation
+- `main.py` - Implemented file routing logic with database metadata integration
+
+### Improved - Splash Screen Performance & UX
+
+**Instant Splash Screen Display:**
+- Implemented deferred import pattern for immediate splash screen appearance
+- Splash screen now appears in ~50-100ms (vs 2-5 second delay previously)
+- Heavy module imports (MainWindow, tabs, PIL, etc.) deferred until after splash is visible
+- Splash screen centers on primary monitor immediately
+
+**Progressive Loading Messages:**
+- Real-time status updates on splash screen during initialization
+- Loading sequence:
+  1. "Loading application..."
+  2. "Loading modules..." (importing MainWindow and dependencies)
+  3. "Initializing user interface..." (creating MainWindow)
+  4. "Creating tabs..." (initializing all tabs)
+  5. "Restoring window position..." (geometry restoration)
+  6. "Loading settings..." (silent settings load)
+- Database selector dialog deferred until after splash closes (non-blocking)
+
+**Silent Settings Loading:**
+- Settings load silently during startup (no blocking dialogs)
+- "Settings Loaded" dialog only shown when user manually loads settings
+- Added `show_dialog` parameter to `SettingsTab.load_from_file()` method
+
+**Files Modified:**
+- `main_gui.py` - Deferred import pattern, splash centering, progressive messages
+- `ui/main_window.py` - Added splash_callback parameter, QTimer for deferred database selector
+- `ui/settings_tab.py` - Silent loading during initialization
+
+**User Experience:**
+- Before: Black screen for 2-5 seconds, then brief splash, then "Settings Loaded" dialog
+- After: Instant splash with clear progress indication, smooth transition to main window
+
+### Fixed
+
+**Import Errors:**
+- Added missing `QCheckBox` import to `ui/database_tab.py`
+
+**Startup Performance:**
+- Fixed splash screen not displaying until after heavy imports completed
+- Fixed blocking dialogs during application initialization
+
 ## [2.0.0] - 2026-01-02
 
 ### Added - GUI Implementation
@@ -244,19 +353,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### In Progress
 
-**Separate Photo/Video Archives:**
-- Database schema completed (video_archive_location, separate_video_archive)
-- File type detection utilities completed
-- Settings UI needed
-- File routing logic needed
+- None currently
 
 ### Planned
 
 **Short Term:**
-- Complete separate video archive feature
-- Add video archive UI to settings
-- Implement file routing by type
 - Add database backup functionality
+- Archive location migration feature (move existing archives to new location)
 
 **Medium Term:**
 - Cross-platform path improvements
