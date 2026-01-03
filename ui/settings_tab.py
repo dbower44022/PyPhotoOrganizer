@@ -62,13 +62,9 @@ class SettingsTab(QWidget):
         # Preset dropdown
         preset_layout = QFormLayout()
         self.org_preset_combo = QComboBox()
-        preset_names = [
-            "By Day (with month/day names)",
-            "By Month (with month name)",
-            "By Year",
-            "Legacy (YYYY/MM/DD)",
-            "Custom Template..."
-        ]
+        # Get preset names from OrganizationTemplate to ensure they match
+        preset_names = OrganizationTemplate.get_preset_names()
+        preset_names.append("Custom Template...")
         self.org_preset_combo.addItems(preset_names)
         self.org_preset_combo.currentTextChanged.connect(self.on_preset_changed)
         preset_layout.addRow("Folder Structure:", self.org_preset_combo)
@@ -202,12 +198,35 @@ class SettingsTab(QWidget):
         separate_example.setStyleSheet("color: gray; font-size: 10px; margin-left: 20px; margin-bottom: 5px;")
         file_type_layout.addWidget(separate_example)
 
-        separate_info = QLabel("(Video archive location is set in the Database tab)")
-        separate_info.setStyleSheet("color: gray; font-style: italic; font-size: 10px; margin-left: 20px;")
-        file_type_layout.addWidget(separate_info)
+        # Video archive location widget (shown only when "Separate archive" is selected)
+        self.video_archive_widget = QWidget()
+        video_archive_layout = QHBoxLayout()
+        video_archive_layout.setContentsMargins(20, 5, 0, 5)
+
+        video_archive_label = QLabel("Video Archive Location:")
+        video_archive_layout.addWidget(video_archive_label)
+
+        self.video_archive_path_edit = QLineEdit()
+        self.video_archive_path_edit.setPlaceholderText("Select folder for video archive...")
+        self.video_archive_path_edit.setMinimumWidth(300)
+        video_archive_layout.addWidget(self.video_archive_path_edit)
+
+        self.video_archive_browse_btn = QPushButton("Browse...")
+        self.video_archive_browse_btn.clicked.connect(self.on_browse_video_archive)
+        video_archive_layout.addWidget(self.video_archive_browse_btn)
+
+        video_archive_layout.addStretch()
+        self.video_archive_widget.setLayout(video_archive_layout)
+        self.video_archive_widget.hide()  # Hidden by default
+        file_type_layout.addWidget(self.video_archive_widget)
 
         # Set default
         self.file_type_combined_radio.setChecked(True)
+
+        # Connect radio buttons to check organization lock and update video archive visibility
+        self.file_type_combined_radio.toggled.connect(self.on_file_type_changed)
+        self.file_type_subfolder_radio.toggled.connect(self.on_file_type_changed)
+        self.file_type_separate_radio.toggled.connect(self.on_file_type_changed)
 
         file_type_group.setLayout(file_type_layout)
         layout.addWidget(file_type_group)
@@ -532,11 +551,21 @@ class SettingsTab(QWidget):
 
         total_photos = metadata.get('total_photos', 0)
         current_db_template = metadata.get('organization_template', '{YYYY}/{MM}/{DD}')
+        current_db_file_type_mode = metadata.get('file_type_organization', 'combined')
 
-        # Check if template has changed
+        # Get current file type organization mode from UI
+        if self.file_type_combined_radio.isChecked():
+            current_file_type_mode = 'combined'
+        elif self.file_type_subfolder_radio.isChecked():
+            current_file_type_mode = 'subfolder'
+        else:
+            current_file_type_mode = 'separate_archive'
+
+        # Check if template or file type organization has changed
         template_changed = (self.current_template != current_db_template)
+        file_type_changed = (current_file_type_mode != current_db_file_type_mode)
 
-        if total_photos > 0 and template_changed:
+        if total_photos > 0 and (template_changed or file_type_changed):
             self.org_lock_warning.setText(
                 f"⚠ Warning: This archive contains {total_photos} files. "
                 f"Changing the organization structure will require reorganizing all files. "
@@ -547,6 +576,30 @@ class SettingsTab(QWidget):
         else:
             self.org_lock_warning.hide()
             self.reorganize_btn.hide()
+
+    def on_file_type_changed(self):
+        """Handle file type organization mode change."""
+        # Show/hide video archive location widget
+        if self.file_type_separate_radio.isChecked():
+            self.video_archive_widget.show()
+        else:
+            self.video_archive_widget.hide()
+
+        # Check organization lock
+        self.check_organization_lock()
+
+    def on_browse_video_archive(self):
+        """Browse for video archive location."""
+        from PySide6.QtWidgets import QFileDialog
+
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Video Archive Location",
+            self.video_archive_path_edit.text() or os.path.expanduser("~")
+        )
+
+        if folder:
+            self.video_archive_path_edit.setText(folder)
 
     def save_organization_to_database(self):
         """Save organization settings to database."""
@@ -561,6 +614,23 @@ class SettingsTab(QWidget):
                 file_type_mode = 'subfolder'
             else:
                 file_type_mode = 'separate_archive'
+
+            # Validate video archive location if separate archive mode
+            if file_type_mode == 'separate_archive':
+                video_archive_location = self.video_archive_path_edit.text().strip()
+                if not video_archive_location:
+                    QMessageBox.warning(
+                        self,
+                        "Video Archive Location Required",
+                        "Please specify a video archive location when using separate archive mode."
+                    )
+                    return False
+
+                # Save video archive location to database
+                self.db_metadata.set_video_archive(video_archive_location, enabled=True)
+            else:
+                # Disable separate video archive
+                self.db_metadata.set_video_archive("", enabled=False)
 
             # Save template to database
             self.db_metadata.set_organization_template(self.current_template)
@@ -622,6 +692,12 @@ class SettingsTab(QWidget):
             self.file_type_subfolder_radio.setChecked(True)
         elif mode == 'separate_archive':
             self.file_type_separate_radio.setChecked(True)
+
+        # Load video archive location (if separate archive mode)
+        if mode == 'separate_archive':
+            video_archive_location = db_metadata.get_video_archive_location()
+            if video_archive_location:
+                self.video_archive_path_edit.setText(video_archive_location)
 
         # Update preview
         self.update_organization_preview()
