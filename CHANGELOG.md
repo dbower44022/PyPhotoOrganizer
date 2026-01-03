@@ -401,6 +401,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+**Persistent Source Directories with Status Tracking (2026-01-03):**
+
+**Database-Backed Source Management:**
+- New `SourceDirectories` table in database stores all source folder configurations
+- Source directories persist across application sessions
+- Each source tracks: path, enabled status, added date, last scanned timestamp
+- Automatic loading when database is selected
+- Auto-save when sources are added or removed
+
+**Enhanced Source Selection UI:**
+- Replaced simple list with rich table widget showing:
+  - **Enable Checkbox**: Select which sources to scan in current run
+  - **Status Icon**: ✓ (green) for available, ⚠ (red) for unavailable
+  - **Source Path**: Full directory path
+  - **Last Scanned**: Timestamp of last successful scan (YYYY-MM-DD HH:MM)
+  - **Status**: Text description (Available, Not Mounted, Not Found, Permission Denied)
+- Mouse-over tooltips show detailed status information for each source
+- "Refresh Status" button to re-validate all paths
+
+**Intelligent Path Validation:**
+- Real-time validation checks if path exists, is a directory, and is readable
+- Special handling for network paths (GVFS mounts at `/run/user/*/gvfs/`)
+- Helpful error messages: "Network share not mounted. Open the share in your file manager first."
+- Status updates automatically when paths become available/unavailable
+
+**Smart Processing:**
+- Only processes sources with checkboxes enabled
+- Skips disabled sources even if they're in the list
+- Updates `last_scanned` timestamp for each source after successful processing
+- Maintains separate lists for different database archives
+
+**Benefits:**
+- No need to re-add source folders every time app starts
+- Easily enable/disable sources for different processing runs
+- Track when each source was last processed
+- Visual feedback for network drive connectivity issues
+- Perfect for users with multiple photo sources (phones, cameras, NAS, cloud drives)
+
+**Database Methods Added:**
+- `add_source_directory(path, enabled)` - Add source with auto-save
+- `remove_source_directory(path)` - Remove and reorder remaining
+- `get_all_source_directories()` - Retrieve all sources with metadata
+- `update_source_last_scanned(path, timestamp)` - Update after scan
+- `update_source_enabled(path, enabled)` - Toggle enabled status
+- `clear_all_source_directories()` - Remove all sources
+- `reorder_source_directories(paths)` - Change display order
+
+**Files Modified:**
+- `database_metadata.py` - Added SourceDirectories table and management methods
+- `ui/setup_tab.py` - Complete redesign with table widget and status tracking
+- `ui/main_window.py` - Integration with database loading and processing completion
+
 ### Removed
 
 **All Network-Specific Browsing Features (2026-01-03):**

@@ -23,12 +23,14 @@ PyPhotoOrganizer helps you consolidate photos and videos from multiple devices a
 - ✅ **Flexible Operations**: Copy or move files to destination
 - ✅ **Database-First Architecture**: Each database is permanently bound to a specific archive location
 
-**GUI Features (v2.0):**
+**GUI Features (v2.0+):**
 - ✅ **Professional Splash Screen**: Instant feedback on startup with loading status
 - ✅ **Graphical Interface**: Full-featured PySide6 GUI with tab-based navigation
 - ✅ **Database Management**: Create, select, and manage multiple databases with metadata
+- ✅ **Persistent Source Directories**: Sources stored in database, automatically loaded with status tracking
 - ✅ **Real-Time Progress**: Live updates with accurate time estimates using EMA algorithm
-- ✅ **Easy Folder Selection**: Browse buttons for quick source/destination configuration
+- ✅ **Smart Source Selection**: Enable/disable sources with checkboxes, view last scanned timestamps
+- ✅ **Path Status Monitoring**: Visual indicators for available/unavailable sources with detailed tooltips
 - ✅ **Advanced Settings Editor**: Interactive configuration with filename pattern management
 - ✅ **Results Dashboard**: Detailed statistics with copyable text and export capabilities
 - ✅ **Filtered Files Review**: Comprehensive tab to review and understand filtered files
@@ -92,7 +94,9 @@ python main_gui.py
 
 **Processing Workflow:**
 1. **Setup Tab**:
-   - Add source folders (one or more)
+   - Add source folders (stored persistently in database)
+   - Enable/disable sources with checkboxes for selective processing
+   - View status and last scanned timestamp for each source
    - View archive location (managed by database)
    - Select Copy or Move mode
 2. **Settings Tab** (optional):
@@ -151,10 +155,27 @@ Organizing files: 100%|████████| 850/850 [02:15<00:00, 6.3file/s
 ## GUI Tabs Reference
 
 ### 1. Setup Tab
-- **Source Folders**: Add/remove multiple source directories
+- **Source Folders Table** (Persistent, Database-Backed):
+  - **Enable Column**: Checkbox to select which sources to scan (✓ = included in current run)
+  - **Status Icon**: Visual indicator (✓ green = available, ⚠ red = unavailable)
+  - **Source Path**: Full directory path
+  - **Last Scanned**: Timestamp of last successful scan (YYYY-MM-DD HH:MM)
+  - **Status**: Text description (Available, Not Mounted, Not Found, Permission Denied)
+  - **Tooltips**: Hover over any row for detailed status information
+  - Sources persist across sessions - no need to re-add every time!
+- **Buttons**:
+  - **Add Folder**: Browse and add source directories (auto-saves to database)
+  - **Remove Selected**: Remove selected source from list and database
+  - **Clear All**: Remove all sources with confirmation
+  - **Refresh Status**: Re-validate availability of all sources
 - **Destination Folder**: View archive location (managed by database)
 - **Operation Mode**: Select Copy or Move
 - **Start/Stop Processing**: Control processing with confirmation dialogs
+- **Special Features**:
+  - Network path detection (GVFS mounts: `/run/user/*/gvfs/`)
+  - Helpful messages for unmounted network shares
+  - Only processes sources with checked checkboxes
+  - Automatically updates last scanned timestamp after processing
 
 ### 2. Progress Tab
 - **Overall Progress**: Total files, elapsed time, remaining time estimate
