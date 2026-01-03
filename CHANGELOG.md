@@ -105,6 +105,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Before: Black screen for 2-5 seconds, then brief splash, then "Settings Loaded" dialog
 - After: Instant splash with clear progress indication, smooth transition to main window
 
+### Added - Network Location Browsing (Similar to File Manager)
+
+**Intelligent Network Discovery Dialog:**
+- New "Browse Network..." button with automatic network host and share discovery
+- **Network Host Discovery** (similar to file manager's Network view):
+  - Discovers SMB/CIFS hosts on local network automatically
+  - Uses avahi-browse (mDNS/Zeroconf), nmblookup (NetBIOS), and GVFS mounts
+  - Shows list of discovered network computers/servers
+  - Double-click host to view available shares
+- **Share Listing**:
+  - Automatically lists SMB shares on selected host using smbclient
+  - Filters out administrative shares (ending with $)
+  - Shows accessible shares without requiring manual mounting
+- **Background Processing**:
+  - Network discovery runs in background thread (non-blocking UI)
+  - Progress indicators during discovery and share listing
+- **User-Friendly Workflow**:
+  1. Click "Browse Network..."
+  2. Wait for network hosts to be discovered
+  3. Double-click a host to see its shares
+  4. Select a share and click "Select Folder"
+  5. Network path (//hostname/share) added to source list
+- Complements existing "Add Network Path..." manual entry option
+- "Clear All" button to quickly remove all source folders
+
+**Technical Implementation:**
+- Custom NetworkBrowserDialog with QThread-based discovery
+- Fallback gracefully if tools not installed (avahi, smbclient)
+- Helpful error messages with installation instructions
+- Cross-platform design (currently optimized for Linux)
+
+**Use Cases:**
+- Browse and select NAS folders (Synology, QNAP, FreeNAS, etc.) without pre-mounting
+- Discover and access SMB/CIFS network shares from other computers
+- No need to manually mount shares before adding them
+- Similar workflow to file manager's Network browsing
+
+**Files Added:**
+- `ui/network_browser_dialog.py` - Network discovery dialog with background worker
+
+**Files Modified:**
+- `ui/setup_tab.py` - Updated browse_network_locations() to use network browser dialog
+
 ### Fixed
 
 **Import Errors:**
@@ -357,6 +400,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - File lock handling
 
 ## [Unreleased]
+
+### Removed
+
+**All Network-Specific Browsing Features (2026-01-03):**
+- Removed "Browse Network..." button from Setup tab
+- Removed "Add Network Path..." button and supporting code
+- Deleted `ui/network_browser_dialog.py`
+- Deleted `ui/simple_network_browser.py`
+- Deleted `ui/gio_network_browser.py`
+- Deleted NETWORK_BROWSING.md documentation
+- Removed `add_network_path()` method from SetupTab
+- Simplified source folder selection to basic "Add Folder..." functionality only
+
+**Reason for Removal:**
+Multiple implementation attempts (command-line tools, GVFS integration, GIO library) were unable to achieve seamless file manager-like functionality within Flatpak sandbox environment. All network-specific code was removed to maintain simplicity. Users can still access network locations by mounting them in their file manager first, then using the standard "Add Folder..." button.
 
 ### In Progress
 

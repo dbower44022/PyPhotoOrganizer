@@ -38,8 +38,11 @@ class SetupTab(QWidget):
         self.add_source_btn.clicked.connect(self.add_source_folder)
         self.remove_source_btn = QPushButton("Remove Selected")
         self.remove_source_btn.clicked.connect(self.remove_source_folder)
+        self.clear_all_btn = QPushButton("Clear All")
+        self.clear_all_btn.clicked.connect(self.clear_all_sources)
         source_buttons.addWidget(self.add_source_btn)
         source_buttons.addWidget(self.remove_source_btn)
+        source_buttons.addWidget(self.clear_all_btn)
         source_buttons.addStretch()
         source_layout.addLayout(source_buttons)
 
@@ -135,6 +138,28 @@ class SetupTab(QWidget):
         if current_row >= 0:
             self.source_list.takeItem(current_row)
 
+    def clear_all_sources(self):
+        """Clear all source folders."""
+        if self.source_list.count() == 0:
+            QMessageBox.information(
+                self,
+                "No Folders",
+                "The source folder list is already empty."
+            )
+            return
+
+        response = QMessageBox.question(
+            self,
+            "Clear All Source Folders?",
+            f"Remove all {self.source_list.count()} source folder(s) from the list?\n\n"
+            f"This will not delete any files, only clear the list.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if response == QMessageBox.Yes:
+            self.source_list.clear()
+
     def browse_destination(self):
         """Show informative dialog - destination is managed by database."""
         current_dest = self.dest_edit.text()
@@ -179,6 +204,7 @@ class SetupTab(QWidget):
         """Enable or disable controls during processing."""
         self.add_source_btn.setEnabled(enabled)
         self.remove_source_btn.setEnabled(enabled)
+        self.clear_all_btn.setEnabled(enabled)
         # Note: browse_dest_btn always stays enabled (active UI principle)
         # It shows an informative dialog instead
         self.copy_radio.setEnabled(enabled)

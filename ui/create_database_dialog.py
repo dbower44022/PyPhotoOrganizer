@@ -6,7 +6,8 @@ Wizard for creating a new photo archive database.
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QLineEdit, QTextEdit, QFileDialog,
-                               QMessageBox, QGroupBox, QFormLayout, QApplication)
+                               QMessageBox, QGroupBox, QFormLayout, QApplication,
+                               QCheckBox)
 from PySide6.QtCore import Qt
 from database_metadata import DatabaseMetadata
 import os

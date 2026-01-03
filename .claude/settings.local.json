@@ -5,7 +5,12 @@
       "Bash(cd /home/doug/Dropbox/Projects/python\\\\ Projects/PyPhotoOrganizer/PyPhotoOrganizer && python3 -m py_compile main_gui.py ui/*.py:*)",
       "Bash(python3:*)",
       "Bash(cd:*)",
-      "Bash(.venv/bin/python --version)"
+      "Bash(.venv/bin/python --version)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(mount:*)",
+      "Bash(.venv/bin/pip install:*)",
+      "Bash(sudo apt-get install:*)",
+      "Bash(timeout 5 .venv/bin/python:*)"
     ]
   }
 }

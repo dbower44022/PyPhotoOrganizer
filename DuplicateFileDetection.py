@@ -986,7 +986,7 @@ def VerifyFileType(filename):
                 logger.info("##################################################################################")
 
                 # If the actual filetype does not match the extension of the file to be processed, write a valid file to the disk drive and return it to be processed instead of the incorrect file.
-                if not existing_file_extension or existing_file_extension.lower() != matching_file_extension.lower():
+                if not existing_file_extension or not matching_file_extension or existing_file_extension.lower() != matching_file_extension.lower():
                     # The valid file extensions from the analyzed_filetype does not match the existing file extension.  So create a new file with the first correct extensions from the analyzed_filetype
                     extension_list = EXTENSIONS_MAP[matching_file_type]
                     logger.info(f"The extension list = {extension_list}")
