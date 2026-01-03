@@ -74,6 +74,8 @@ import DuplicateFileDetection
 import utils
 from config import Config
 import constants
+from organization_template import OrganizationTemplate
+from datetime import datetime as dt_datetime
 
 # Configure logging using shared utility
 logger = utils.setup_logger(__name__, "main_app_error.log")
@@ -164,8 +166,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
         # Extract settings from config
         source_directory = config.source_directory
         destination_directory = config.destination_directory
-        group_by_year = config.group_by_year
-        group_by_day = config.group_by_day
+        organization_template = config.get('organization_template', '{YYYY}/{MM}/{DD}')
         copy_files = config.copy_files
         move_files = config.move_files
 
@@ -257,6 +258,13 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                     year, month, day = DuplicateFileDetection.get_creation_date(file_path)
                     # The year, month and day will be returned as strings.
 
+                    # Convert year, month, day strings to datetime object for template parsing
+                    try:
+                        file_date = dt_datetime(int(year), int(month), int(day))
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Invalid date for file {file_path}: {year}/{month}/{day}. Using current date. Error: {e}")
+                        file_date = dt_datetime.now()
+
                     # Determine base destination directory (photo archive or video archive)
                     # Check if file is a video and if separate video archive is enabled
                     from database_metadata import DatabaseMetadata
@@ -274,26 +282,9 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                         base_destination = destination_directory
                         logger.debug(f"Routing file to photo archive: {base_destination}")
 
-                    if group_by_year:
-                        if group_by_day:
-                            # ex: c:\2024\11\25
-                            destination_folder = os.path.join(
-                                base_destination, f"{year}", f"{month}", f"{day}"
-                            )
-                        else:
-                            # ex: c:\2024\11
-                            destination_folder = os.path.join(
-                                base_destination, f"{year}", f"{month}"
-                            )
-                    else:
-                        if group_by_day:
-                            # ex: c:\2024-11\25
-                            destination_folder = os.path.join(
-                                base_destination, f"{year}-{month}", f"{day}"
-                            )
-                        else:
-                            # ex: c:\2024-11
-                            destination_folder = os.path.join(base_destination, f"{year}-{month}")
+                    # Use organization template to generate folder structure
+                    folder_path = OrganizationTemplate.parse(organization_template, file_date)
+                    destination_folder = os.path.join(base_destination, folder_path)
 
                     logger.info(f"The destination directory was set to: {destination_folder}")
 

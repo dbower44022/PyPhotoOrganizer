@@ -152,6 +152,10 @@ class MainWindow(QMainWindow):
             config['copy_files'] = self.setup_tab.is_copy_mode()
             config['move_files'] = self.setup_tab.is_move_mode()
 
+            # Save organization settings to database before processing
+            if not self.settings_tab.save_organization_to_database():
+                return  # Error dialog already shown
+
             # Validate operation mode
             if not config['copy_files'] and not config['move_files']:
                 QMessageBox.warning(self, "Error", "Please select Copy or Move mode")
@@ -306,6 +310,9 @@ class MainWindow(QMainWindow):
 
         # Load source directories from database
         self.setup_tab.set_database(self.database_metadata)
+
+        # Update settings tab with database (loads organization template)
+        self.settings_tab.set_database(self.database_metadata)
 
         # Update window title
         metadata = self.database_metadata.get_metadata()
