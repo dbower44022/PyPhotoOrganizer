@@ -34,6 +34,17 @@ class DatabaseMetadata:
         );
     """
 
+    SOURCE_DIRECTORIES_TABLE_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS SourceDirectories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL UNIQUE,
+            order_index INTEGER NOT NULL,
+            added_date TEXT NOT NULL,
+            last_scanned TEXT,
+            enabled INTEGER DEFAULT 1
+        );
+    """
+
     def __init__(self, database_path: str):
         """
         Initialize database metadata manager.
@@ -43,6 +54,7 @@ class DatabaseMetadata:
         """
         self.database_path = database_path
         self._ensure_metadata_table()
+        self._ensure_source_directories_table()
 
     def _ensure_metadata_table(self):
         """Ensure the metadata table exists in the database with all columns."""
@@ -72,6 +84,22 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to create/upgrade metadata table: {e}")
+            raise
+
+    def _ensure_source_directories_table(self):
+        """Ensure the SourceDirectories table exists in the database."""
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                # Create table if it doesn't exist
+                cursor.execute(self.SOURCE_DIRECTORIES_TABLE_SCHEMA)
+
+                conn.commit()
+                logger.debug(f"SourceDirectories table ensured in {self.database_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to create SourceDirectories table: {e}")
             raise
 
     def ensure_all_tables(self):
@@ -334,6 +362,241 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to update archive location: {e}")
+            return False
+
+    # ========== Source Directories Management ==========
+
+    def add_source_directory(self, path: str, enabled: bool = True) -> bool:
+        """
+        Add a source directory to the database.
+
+        Args:
+            path: Absolute path to the source directory
+            enabled: Whether the source is enabled for scanning (default: True)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if not os.path.isabs(path):
+                raise ValueError("Source directory path must be absolute")
+
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                # Get current max order_index
+                cursor.execute("SELECT COALESCE(MAX(order_index), -1) FROM SourceDirectories")
+                max_order = cursor.fetchone()[0]
+                next_order = max_order + 1
+
+                # Insert new source directory
+                cursor.execute("""
+                    INSERT INTO SourceDirectories (path, order_index, added_date, enabled)
+                    VALUES (?, ?, ?, ?)
+                """, (path, next_order, datetime.now().isoformat(), 1 if enabled else 0))
+
+                conn.commit()
+                logger.info(f"Added source directory: {path}")
+                return True
+
+        except sqlite3.IntegrityError:
+            logger.warning(f"Source directory already exists: {path}")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to add source directory: {e}")
+            return False
+
+    def remove_source_directory(self, path: str) -> bool:
+        """
+        Remove a source directory from the database.
+
+        Args:
+            path: Path to the source directory to remove
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                # Delete the source directory
+                cursor.execute("DELETE FROM SourceDirectories WHERE path = ?", (path,))
+
+                if cursor.rowcount == 0:
+                    logger.warning(f"Source directory not found: {path}")
+                    return False
+
+                # Reorder remaining entries
+                cursor.execute("""
+                    SELECT id FROM SourceDirectories ORDER BY order_index
+                """)
+                rows = cursor.fetchall()
+
+                for new_index, (row_id,) in enumerate(rows):
+                    cursor.execute("""
+                        UPDATE SourceDirectories SET order_index = ? WHERE id = ?
+                    """, (new_index, row_id))
+
+                conn.commit()
+                logger.info(f"Removed source directory: {path}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to remove source directory: {e}")
+            return False
+
+    def get_all_source_directories(self) -> List[Dict[str, Any]]:
+        """
+        Get all source directories with their metadata.
+
+        Returns:
+            List of dictionaries with source directory information
+        """
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    SELECT id, path, order_index, added_date, last_scanned, enabled
+                    FROM SourceDirectories
+                    ORDER BY order_index
+                """)
+
+                rows = cursor.fetchall()
+                sources = []
+
+                for row in rows:
+                    sources.append({
+                        'id': row[0],
+                        'path': row[1],
+                        'order_index': row[2],
+                        'added_date': row[3],
+                        'last_scanned': row[4],
+                        'enabled': bool(row[5])
+                    })
+
+                return sources
+
+        except Exception as e:
+            logger.error(f"Failed to get source directories: {e}")
+            return []
+
+    def update_source_last_scanned(self, path: str, timestamp: Optional[str] = None) -> bool:
+        """
+        Update the last_scanned timestamp for a source directory.
+
+        Args:
+            path: Path to the source directory
+            timestamp: ISO format timestamp (default: current time)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if timestamp is None:
+                timestamp = datetime.now().isoformat()
+
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    UPDATE SourceDirectories
+                    SET last_scanned = ?
+                    WHERE path = ?
+                """, (timestamp, path))
+
+                if cursor.rowcount == 0:
+                    logger.warning(f"Source directory not found: {path}")
+                    return False
+
+                conn.commit()
+                logger.debug(f"Updated last_scanned for {path}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to update last_scanned: {e}")
+            return False
+
+    def update_source_enabled(self, path: str, enabled: bool) -> bool:
+        """
+        Update the enabled status for a source directory.
+
+        Args:
+            path: Path to the source directory
+            enabled: Whether the source is enabled
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    UPDATE SourceDirectories
+                    SET enabled = ?
+                    WHERE path = ?
+                """, (1 if enabled else 0, path))
+
+                if cursor.rowcount == 0:
+                    logger.warning(f"Source directory not found: {path}")
+                    return False
+
+                conn.commit()
+                logger.debug(f"Updated enabled status for {path}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to update enabled status: {e}")
+            return False
+
+    def clear_all_source_directories(self) -> bool:
+        """
+        Remove all source directories from the database.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM SourceDirectories")
+                conn.commit()
+                logger.info("Cleared all source directories")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to clear source directories: {e}")
+            return False
+
+    def reorder_source_directories(self, paths_in_order: List[str]) -> bool:
+        """
+        Reorder source directories by updating their order_index.
+
+        Args:
+            paths_in_order: List of paths in desired order
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                for new_index, path in enumerate(paths_in_order):
+                    cursor.execute("""
+                        UPDATE SourceDirectories
+                        SET order_index = ?
+                        WHERE path = ?
+                    """, (new_index, path))
+
+                conn.commit()
+                logger.info("Reordered source directories")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to reorder source directories: {e}")
             return False
 
     @staticmethod

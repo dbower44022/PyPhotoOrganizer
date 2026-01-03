@@ -949,6 +949,7 @@ def VerifyFileType(filename):
             'PPM': ['.ppm'],
             'EPS': ['.eps'],
             'PDF': ['.pdf'],
+            'MPO': ['.mpo', '.jpg'],  # Multi-Picture Object (used by some cameras, especially 3D)
         }
 
         # Get the base filename, and extension (if one exists)
@@ -984,6 +985,12 @@ def VerifyFileType(filename):
                 logger.info("##################################################################################")
                 logger.info(f"The file format returned by pillow '{analyzed_file_format}'is a valid pillow format, but the existing file extension '{existing_file_extension}' does not match any of the valid file extensions for the calculated file type.  So we need to continue processing to determine if it is a valid file!")
                 logger.info("##################################################################################")
+
+                # Check if the analyzed file format is in our supported EXTENSIONS_MAP
+                if analyzed_file_format.upper() not in [ft.upper() for ft in EXTENSIONS_MAP.keys()]:
+                    logger.warning(f"File format '{analyzed_file_format}' is not in EXTENSIONS_MAP. Accepting file with existing extension '{existing_file_extension}'")
+                    # File format not in our map (like MPO), but Pillow can open it, so accept it as-is
+                    return filename
 
                 # If the actual filetype does not match the extension of the file to be processed, write a valid file to the disk drive and return it to be processed instead of the incorrect file.
                 if not existing_file_extension or not matching_file_extension or existing_file_extension.lower() != matching_file_extension.lower():

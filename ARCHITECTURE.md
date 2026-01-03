@@ -411,6 +411,35 @@ safe_get_file_size(file_path)
 
 ### Schema
 
+**Table: DatabaseMetadata** (v2.0+)
+```sql
+CREATE TABLE DatabaseMetadata (
+    id INTEGER PRIMARY KEY CHECK (id = 1),  -- Singleton row
+    database_name TEXT NOT NULL,
+    description TEXT,
+    archive_location TEXT NOT NULL,         -- Permanently bound archive path
+    video_archive_location TEXT,            -- Optional separate video archive
+    separate_video_archive INTEGER DEFAULT 0,
+    created_date TEXT NOT NULL,
+    last_used_date TEXT,
+    schema_version INTEGER DEFAULT 1,
+    total_photos INTEGER DEFAULT 0          -- Cached count from UniquePhotos
+);
+```
+
+**Table: SourceDirectories** (v2.1+)
+```sql
+CREATE TABLE SourceDirectories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT NOT NULL UNIQUE,              -- Source directory path
+    order_index INTEGER NOT NULL,           -- Display order in UI
+    added_date TEXT NOT NULL,               -- When source was added
+    last_scanned TEXT,                      -- Last successful scan timestamp
+    enabled INTEGER DEFAULT 1               -- Checkbox state (0=disabled, 1=enabled)
+);
+```
+
+**Table: UniquePhotos** (v1.0+)
 ```sql
 CREATE TABLE UniquePhotos (
     file_hash TEXT PRIMARY KEY,           -- Full SHA-256 hash

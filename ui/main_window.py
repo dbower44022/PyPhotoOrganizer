@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QMainWindow, QTabWidget, QMessageBox,
 from PySide6.QtCore import Qt, QSettings, QRect, QPoint, QTimer
 from PySide6.QtGui import QAction, QScreen
 import sys
+from datetime import datetime
 
 from ui.setup_tab import SetupTab
 from ui.progress_tab import ProgressTab
@@ -129,8 +130,8 @@ class MainWindow(QMainWindow):
             # Get configuration from settings tab
             config = self.settings_tab.get_config()
 
-            # Update config with folder selections from setup tab
-            source_folders = self.setup_tab.get_source_folders()
+            # Update config with folder selections from setup tab (only enabled ones)
+            source_folders = self.setup_tab.get_enabled_source_folders()
 
             # Get destination from database
             destination_folder = self.database_metadata.get_archive_location()
@@ -214,6 +215,15 @@ class MainWindow(QMainWindow):
             # Refresh the database tab display to show updated count
             self.database_tab.refresh_database_info()
 
+            # Update last_scanned timestamp for all processed source directories
+            source_folders = self.setup_tab.get_enabled_source_folders()
+            current_time = datetime.now().isoformat()
+            for folder in source_folders:
+                self.database_metadata.update_source_last_scanned(folder, current_time)
+
+            # Refresh the setup tab to show updated last_scanned times
+            self.setup_tab.load_sources_from_database()
+
         # Update results tab
         self.results_tab.display_results(results)
 
@@ -293,6 +303,9 @@ class MainWindow(QMainWindow):
         # Update setup tab with archive location
         if archive_location:
             self.setup_tab.set_destination_folder(archive_location)
+
+        # Load source directories from database
+        self.setup_tab.set_database(self.database_metadata)
 
         # Update window title
         metadata = self.database_metadata.get_metadata()

@@ -75,14 +75,48 @@ Configuration is loaded from `settings.json` in the project root directory.
 - `get_creation_date()`: Extracts creation date from EXIF data (preferred) or OS file metadata
 - `load_photo_hashes()`: Loads all existing file hashes from SQLite database
 
+**database_metadata.py** - Database metadata and configuration management
+- `DatabaseMetadata` class: Manages database metadata, archive binding, and source directories
+  - Database-first architecture: Each database is bound to a specific archive location
+  - Stores database name, description, creation date, archive location
+  - Manages video archive location (for separate video storage)
+  - **Source Directory Management** (NEW in v2.1):
+    - `add_source_directory(path, enabled)`: Add source folder with auto-save to database
+    - `remove_source_directory(path)`: Remove source and reorder remaining
+    - `get_all_source_directories()`: Get all sources with metadata (path, enabled, last_scanned)
+    - `update_source_last_scanned(path, timestamp)`: Update timestamp after processing
+    - `update_source_enabled(path, enabled)`: Toggle enabled status
+    - `clear_all_source_directories()`: Remove all sources
+  - `find_databases(path)`: Search for all PyPhotoOrganizer databases in directory
+  - `create_database()`: Create new database with all required tables
+  - `ensure_all_tables()`: Upgrade old databases by adding missing tables/columns
+
 **Database**: SQLite database (configurable via `settings.json`, defaults to `PhotoDB.db`)
-- Table `UniquePhotos`: Stores hash, file path, and creation date info for all unique photos
-- Used to prevent duplicate files from being copied to the vault
-- Managed via `PhotoDatabase` context manager for automatic connection handling and transaction management
+- **Table `DatabaseMetadata`**: Stores database metadata and configuration
+  - `database_name`: User-friendly name for the database
+  - `archive_location`: Path to photo archive (permanently bound)
+  - `video_archive_location`: Optional separate location for videos
+  - `created_date`, `last_used_date`: Timestamps
+  - `total_photos`: Cached count from UniquePhotos table
+  - `schema_version`: For future database upgrades
+- **Table `UniquePhotos`**: Stores hash, file path, and creation date info for all unique photos
+  - Used to prevent duplicate files from being copied to the vault
+  - Managed via `PhotoDatabase` context manager
+- **Table `SourceDirectories`** (NEW in v2.1): Stores persistent source folder configurations
+  - `path`: Full directory path (unique)
+  - `order_index`: Display order in UI
+  - `added_date`: When source was added
+  - `last_scanned`: Timestamp of last successful scan (updated after processing)
+  - `enabled`: Whether source is enabled for scanning (checkbox state)
+  - Sources persist across sessions - automatically loaded when database is selected
+  - Allows selective processing with checkboxes (only enabled sources are scanned)
 
 ### Data Flow
 
-1. User configures source/destination directories in `settings.json`
+1. **GUI Mode**: Source directories loaded from database `SourceDirectories` table (persistent across sessions)
+   - User selects which sources to scan using checkboxes
+   - Only enabled sources are processed
+   **CLI Mode**: Source directories configured in `settings.json`
 2. `get_file_list()` scans source directories for files matching configured extensions
 3. Each file is verified (`VerifyFileType()`) to ensure extension matches actual format
 4. **Photo filtering** (if enabled): File is checked to determine if it's a real photograph
