@@ -30,7 +30,9 @@ class DatabaseMetadata:
             created_date TEXT NOT NULL,
             last_used_date TEXT,
             schema_version INTEGER DEFAULT 1,
-            total_photos INTEGER DEFAULT 0
+            total_photos INTEGER DEFAULT 0,
+            organization_template TEXT DEFAULT '{YYYY}/{MM}/{DD}',
+            file_type_organization TEXT DEFAULT 'combined'
         );
     """
 
@@ -78,6 +80,16 @@ class DatabaseMetadata:
                 if 'separate_video_archive' not in columns:
                     logger.info("Upgrading database: adding separate_video_archive column")
                     cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN separate_video_archive INTEGER DEFAULT 0")
+
+                # Add organization_template column if missing
+                if 'organization_template' not in columns:
+                    logger.info("Upgrading database: adding organization_template column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN organization_template TEXT DEFAULT '{YYYY}/{MM}/{DD}'")
+
+                # Add file_type_organization column if missing
+                if 'file_type_organization' not in columns:
+                    logger.info("Upgrading database: adding file_type_organization column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN file_type_organization TEXT DEFAULT 'combined'")
 
                 conn.commit()
                 logger.debug(f"Metadata table ensured in {self.database_path}")
@@ -182,7 +194,8 @@ class DatabaseMetadata:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT database_name, description, archive_location, video_archive_location,
-                           separate_video_archive, created_date, last_used_date, schema_version, total_photos
+                           separate_video_archive, created_date, last_used_date, schema_version, total_photos,
+                           organization_template, file_type_organization
                     FROM DatabaseMetadata WHERE id = 1
                 """)
 
@@ -197,7 +210,9 @@ class DatabaseMetadata:
                         'created_date': row[5],
                         'last_used_date': row[6],
                         'schema_version': row[7],
-                        'total_photos': row[8]
+                        'total_photos': row[8],
+                        'organization_template': row[9] if len(row) > 9 else '{YYYY}/{MM}/{DD}',
+                        'file_type_organization': row[10] if len(row) > 10 else 'combined'
                     }
                 return None
 
@@ -362,6 +377,82 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to update archive location: {e}")
+            return False
+
+    def get_organization_template(self) -> str:
+        """
+        Get the organization template for this database.
+
+        Returns:
+            Organization template string (default: '{YYYY}/{MM}/{DD}')
+        """
+        metadata = self.get_metadata()
+        return metadata.get('organization_template', '{YYYY}/{MM}/{DD}') if metadata else '{YYYY}/{MM}/{DD}'
+
+    def set_organization_template(self, template: str) -> bool:
+        """
+        Set the organization template.
+
+        Args:
+            template: Organization template string
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET organization_template = ?
+                    WHERE id = 1
+                """, (template,))
+                conn.commit()
+                logger.info(f"Updated organization template to: {template}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to update organization template: {e}")
+            return False
+
+    def get_file_type_organization(self) -> str:
+        """
+        Get the file type organization mode.
+
+        Returns:
+            File type organization mode ('combined', 'subfolder', 'separate_archive')
+        """
+        metadata = self.get_metadata()
+        return metadata.get('file_type_organization', 'combined') if metadata else 'combined'
+
+    def set_file_type_organization(self, mode: str) -> bool:
+        """
+        Set the file type organization mode.
+
+        Args:
+            mode: Organization mode ('combined', 'subfolder', 'separate_archive')
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            valid_modes = ['combined', 'subfolder', 'separate_archive']
+            if mode not in valid_modes:
+                raise ValueError(f"Invalid mode: {mode}. Must be one of {valid_modes}")
+
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET file_type_organization = ?
+                    WHERE id = 1
+                """, (mode,))
+                conn.commit()
+                logger.info(f"Updated file type organization to: {mode}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to update file type organization: {e}")
             return False
 
     # ========== Source Directories Management ==========

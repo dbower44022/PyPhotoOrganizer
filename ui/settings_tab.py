@@ -7,12 +7,15 @@ Advanced configuration management.
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QCheckBox, QSpinBox, QLineEdit, QPushButton,
                                QLabel, QListWidget, QMessageBox, QScrollArea,
-                               QFormLayout)
+                               QFormLayout, QComboBox, QTextEdit, QRadioButton,
+                               QButtonGroup)
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 import json
 import os
 import constants
 from config import Config
+from organization_template import OrganizationTemplate
 
 
 class SettingsTab(QWidget):
@@ -21,6 +24,8 @@ class SettingsTab(QWidget):
     def __init__(self):
         super().__init__()
         self.settings_file = "settings.json"
+        self.db_metadata = None  # Will be set when database is loaded
+        self.current_template = '{YYYY}/{MM}/{DD}'  # Default template
         self.init_ui()
         self.load_from_file(show_dialog=False)  # Suppress dialog during initialization
 
@@ -52,25 +57,163 @@ class SettingsTab(QWidget):
 
         # Organization Settings
         org_group = QGroupBox("Organization Settings")
-        org_layout = QFormLayout()
+        org_layout = QVBoxLayout()
 
-        self.group_by_year_check = QCheckBox()
-        self.group_by_year_check.setChecked(True)
-        self.group_by_year_check.stateChanged.connect(self.update_folder_preview)
-        org_layout.addRow("Group by year:", self.group_by_year_check)
+        # Preset dropdown
+        preset_layout = QFormLayout()
+        self.org_preset_combo = QComboBox()
+        preset_names = [
+            "By Day (with month/day names)",
+            "By Month (with month name)",
+            "By Year",
+            "Legacy (YYYY/MM/DD)",
+            "Custom Template..."
+        ]
+        self.org_preset_combo.addItems(preset_names)
+        self.org_preset_combo.currentTextChanged.connect(self.on_preset_changed)
+        preset_layout.addRow("Folder Structure:", self.org_preset_combo)
+        org_layout.addLayout(preset_layout)
 
-        self.group_by_day_check = QCheckBox()
-        self.group_by_day_check.setChecked(True)
-        self.group_by_day_check.stateChanged.connect(self.update_folder_preview)
-        org_layout.addRow("Group by day:", self.group_by_day_check)
+        # Custom template editor (hidden by default)
+        self.custom_template_widget = QWidget()
+        custom_layout = QVBoxLayout()
+        custom_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.folder_preview_label = QLabel()
-        self.folder_preview_label.setStyleSheet("font-style: italic; color: gray;")
-        org_layout.addRow("Folder structure:", self.folder_preview_label)
-        self.update_folder_preview()
+        custom_label = QLabel("Custom Template:")
+        custom_label.setStyleSheet("font-weight: bold;")
+        custom_layout.addWidget(custom_label)
+
+        self.custom_template_edit = QLineEdit()
+        self.custom_template_edit.setPlaceholderText("Example: {YYYY}/{MM-Month_Short}/{DD-Day_Short}")
+        self.custom_template_edit.textChanged.connect(self.on_custom_template_changed)
+        custom_layout.addWidget(self.custom_template_edit)
+
+        # Helper buttons for placeholders
+        helper_layout = QHBoxLayout()
+        helper_label = QLabel("Insert:")
+        helper_layout.addWidget(helper_label)
+
+        placeholder_buttons = [
+            ("YYYY", "{YYYY}"),
+            ("MM", "{MM}"),
+            ("DD", "{DD}"),
+            ("MM-Month", "{MM-Month_Short}"),
+            ("DD-Day", "{DD-Day_Short}"),
+        ]
+
+        for btn_label, placeholder in placeholder_buttons:
+            btn = QPushButton(btn_label)
+            btn.setMaximumWidth(80)
+            btn.clicked.connect(lambda checked, p=placeholder: self.insert_placeholder(p))
+            helper_layout.addWidget(btn)
+
+        helper_layout.addStretch()
+        custom_layout.addLayout(helper_layout)
+
+        # Validation message
+        self.template_validation_label = QLabel()
+        self.template_validation_label.setWordWrap(True)
+        custom_layout.addWidget(self.template_validation_label)
+
+        self.custom_template_widget.setLayout(custom_layout)
+        self.custom_template_widget.hide()  # Hidden by default
+        org_layout.addWidget(self.custom_template_widget)
+
+        # Preview panel
+        preview_widget = QWidget()
+        preview_widget.setStyleSheet("background-color: #f5f5f5; border: 1px solid #ddd; border-radius: 3px;")
+        preview_layout = QVBoxLayout()
+        preview_layout.setContentsMargins(10, 10, 10, 10)
+
+        preview_title = QLabel("Preview:")
+        preview_title.setStyleSheet("font-weight: bold;")
+        preview_layout.addWidget(preview_title)
+
+        self.org_description_label = QLabel()
+        self.org_description_label.setWordWrap(True)
+        self.org_description_label.setStyleSheet("color: #555; margin-bottom: 5px;")
+        preview_layout.addWidget(self.org_description_label)
+
+        examples_label = QLabel("Example paths:")
+        examples_label.setStyleSheet("font-weight: bold; margin-top: 5px;")
+        preview_layout.addWidget(examples_label)
+
+        self.org_preview_label = QLabel()
+        self.org_preview_label.setWordWrap(True)
+        self.org_preview_label.setStyleSheet("font-family: monospace; color: #333;")
+        preview_layout.addWidget(self.org_preview_label)
+
+        preview_widget.setLayout(preview_layout)
+        org_layout.addWidget(preview_widget)
+
+        # Lock warning (shown when archive has files)
+        self.org_lock_warning = QLabel()
+        self.org_lock_warning.setWordWrap(True)
+        self.org_lock_warning.setStyleSheet("color: #d9534f; background-color: #f2dede; padding: 8px; border-radius: 3px;")
+        self.org_lock_warning.hide()
+        org_layout.addWidget(self.org_lock_warning)
+
+        self.reorganize_btn = QPushButton("Reorganize Archive...")
+        self.reorganize_btn.setStyleSheet("background-color: #f0ad4e; color: white; font-weight: bold;")
+        self.reorganize_btn.hide()
+        self.reorganize_btn.clicked.connect(self.on_reorganize_clicked)
+        org_layout.addWidget(self.reorganize_btn)
 
         org_group.setLayout(org_layout)
         layout.addWidget(org_group)
+
+        # File Type Organization Settings
+        file_type_group = QGroupBox("File Type Organization")
+        file_type_layout = QVBoxLayout()
+
+        file_type_label = QLabel("How should videos be organized?")
+        file_type_label.setStyleSheet("font-weight: bold; margin-bottom: 5px;")
+        file_type_layout.addWidget(file_type_label)
+
+        self.file_type_button_group = QButtonGroup()
+
+        self.file_type_combined_radio = QRadioButton("Same folders as photos")
+        self.file_type_combined_radio.setToolTip("Photos and videos in the same date folders")
+        self.file_type_button_group.addButton(self.file_type_combined_radio, 0)
+        file_type_layout.addWidget(self.file_type_combined_radio)
+
+        combined_example = QLabel("  Example: 2025/02-Feb/03-Tue/photo.jpg\n"
+                                  "           2025/02-Feb/03-Tue/video.mp4")
+        combined_example.setStyleSheet("color: gray; font-size: 10px; margin-left: 20px; margin-bottom: 5px;")
+        file_type_layout.addWidget(combined_example)
+
+        self.file_type_subfolder_radio = QRadioButton("Separate subfolder under date folder")
+        self.file_type_subfolder_radio.setToolTip("Videos in Videos/ subfolder, photos in Photos/ subfolder")
+        self.file_type_button_group.addButton(self.file_type_subfolder_radio, 1)
+        file_type_layout.addWidget(self.file_type_subfolder_radio)
+
+        subfolder_example = QLabel("  Example: 2025/02-Feb/03-Tue/Photos/photo.jpg\n"
+                                   "           2025/02-Feb/03-Tue/Videos/video.mp4")
+        subfolder_example.setStyleSheet("color: gray; font-size: 10px; margin-left: 20px; margin-bottom: 5px;")
+        file_type_layout.addWidget(subfolder_example)
+
+        self.file_type_separate_radio = QRadioButton("Completely separate archive location")
+        self.file_type_separate_radio.setToolTip("Videos stored in a different archive location")
+        self.file_type_button_group.addButton(self.file_type_separate_radio, 2)
+        file_type_layout.addWidget(self.file_type_separate_radio)
+
+        separate_example = QLabel("  Photos: /archive/photos/2025/02-Feb/03-Tue/photo.jpg\n"
+                                  "  Videos: /archive/videos/2025/02-Feb/03-Tue/video.mp4")
+        separate_example.setStyleSheet("color: gray; font-size: 10px; margin-left: 20px; margin-bottom: 5px;")
+        file_type_layout.addWidget(separate_example)
+
+        separate_info = QLabel("(Video archive location is set in the Database tab)")
+        separate_info.setStyleSheet("color: gray; font-style: italic; font-size: 10px; margin-left: 20px;")
+        file_type_layout.addWidget(separate_info)
+
+        # Set default
+        self.file_type_combined_radio.setChecked(True)
+
+        file_type_group.setLayout(file_type_layout)
+        layout.addWidget(file_type_group)
+
+        # Update preview with default preset
+        self.update_organization_preview()
 
         # Performance Settings
         perf_group = QGroupBox("Performance Settings")
@@ -302,21 +445,189 @@ class SettingsTab(QWidget):
         count = self.pattern_list.count()
         self.pattern_count_label.setText(f"Total patterns: {count}")
 
-    def update_folder_preview(self):
-        """Update folder structure preview."""
-        group_by_year = self.group_by_year_check.isChecked()
-        group_by_day = self.group_by_day_check.isChecked()
-
-        if group_by_year and group_by_day:
-            preview = "2024/11/25/photo.jpg"
-        elif group_by_year and not group_by_day:
-            preview = "2024/11/photo.jpg"
-        elif not group_by_year and group_by_day:
-            preview = "2024-11/25/photo.jpg"
+    def on_preset_changed(self, preset_name):
+        """Handle preset selection change."""
+        # Show/hide custom template editor
+        if preset_name == "Custom Template...":
+            self.custom_template_widget.show()
+            # Use current custom template or default
+            if not self.custom_template_edit.text():
+                self.custom_template_edit.setText(self.current_template)
         else:
-            preview = "2024-11/photo.jpg"
+            self.custom_template_widget.hide()
+            # Load template from preset
+            preset = OrganizationTemplate.get_preset_by_name(preset_name)
+            if preset:
+                self.current_template = preset['template']
 
-        self.folder_preview_label.setText(preview)
+        # Update preview
+        self.update_organization_preview()
+
+        # Check if organization is locked
+        self.check_organization_lock()
+
+    def on_custom_template_changed(self, text):
+        """Validate and update preview for custom template."""
+        if not text.strip():
+            self.template_validation_label.setText("")
+            return
+
+        # Validate template
+        is_valid, error_msg = OrganizationTemplate.validate(text)
+
+        if is_valid:
+            self.template_validation_label.setText("✓ Valid template")
+            self.template_validation_label.setStyleSheet("color: green; font-weight: bold;")
+            self.current_template = text
+            self.update_organization_preview()
+        else:
+            self.template_validation_label.setText(f"✗ {error_msg}")
+            self.template_validation_label.setStyleSheet("color: red; font-weight: bold;")
+
+        # Check if organization is locked
+        self.check_organization_lock()
+
+    def insert_placeholder(self, placeholder):
+        """Insert placeholder at cursor position in custom template."""
+        cursor_pos = self.custom_template_edit.cursorPosition()
+        current_text = self.custom_template_edit.text()
+        new_text = current_text[:cursor_pos] + placeholder + current_text[cursor_pos:]
+        self.custom_template_edit.setText(new_text)
+        # Move cursor after inserted placeholder
+        self.custom_template_edit.setCursorPosition(cursor_pos + len(placeholder))
+        self.custom_template_edit.setFocus()
+
+    def update_organization_preview(self):
+        """Generate and display example paths."""
+        # Validate current template
+        is_valid, error_msg = OrganizationTemplate.validate(self.current_template)
+
+        if not is_valid:
+            self.org_description_label.setText(f"Invalid template: {error_msg}")
+            self.org_preview_label.setText("")
+            return
+
+        # Get description
+        description = OrganizationTemplate.format_description(self.current_template)
+        self.org_description_label.setText(description)
+
+        # Generate examples
+        examples = OrganizationTemplate.generate_examples(self.current_template)
+        example_text = "\n".join(examples)
+        self.org_preview_label.setText(example_text)
+
+    def check_organization_lock(self):
+        """Check if organization settings are locked and show warning."""
+        if self.db_metadata is None:
+            self.org_lock_warning.hide()
+            self.reorganize_btn.hide()
+            return
+
+        # Get metadata to check if database has files
+        metadata = self.db_metadata.get_metadata()
+        if not metadata:
+            self.org_lock_warning.hide()
+            self.reorganize_btn.hide()
+            return
+
+        total_photos = metadata.get('total_photos', 0)
+        current_db_template = metadata.get('organization_template', '{YYYY}/{MM}/{DD}')
+
+        # Check if template has changed
+        template_changed = (self.current_template != current_db_template)
+
+        if total_photos > 0 and template_changed:
+            self.org_lock_warning.setText(
+                f"⚠ Warning: This archive contains {total_photos} files. "
+                f"Changing the organization structure will require reorganizing all files. "
+                f"This may take a significant amount of time."
+            )
+            self.org_lock_warning.show()
+            self.reorganize_btn.show()
+        else:
+            self.org_lock_warning.hide()
+            self.reorganize_btn.hide()
+
+    def save_organization_to_database(self):
+        """Save organization settings to database."""
+        if self.db_metadata is None:
+            return False
+
+        try:
+            # Get current file type organization mode
+            if self.file_type_combined_radio.isChecked():
+                file_type_mode = 'combined'
+            elif self.file_type_subfolder_radio.isChecked():
+                file_type_mode = 'subfolder'
+            else:
+                file_type_mode = 'separate_archive'
+
+            # Save template to database
+            self.db_metadata.set_organization_template(self.current_template)
+
+            # Save file type organization mode to database
+            self.db_metadata.set_file_type_organization(file_type_mode)
+
+            return True
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error Saving Settings",
+                f"Failed to save organization settings to database:\n\n{str(e)}"
+            )
+            return False
+
+    def on_reorganize_clicked(self):
+        """Show reorganization dialog (placeholder for future implementation)."""
+        QMessageBox.information(
+            self,
+            "Reorganization",
+            "Reorganization feature will be implemented in a future update.\n\n"
+            "This will allow you to migrate your entire archive to the new folder structure."
+        )
+
+    def set_database(self, db_metadata):
+        """Load organization settings from database.
+
+        Args:
+            db_metadata: DatabaseMetadata instance
+        """
+        self.db_metadata = db_metadata
+
+        if db_metadata is None:
+            return
+
+        # Load organization template
+        template = db_metadata.get_organization_template()
+        self.current_template = template
+
+        # Find matching preset or use custom
+        preset = OrganizationTemplate.get_preset_by_template(template)
+        if preset:
+            # Select the matching preset
+            preset_name = preset['name']
+            index = self.org_preset_combo.findText(preset_name)
+            if index >= 0:
+                self.org_preset_combo.setCurrentIndex(index)
+        else:
+            # Use custom template
+            self.org_preset_combo.setCurrentText("Custom Template...")
+            self.custom_template_edit.setText(template)
+
+        # Load file type organization mode
+        mode = db_metadata.get_file_type_organization()
+        if mode == 'combined':
+            self.file_type_combined_radio.setChecked(True)
+        elif mode == 'subfolder':
+            self.file_type_subfolder_radio.setChecked(True)
+        elif mode == 'separate_archive':
+            self.file_type_separate_radio.setChecked(True)
+
+        # Update preview
+        self.update_organization_preview()
+
+        # Check lock status
+        self.check_organization_lock()
 
     def get_config(self):
         """Get configuration as dictionary."""
@@ -326,11 +637,19 @@ class SettingsTab(QWidget):
             for i in range(self.pattern_list.count()):
                 excluded_patterns.append(self.pattern_list.item(i).text())
 
+        # Get file type organization mode
+        if self.file_type_combined_radio.isChecked():
+            file_type_mode = 'combined'
+        elif self.file_type_subfolder_radio.isChecked():
+            file_type_mode = 'subfolder'
+        else:
+            file_type_mode = 'separate_archive'
+
         config = {
             'include_subdirectories': self.include_subdirs_check.isChecked(),
             'batch_size': self.batch_size_spin.value(),
-            'group_by_year': self.group_by_year_check.isChecked(),
-            'group_by_day': self.group_by_day_check.isChecked(),
+            'organization_template': self.current_template,
+            'file_type_organization': file_type_mode,
             'partial_hash_enabled': self.partial_hash_check.isChecked(),
             'partial_hash_bytes': self.partial_hash_bytes_spin.value(),
             'partial_hash_min_file_size': self.partial_hash_min_size_spin.value() * 1024,
@@ -354,8 +673,43 @@ class SettingsTab(QWidget):
         """Set configuration from dictionary."""
         self.include_subdirs_check.setChecked(config.get('include_subdirectories', True))
         self.batch_size_spin.setValue(config.get('batch_size', constants.DEFAULT_BATCH_SIZE))
-        self.group_by_year_check.setChecked(config.get('group_by_year', True))
-        self.group_by_day_check.setChecked(config.get('group_by_day', True))
+
+        # Load organization template (with backward compatibility)
+        if 'organization_template' in config:
+            template = config['organization_template']
+        else:
+            # Legacy support: convert old group_by_year/group_by_day to template
+            group_by_year = config.get('group_by_year', True)
+            group_by_day = config.get('group_by_day', True)
+            if group_by_year and group_by_day:
+                template = '{YYYY}/{MM}/{DD}'
+            elif group_by_year:
+                template = '{YYYY}/{MM}'
+            else:
+                template = '{YYYY}/{MM}/{DD}'  # Default
+
+        self.current_template = template
+
+        # Find matching preset or use custom
+        preset = OrganizationTemplate.get_preset_by_template(template)
+        if preset:
+            preset_name = preset['name']
+            index = self.org_preset_combo.findText(preset_name)
+            if index >= 0:
+                self.org_preset_combo.setCurrentIndex(index)
+        else:
+            self.org_preset_combo.setCurrentText("Custom Template...")
+            self.custom_template_edit.setText(template)
+
+        # Load file type organization mode
+        file_type_mode = config.get('file_type_organization', 'combined')
+        if file_type_mode == 'combined':
+            self.file_type_combined_radio.setChecked(True)
+        elif file_type_mode == 'subfolder':
+            self.file_type_subfolder_radio.setChecked(True)
+        elif file_type_mode == 'separate_archive':
+            self.file_type_separate_radio.setChecked(True)
+
         self.partial_hash_check.setChecked(config.get('partial_hash_enabled', True))
         self.partial_hash_bytes_spin.setValue(
             config.get('partial_hash_bytes', constants.PARTIAL_HASH_BYTES))
@@ -384,7 +738,8 @@ class SettingsTab(QWidget):
         self.update_pattern_controls()
         self.update_pattern_count()
 
-        self.update_folder_preview()
+        # Update organization preview
+        self.update_organization_preview()
 
     def load_from_file(self, show_dialog=True):
         """Load settings from file.
@@ -450,8 +805,8 @@ class SettingsTab(QWidget):
         config = {
             'include_subdirectories': True,
             'batch_size': constants.DEFAULT_BATCH_SIZE,
-            'group_by_year': True,
-            'group_by_day': True,
+            'organization_template': '{YYYY}/{MM}/{DD}',
+            'file_type_organization': 'combined',
             'partial_hash_enabled': True,
             'partial_hash_bytes': constants.PARTIAL_HASH_BYTES,
             'partial_hash_min_file_size': constants.PARTIAL_HASH_MIN_FILE_SIZE,
