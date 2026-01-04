@@ -299,9 +299,14 @@ class DateCorrectionsTab(QWidget):
 
         self.table.setColumnWidth(0, 30)  # Checkbox column
 
-        # Connect selection change and double-click
+        # Track last clicked row for shift-selection
+        self.last_clicked_row = -1
+
+        # Connect selection change, double-click, and item clicked (for checkbox shift/ctrl)
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
+        self.table.itemSelectionChanged.connect(self.sync_checkboxes_with_selection)
         self.table.itemDoubleClicked.connect(self.on_item_double_clicked)
+        self.table.itemClicked.connect(self.on_item_clicked)
 
         left_layout.addWidget(self.table)
 
@@ -661,6 +666,81 @@ class DateCorrectionsTab(QWidget):
             new_state = Qt.Unchecked if current_state == Qt.Checked else Qt.Checked
             checkbox_item.setCheckState(new_state)
 
+    def on_item_clicked(self, item):
+        """Handle click on table item - support Shift/Ctrl selection on checkbox column."""
+        if item is None:
+            return
+
+        row = item.row()
+        column = item.column()
+
+        # Only handle clicks on checkbox column (column 0)
+        if column != 0:
+            # For non-checkbox columns, just update last clicked row for future shift-clicks
+            self.last_clicked_row = row
+            return
+
+        # Get keyboard modifiers
+        from PySide6.QtWidgets import QApplication
+        modifiers = QApplication.keyboardModifiers()
+
+        # Handle Shift-click: select range and check all checkboxes in range
+        if modifiers & Qt.ShiftModifier and self.last_clicked_row >= 0:
+            start_row = min(self.last_clicked_row, row)
+            end_row = max(self.last_clicked_row, row)
+
+            # Determine the target state based on the clicked checkbox
+            target_state = item.checkState()
+
+            # Block signals temporarily to avoid triggering selection changes
+            self.table.blockSignals(True)
+
+            # Select all rows in range and set their checkboxes
+            for r in range(start_row, end_row + 1):
+                # Select the row
+                self.table.selectRow(r)
+
+                # Set checkbox state
+                checkbox_item = self.table.item(r, 0)
+                if checkbox_item:
+                    checkbox_item.setCheckState(target_state)
+
+            self.table.blockSignals(False)
+
+            # Manually trigger selection changed to update preview
+            self.on_selection_changed()
+
+        # Handle Ctrl-click: toggle row selection and checkbox
+        elif modifiers & Qt.ControlModifier:
+            # The row selection is already handled by ExtendedSelection mode
+            # Just ensure the checkbox reflects the selection
+            # (Qt already handles the checkbox toggle, we just update last_clicked_row)
+            self.last_clicked_row = row
+
+        # Handle normal click: select single row
+        else:
+            # Qt already handles the checkbox toggle
+            self.last_clicked_row = row
+
+    def sync_checkboxes_with_selection(self):
+        """Sync checkbox states with row selection - checkboxes match selected rows."""
+        # Get selected rows
+        selected_rows = set(index.row() for index in self.table.selectedIndexes())
+
+        # Block signals to avoid recursive calls
+        self.table.blockSignals(True)
+
+        # Update all checkboxes to match selection
+        for row in range(self.table.rowCount()):
+            checkbox_item = self.table.item(row, 0)
+            if checkbox_item:
+                is_selected = row in selected_rows
+                new_state = Qt.Checked if is_selected else Qt.Unchecked
+                if checkbox_item.checkState() != new_state:
+                    checkbox_item.setCheckState(new_state)
+
+        self.table.blockSignals(False)
+
     def load_preview(self, file_path):
         """Load and display image preview with zoom capabilities."""
         try:
@@ -819,10 +899,22 @@ class DateCorrectionsTab(QWidget):
             self.refresh_data()
 
     def _center_dialog(self, dialog):
-        """Center a dialog on the main window."""
-        if self.parent():
-            parent_geo = self.parent().geometry()
-            dialog_geo = dialog.geometry()
-            x = parent_geo.x() + (parent_geo.width() - dialog_geo.width()) // 2
-            y = parent_geo.y() + (parent_geo.height() - dialog_geo.height()) // 2
-            dialog.move(x, y)
+        """Center a dialog on the main application window."""
+        parent = self.parent()
+        if parent:
+            # Get the top-level window
+            main_window = parent.window()
+            if main_window:
+                # Force dialog to process geometry
+                dialog.adjustSize()
+
+                # Get geometries
+                parent_geo = main_window.frameGeometry()
+                dialog_geo = dialog.frameGeometry()
+
+                # Calculate center position
+                x = parent_geo.x() + (parent_geo.width() - dialog_geo.width()) // 2
+                y = parent_geo.y() + (parent_geo.height() - dialog_geo.height()) // 2
+
+                # Move dialog to center
+                dialog.move(x, y)

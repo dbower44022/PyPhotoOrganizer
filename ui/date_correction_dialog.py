@@ -479,10 +479,22 @@ class DateCorrectionDialog(QDialog):
         self.accept()
 
     def _center_dialog(self, dialog):
-        """Center a dialog on the parent window."""
-        if self.parent():
-            parent_geo = self.parent().geometry()
-            dialog_geo = dialog.geometry()
-            x = parent_geo.x() + (parent_geo.width() - dialog_geo.width()) // 2
-            y = parent_geo.y() + (parent_geo.height() - dialog_geo.height()) // 2
-            dialog.move(x, y)
+        """Center a dialog on the main application window."""
+        parent = self.parent()
+        if parent:
+            # Get the top-level window
+            main_window = parent.window()
+            if main_window:
+                # Force dialog to process geometry
+                dialog.adjustSize()
+
+                # Get geometries
+                parent_geo = main_window.frameGeometry()
+                dialog_geo = dialog.frameGeometry()
+
+                # Calculate center position
+                x = parent_geo.x() + (parent_geo.width() - dialog_geo.width()) // 2
+                y = parent_geo.y() + (parent_geo.height() - dialog_geo.height()) // 2
+
+                # Move dialog to center
+                dialog.move(x, y)
