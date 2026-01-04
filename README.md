@@ -4,7 +4,7 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.0-brightgreen.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.2-brightgreen.svg)](CHANGELOG.md)
 
 ## Overview
 
@@ -38,6 +38,19 @@ PyPhotoOrganizer helps you consolidate photos and videos from multiple devices a
 - ✅ **Responsive Design**: Background worker thread keeps UI responsive during processing
 - ✅ **Resizable Panels**: Splitter bars allow customizable layout
 - ✅ **Active UI Principle**: All buttons stay enabled with informative feedback
+
+**Date Correction Features (v2.2+):**
+- ✅ **Automatic Detection**: System identifies files with unreliable dates during processing
+- ✅ **Smart Filtering**: Filter by reason (no EXIF, suspicious dates, user-specified paths)
+- ✅ **Status Tracking**: Three-state system (Pending/Corrected/Reorganized) with color coding
+- ✅ **Audit Trail**: Maintains original archive locations for verification
+- ✅ **Image Preview**: Zoomable preview panel with rubber band selection
+- ✅ **Single File Correction**: Easy date correction with visual date picker
+- ✅ **Batch Correction**: Correct multiple files with same or sequential dates
+- ✅ **EXIF Writing**: Writes corrected dates to both source and archive files
+- ✅ **Safe Reorganization**: Copy-verify-delete pattern with empty directory cleanup
+- ✅ **Comprehensive Logging**: Visual indicators (✓✗⚠ℹ) for easy log navigation
+- ✅ **User-Specified Paths**: Auto-flag files from unreliable sources (e.g., scanned photos)
 
 **Filtering Features:**
 - ✅ **Filename Pattern Filtering**: Customizable list of excluded patterns (favicon, icon, logo, etc.)
@@ -218,6 +231,28 @@ Organizing files: 100%|████████| 850/850 [02:15<00:00, 6.3file/s
 - **Archive Location**: Permanent binding to archive folder
 - **Statistics**: Total photos, last used date
 - **Actions**: Change database (with dialogs)
+
+### 8. Date Corrections Tab (NEW in v2.2)
+- **Files Table**: Sortable grid showing all files with unreliable dates
+  - Columns: Checkbox, Filename, Source Location, Archive Location, Detected Date, EXIF Date, File Date, Flag Reason, Status
+  - Filter by flag reason (No EXIF, Year 1000, Suspicious, User-Specified)
+  - Filter by status (Pending, Corrected, Reorganized)
+  - Multi-select for batch operations
+- **Preview Panel**:
+  - Zoomable image preview (click-drag rubber band selection)
+  - Double-click to reset zoom
+  - Detailed file metadata display
+  - Shows both current and original archive paths (for auditing)
+- **Buttons**:
+  - **Correct Date**: Opens dialog to correct selected file's date
+  - **Batch Correct**: Two modes (same date or sequential dates)
+  - **Manage Unreliable Paths**: Configure auto-flagged source paths
+  - **Reorganize All Marked**: Batch reorganize corrected files to proper date folders
+  - **Refresh**: Reload data from database
+- **Status Color Coding**:
+  - Gray: Pending (not yet corrected)
+  - Dark Green: Corrected (waiting for reorganization)
+  - Blue: Reorganized (completed, available for audit)
 
 ## Documentation
 
@@ -403,6 +438,24 @@ CREATE TABLE DatabaseMetadata (
 );
 ```
 
+### UnreliableDates Table (NEW in v2.2)
+```sql
+CREATE TABLE UnreliableDates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash TEXT NOT NULL,              -- Links to UniquePhotos.file_hash
+    source_path TEXT NOT NULL,            -- Original source file path
+    archive_path TEXT,                    -- Current archive location
+    original_archive_path TEXT,           -- Pre-reorganization location (audit trail)
+    original_date TEXT,                   -- Date detected during processing
+    date_source TEXT,                     -- 'exif', 'os_metadata', 'fallback'
+    flag_reason TEXT,                     -- 'no_exif', 'year_1000', 'suspicious', 'user_specified'
+    corrected_date TEXT,                  -- User-corrected date (YYYY-MM-DD)
+    correction_timestamp TEXT,            -- When correction was made
+    needs_reorganization INTEGER DEFAULT 0,  -- Flag for batch reorganization
+    FOREIGN KEY (file_hash) REFERENCES UniquePhotos(hash)
+);
+```
+
 ## Security Features
 
 ✅ **Path Traversal Protection**: Validates all paths to prevent directory traversal attacks
@@ -452,6 +505,40 @@ PyPhotoOrganizer/
 ```
 
 ## Recent Improvements
+
+### Version 2.2 (January 2026)
+
+**Date Correction System:**
+✅ Automatic detection of unreliable dates during processing
+✅ New Date Corrections tab with sortable grid and filters
+✅ Zoomable image preview with rubber band selection
+✅ Single and batch date correction dialogs
+✅ EXIF writing to both source and archive files
+✅ Safe file reorganization with copy-verify-delete pattern
+✅ Audit trail with original_archive_path tracking
+✅ Three-state status system (Pending/Corrected/Reorganized)
+✅ User-specified unreliable paths management
+✅ Comprehensive logging with visual indicators (✓✗⚠ℹ)
+
+**Database Enhancements:**
+✅ UnreliableDates table with automatic schema upgrade
+✅ Archive path synchronization for existing records
+✅ Original archive path preservation for auditing
+✅ Dual-table updates (UniquePhotos + UnreliableDates)
+
+**UI Improvements:**
+✅ Color-coded status display (Gray/Green/Blue)
+✅ Multi-criteria filtering (reason + status)
+✅ Details panel shows both current and original paths
+✅ Preview panel zoom persists during window resize
+✅ Double-click to reset zoom to fit-in-view
+
+**Error Handling:**
+✅ Separate error tracking for EXIF and database operations
+✅ Full stack traces with exc_info=True
+✅ Detailed summary reports with error breakdowns
+✅ Step-by-step logging with visual indicators
+✅ Section markers for easy log navigation
 
 ### Version 2.0 (January 2026)
 
@@ -512,6 +599,7 @@ PyPhotoOrganizer/
 ### Core Dependencies
 - **Pillow** (>=10.0.0) - Image processing and EXIF extraction
 - **pillow-heif** (>=0.13.0) - HEIC/HEIF format support
+- **piexif** (>=1.1.3) - EXIF metadata writing (v2.2+)
 - **tqdm** (>=4.65.0) - Progress bars (CLI)
 - **PySide6** (>=6.4.0) - Qt GUI framework
 - **sqlite3** - Built-in database
@@ -570,6 +658,18 @@ A: This feature is in development and will be available in a future release.
 **Q: Why were some of my files filtered out?**
 A: Check the Filtered Files tab to see exactly why each file was filtered. Common reasons: file too small, dimensions too small, filename contains excluded pattern, missing EXIF data.
 
+**Q: What are unreliable dates and why are they flagged?**
+A: The system flags files with questionable date information: no EXIF data, year 1000 fallback (all extraction methods failed), suspicious dates (< 1990 or > current year + 1), or files from user-specified unreliable paths (e.g., scanned photos). Check the Date Corrections tab to review and correct them.
+
+**Q: How do I correct dates for scanned photos?**
+A: (1) Add the scanner output folder to "Unreliable Paths" in Date Corrections tab, (2) Process the photos - they'll be auto-flagged, (3) Select flagged photos and use Batch Correct with correct dates, (4) Click "Reorganize All Marked" to move files to correct date folders.
+
+**Q: Will correcting a date move the file immediately?**
+A: No. Date correction is a two-phase process: (1) Correct the date and mark for reorganization, (2) Click "Reorganize All Marked" to batch-move all corrected files. This allows you to correct multiple files before reorganizing.
+
+**Q: Can I audit what files were reorganized?**
+A: Yes! In the Date Corrections tab, check the "Reorganized" status filter. The details panel shows both the current archive path and the original archive path for verification.
+
 ## License
 
 MIT License - See LICENSE file for details
@@ -589,9 +689,16 @@ MIT License - See LICENSE file for details
 
 ## Roadmap
 
-### Completed Features (v2.0)
+### Completed Features (v2.2)
 
 - [x] Full-featured GUI with PySide6
+- [x] Date correction system with unreliable date detection
+- [x] Audit trail for file reorganizations
+- [x] Zoomable image preview with rubber band selection
+- [x] Batch date correction (same/sequential dates)
+- [x] EXIF writing to source and archive files
+- [x] Status tracking (Pending/Corrected/Reorganized)
+- [x] Comprehensive logging with visual indicators
 - [x] Real-time progress tracking with EMA time estimates
 - [x] Interactive settings management with pattern customization
 - [x] Export results (JSON/CSV)
@@ -628,5 +735,5 @@ MIT License - See LICENSE file for details
 
 **Made with ❤️ for photo enthusiasts everywhere**
 
-*Last updated: 2026-01-02*
-*Version: 2.0*
+*Last updated: 2026-01-04*
+*Version: 2.2*

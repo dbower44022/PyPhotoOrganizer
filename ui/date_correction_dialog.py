@@ -252,14 +252,20 @@ class DateCorrectionDialog(QDialog):
 
     def apply_corrections(self):
         """Apply date corrections to selected files."""
+        logger.info("=" * 80)
+        logger.info("STARTING DATE CORRECTION PROCESS")
+        logger.info(f"Batch mode: {self.batch_mode}, Files to process: {len(self.records)}")
+
         # Validate date
         valid, error_msg = self.validate_date()
         if not valid:
+            logger.error(f"Date validation failed: {error_msg}")
             if error_msg:
                 QMessageBox.warning(self, "Validation Error", error_msg)
             return
 
         if not self.db_metadata:
+            logger.critical("No database connection available")
             QMessageBox.critical(self, "Error", "No database connection")
             return
 
@@ -267,15 +273,18 @@ class DateCorrectionDialog(QDialog):
         year = self.year_spin.value()
         month = self.month_spin.value()
         day = self.day_spin.value()
+        logger.info(f"Correction date: {year:04d}-{month:02d}-{day:02d}")
 
         # Get options
         write_exif = self.write_exif_checkbox.isChecked()
         mark_for_reorg = self.mark_reorganize_checkbox.isChecked()
+        logger.info(f"Options - Write EXIF: {write_exif}, Mark for reorganization: {mark_for_reorg}")
 
         # Determine batch mode
         sequential = False
         if self.batch_mode:
             sequential = self.sequential_radio.isChecked()
+            logger.info(f"Batch mode - Sequential: {sequential}")
 
         # Create progress dialog
         progress = QProgressDialog(
@@ -290,91 +299,183 @@ class DateCorrectionDialog(QDialog):
 
         success_count = 0
         error_count = 0
+        exif_source_success = 0
+        exif_archive_success = 0
+        exif_failures = []
+        db_failures = []
         current_date = datetime(year, month, day)
 
         for idx, record in enumerate(self.records):
             if progress.wasCanceled():
+                logger.warning(f"Date correction cancelled by user at file {idx + 1}/{len(self.records)}")
                 break
 
             progress.setValue(idx)
-            progress.setLabelText(f"Processing {os.path.basename(record['source_path'])}...")
+            filename = os.path.basename(record['source_path'])
+            progress.setLabelText(f"Processing {filename}...")
+
+            logger.info("-" * 60)
+            logger.info(f"Processing file {idx + 1}/{len(self.records)}: {record['source_path']}")
+            logger.info(f"File hash: {record.get('file_hash', 'UNKNOWN')[:16]}...")
 
             try:
                 # Calculate date for this file
                 if sequential and idx > 0:
                     current_date = current_date + timedelta(days=1)
+                    logger.info(f"Sequential mode - incremented date to: {current_date.strftime('%Y-%m-%d')}")
 
                 # Format date
                 corrected_date = current_date.strftime('%Y-%m-%d')
                 year_str = f"{current_date.year}"
                 month_str = f"{current_date.month:02d}"
                 day_str = f"{current_date.day:02d}"
+                logger.info(f"Applying correction: {corrected_date} (from original: {record.get('original_date', 'UNKNOWN')})")
 
                 # Write EXIF if requested
                 if write_exif:
+                    logger.info("Writing EXIF data to files...")
                     from exif_writer import write_exif_date
 
                     # Write to source file if it exists
+                    source_exif_written = False
                     if os.path.exists(record['source_path']):
-                        exif_success = write_exif_date(
-                            record['source_path'],
-                            year_str,
-                            month_str,
-                            day_str
-                        )
+                        logger.info(f"  → Source file: {record['source_path']}")
+                        try:
+                            exif_success = write_exif_date(
+                                record['source_path'],
+                                year_str,
+                                month_str,
+                                day_str
+                            )
 
-                        if not exif_success:
-                            logger.warning(f"Failed to write EXIF for source: {record['source_path']}")
-                        else:
-                            logger.info(f"Updated EXIF in source file: {record['source_path']}")
+                            if exif_success:
+                                logger.info(f"  ✓ EXIF written to source file successfully")
+                                exif_source_success += 1
+                                source_exif_written = True
+                            else:
+                                logger.error(f"  ✗ EXIF write FAILED for source file (no exception, returned False)")
+                                exif_failures.append(f"{filename} (source)")
+                        except Exception as e:
+                            logger.error(f"  ✗ EXIF write exception for source: {e}", exc_info=True)
+                            exif_failures.append(f"{filename} (source): {str(e)}")
                     else:
-                        logger.warning(f"Source file not found: {record['source_path']}")
+                        logger.warning(f"  ⚠ Source file not found: {record['source_path']}")
 
                     # CRITICAL: Also write to archive file (this is what gets reorganized!)
-                    if record.get('archive_path') and os.path.exists(record['archive_path']):
-                        exif_success = write_exif_date(
-                            record['archive_path'],
-                            year_str,
-                            month_str,
-                            day_str
-                        )
+                    archive_exif_written = False
+                    if record.get('archive_path'):
+                        if os.path.exists(record['archive_path']):
+                            logger.info(f"  → Archive file: {record['archive_path']}")
+                            try:
+                                exif_success = write_exif_date(
+                                    record['archive_path'],
+                                    year_str,
+                                    month_str,
+                                    day_str
+                                )
 
-                        if not exif_success:
-                            logger.warning(f"Failed to write EXIF for archive: {record['archive_path']}")
+                                if exif_success:
+                                    logger.info(f"  ✓ EXIF written to archive file successfully")
+                                    exif_archive_success += 1
+                                    archive_exif_written = True
+                                else:
+                                    logger.error(f"  ✗ EXIF write FAILED for archive file (no exception, returned False)")
+                                    exif_failures.append(f"{filename} (archive)")
+                            except Exception as e:
+                                logger.error(f"  ✗ EXIF write exception for archive: {e}", exc_info=True)
+                                exif_failures.append(f"{filename} (archive): {str(e)}")
                         else:
-                            logger.info(f"Updated EXIF in archive file: {record['archive_path']}")
+                            logger.warning(f"  ⚠ Archive file not found: {record.get('archive_path', 'None')}")
                     else:
-                        logger.warning(f"Archive file not found: {record.get('archive_path', 'None')}")
+                        logger.warning(f"  ⚠ No archive_path in record for {filename}")
+
+                    # Summary for this file
+                    if source_exif_written or archive_exif_written:
+                        logger.info(f"  Summary: EXIF updated - Source: {source_exif_written}, Archive: {archive_exif_written}")
+                    else:
+                        logger.warning(f"  Summary: NO EXIF data was written for this file!")
+                else:
+                    logger.info("EXIF writing skipped (checkbox not checked)")
 
                 # Update database
-                self.db_metadata.update_corrected_date(
-                    record['file_hash'],
-                    corrected_date,
-                    mark_for_reorganization=mark_for_reorg
-                )
+                logger.info(f"Updating database for file_hash: {record['file_hash'][:16]}...")
+                try:
+                    self.db_metadata.update_corrected_date(
+                        record['file_hash'],
+                        corrected_date,
+                        mark_for_reorganization=mark_for_reorg
+                    )
+                    logger.info(f"  ✓ Database updated successfully")
+                except Exception as e:
+                    logger.error(f"  ✗ Database update FAILED: {e}", exc_info=True)
+                    db_failures.append(f"{filename}: {str(e)}")
+                    raise  # Re-raise to trigger outer exception handler
 
                 success_count += 1
+                logger.info(f"✓ File {idx + 1} completed successfully")
 
             except Exception as e:
-                logger.error(f"Error correcting date for {record['source_path']}: {e}")
+                logger.error(f"✗ EXCEPTION processing {record['source_path']}: {e}", exc_info=True)
                 error_count += 1
 
         progress.setValue(len(self.records))
 
-        # Show results
-        if error_count > 0:
+        # Log final summary
+        logger.info("=" * 80)
+        logger.info("DATE CORRECTION PROCESS COMPLETED")
+        logger.info(f"Total files processed: {len(self.records)}")
+        logger.info(f"Successful corrections: {success_count}")
+        logger.info(f"Failed corrections: {error_count}")
+        if write_exif:
+            logger.info(f"EXIF written to source files: {exif_source_success}/{len(self.records)}")
+            logger.info(f"EXIF written to archive files: {exif_archive_success}/{len(self.records)}")
+            if exif_failures:
+                logger.error(f"EXIF write failures ({len(exif_failures)}):")
+                for failure in exif_failures:
+                    logger.error(f"  - {failure}")
+        if db_failures:
+            logger.error(f"Database update failures ({len(db_failures)}):")
+            for failure in db_failures:
+                logger.error(f"  - {failure}")
+        logger.info("=" * 80)
+
+        # Show results with detailed breakdown
+        if error_count > 0 or exif_failures or db_failures:
+            details = []
+            details.append(f"Successfully corrected: {success_count} file(s)")
+            details.append(f"Failed: {error_count} file(s)")
+
+            if write_exif:
+                details.append("")
+                details.append("EXIF Writing:")
+                details.append(f"  Source files: {exif_source_success}/{len(self.records)}")
+                details.append(f"  Archive files: {exif_archive_success}/{len(self.records)}")
+                if exif_failures:
+                    details.append(f"  Failures: {len(exif_failures)}")
+
+            if db_failures:
+                details.append("")
+                details.append(f"Database failures: {len(db_failures)}")
+
+            details.append("")
+            details.append("Check logs for detailed error information.")
+
             QMessageBox.warning(
                 self,
-                "Corrections Complete with Errors",
-                f"Successfully corrected: {success_count} file(s)\n"
-                f"Failed: {error_count} file(s)\n\n"
-                f"Check logs for details."
+                "Corrections Complete with Issues",
+                "\n".join(details)
             )
         else:
+            details = [f"Successfully corrected {success_count} file(s)!"]
+            if write_exif:
+                details.append("")
+                details.append(f"EXIF written to {exif_source_success} source file(s)")
+                details.append(f"EXIF written to {exif_archive_success} archive file(s)")
+
             QMessageBox.information(
                 self,
                 "Corrections Complete",
-                f"Successfully corrected {success_count} file(s)!"
+                "\n".join(details)
             )
 
         self.accept()

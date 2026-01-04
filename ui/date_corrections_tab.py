@@ -43,6 +43,7 @@ class ZoomableImageViewer(QGraphicsView):
         self.rubber_band_origin = None
         self.rubber_band_rect = None
         self.is_rubber_banding = False
+        self.is_custom_zoom = False  # Track if user has applied a custom zoom
 
         # Styling
         self.setStyleSheet("border: 1px solid #ddd; background-color: #f5f5f5;")
@@ -54,6 +55,7 @@ class ZoomableImageViewer(QGraphicsView):
             self.scene.clear()
             self.pixmap_item = None
             self.original_pixmap = None
+            self.is_custom_zoom = False  # Reset zoom state for new image
 
             if not os.path.exists(file_path):
                 return
@@ -91,11 +93,14 @@ class ZoomableImageViewer(QGraphicsView):
             rect = self.pixmap_item.boundingRect()
             # Fit the entire image in the view
             self.fitInView(rect, Qt.KeepAspectRatio)
+            self.is_custom_zoom = False  # Reset to fit-to-view mode
+            logger.debug("Zoom reset to fit-to-view")
 
     def resizeEvent(self, event):
-        """Handle resize events - maintain zoom-to-fit."""
+        """Handle resize events - maintain zoom state."""
         super().resizeEvent(event)
-        if self.pixmap_item and not self.is_rubber_banding:
+        # Only auto-fit if not rubber banding and not in custom zoom mode
+        if self.pixmap_item and not self.is_rubber_banding and not self.is_custom_zoom:
             self.zoom_to_fit()
 
     def mousePressEvent(self, event):
@@ -138,16 +143,28 @@ class ZoomableImageViewer(QGraphicsView):
             if self.rubber_band_origin:
                 current_pos = self.mapToScene(event.pos())
 
-                # Calculate zoom rectangle
+                # Calculate zoom rectangle in scene coordinates
                 x = min(self.rubber_band_origin.x(), current_pos.x())
                 y = min(self.rubber_band_origin.y(), current_pos.y())
                 width = abs(current_pos.x() - self.rubber_band_origin.x())
                 height = abs(current_pos.y() - self.rubber_band_origin.y())
 
+                logger.info(f"Rubber band zoom: x={x:.1f}, y={y:.1f}, w={width:.1f}, h={height:.1f}")
+
                 # Only zoom if rectangle is large enough (> 10 pixels)
                 if width > 10 and height > 10:
                     zoom_rect = QRectF(x, y, width, height)
+                    logger.info(f"Applying zoom to rect: {zoom_rect}")
+
+                    # Apply the zoom
                     self.fitInView(zoom_rect, Qt.KeepAspectRatio)
+                    self.is_custom_zoom = True  # Mark that user has zoomed in
+
+                    # Force view update
+                    self.viewport().update()
+                    logger.info("Zoom applied, custom zoom mode enabled, view updated")
+                else:
+                    logger.info(f"Zoom rectangle too small ({width:.1f} x {height:.1f}), ignoring")
 
                 # Remove rubber band
                 if self.rubber_band_rect:
@@ -173,6 +190,7 @@ class ZoomableImageViewer(QGraphicsView):
         self.scene.clear()
         self.pixmap_item = None
         self.original_pixmap = None
+        self.is_custom_zoom = False  # Reset zoom state
 
 
 class DateCorrectionsTab(QWidget):
