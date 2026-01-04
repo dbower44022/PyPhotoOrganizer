@@ -506,6 +506,30 @@ PyPhotoOrganizer/
 
 ## Recent Improvements
 
+### Version 2.2.1 (January 2026)
+
+**Grid Interaction Improvements:**
+✅ Read-only table cells across all grids (prevents accidental data editing)
+✅ Extended selection mode with Shift/Ctrl support for all grids
+✅ Shift+Click: Select range of rows (checkboxes auto-sync with selection)
+✅ Ctrl+Click: Toggle individual row selection (checkboxes auto-sync)
+✅ Double-click row: Toggle checkbox on/off
+✅ Checkbox column: Shift/Ctrl clicks work on checkbox column same as other columns
+✅ Auto-sync: Row selection and checkboxes always stay synchronized
+✅ Consistent behavior: All grids (Date Corrections, Setup, Filtered Files, Logs) share same interaction model
+
+**Dialog and Workflow Improvements:**
+✅ Multi-monitor support: All dialogs center on main application window (not on wrong monitor)
+✅ Batch operations optimized: Success confirmations suppressed (only errors shown) for rapid bulk corrections
+✅ Error-only dialogs: Batch Correct only shows dialog if errors occurred (allows uninterrupted workflow)
+✅ Improved Remove Selected: Now works with checkbox-based selection in Setup tab
+
+**User Experience Enhancements:**
+✅ Faster bulk operations: No interruptions for successful batch corrections
+✅ Intuitive selection: Standard Windows/Mac Shift/Ctrl selection patterns
+✅ Visual feedback: Checkboxes always match selected rows (no confusion)
+✅ Multi-monitor workflows: Dialogs appear on correct monitor
+
 ### Version 2.2 (January 2026)
 
 **Date Correction System:**
@@ -669,6 +693,21 @@ A: No. Date correction is a two-phase process: (1) Correct the date and mark for
 
 **Q: Can I audit what files were reorganized?**
 A: Yes! In the Date Corrections tab, check the "Reorganized" status filter. The details panel shows both the current archive path and the original archive path for verification.
+
+**Q: How do I select multiple files in the grid?**
+A: Use standard selection methods: (1) Shift+Click to select a range of rows, (2) Ctrl+Click to toggle individual rows, (3) Click and drag to select multiple rows. Checkboxes automatically sync with your selection.
+
+**Q: Can I use Shift/Ctrl selection when clicking on checkboxes?**
+A: Yes! Shift+Click on a checkbox selects the range and applies that checkbox's state to all rows in the range. Ctrl+Click works normally for toggling individual selections.
+
+**Q: Why don't I see a success message after batch correcting dates?**
+A: Success confirmations are intentionally suppressed for batch operations to speed up your workflow. If there are any errors, you'll see a detailed error dialog. All operations are logged in the Logs tab for verification.
+
+**Q: I can't edit data in the grid cells - is this a bug?**
+A: No, all grid cells are intentionally read-only to prevent accidental data modification. Use the appropriate buttons and dialogs (Correct Date, Batch Correct, etc.) to modify data.
+
+**Q: Dialog boxes are appearing on the wrong monitor. How do I fix this?**
+A: This was fixed in v2.2.1. All dialogs now center on the main application window, even in multi-monitor setups. Make sure you're running the latest version.
 
 ## License
 

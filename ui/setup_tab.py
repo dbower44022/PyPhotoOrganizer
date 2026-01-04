@@ -40,8 +40,16 @@ class SetupTab(QWidget):
         self.source_table.setHorizontalHeaderLabels(["Enable", "Icon", "Source Path", "Last Scanned", "Status"])
         self.source_table.setMinimumHeight(150)
         self.source_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.source_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.source_table.setSelectionMode(QAbstractItemView.ExtendedSelection)  # Supports Shift/Ctrl selection
         self.source_table.verticalHeader().setVisible(False)
+
+        # Track last clicked row for shift-selection
+        self.last_clicked_row = -1
+
+        # Connect signals for Shift/Ctrl selection on checkbox column and sync
+        self.source_table.itemSelectionChanged.connect(self.sync_checkboxes_with_selection)
+        self.source_table.itemClicked.connect(self.on_item_clicked)
+        self.source_table.itemDoubleClicked.connect(self.on_item_double_clicked)
 
         # Set column widths
         header = self.source_table.horizontalHeader()
@@ -155,53 +163,100 @@ class SetupTab(QWidget):
             # Check if already in table
             existing_paths = self.get_source_folders()
             if folder in existing_paths:
-                QMessageBox.information(self, "Folder Already Added",
-                                       "This folder is already in the source list.")
+                msg_box = QMessageBox(QMessageBox.Information, "Folder Already Added",
+                                     "This folder is already in the source list.", QMessageBox.Ok, self)
+                self._center_dialog(msg_box)
+                msg_box.exec()
                 return
 
             # Add to database if available
             if self.db_metadata:
                 success = self.db_metadata.add_source_directory(folder, enabled=True)
                 if not success:
-                    QMessageBox.warning(self, "Failed to Add",
-                                       "Could not add folder to database.")
+                    msg_box = QMessageBox(QMessageBox.Warning, "Failed to Add",
+                                         "Could not add folder to database.", QMessageBox.Ok, self)
+                    self._center_dialog(msg_box)
+                    msg_box.exec()
                     return
 
             # Add to table
             self._add_source_to_table(folder, enabled=True, last_scanned=None)
 
     def remove_source_folder(self):
-        """Remove selected source folder."""
-        current_row = self.source_table.currentRow()
-        if current_row >= 0:
-            # Get the path from the selected row
-            path = self.source_table.item(current_row, 2).text()
+        """Remove source folders with checked checkboxes."""
+        # Collect rows to remove (those with checked checkboxes)
+        rows_to_remove = []
+        for row in range(self.source_table.rowCount()):
+            checkbox_widget = self.source_table.cellWidget(row, 0)
+            if checkbox_widget:
+                # Find the QCheckBox within the widget
+                checkbox = checkbox_widget.findChild(QCheckBox)
+                if checkbox and checkbox.isChecked():
+                    rows_to_remove.append(row)
+
+        if not rows_to_remove:
+            msg_box = QMessageBox(
+                QMessageBox.Information,
+                "No Selection",
+                "Please check the checkboxes for the folders you want to remove.",
+                QMessageBox.Ok,
+                self
+            )
+            self._center_dialog(msg_box)
+            msg_box.exec()
+            return
+
+        # Confirm removal
+        msg_box = QMessageBox(
+            QMessageBox.Question,
+            "Remove Source Folders",
+            f"Remove {len(rows_to_remove)} source folder(s) from the list?\n\n"
+            f"This will not delete any files, only remove them from the source list.",
+            QMessageBox.Yes | QMessageBox.No,
+            self
+        )
+        msg_box.setDefaultButton(QMessageBox.No)
+        self._center_dialog(msg_box)
+        if msg_box.exec() != QMessageBox.Yes:
+            return
+
+        # Remove rows in reverse order to avoid index shifting
+        for row in sorted(rows_to_remove, reverse=True):
+            # Get the path from the row
+            path = self.source_table.item(row, 2).text()
 
             # Remove from database if available
             if self.db_metadata:
                 self.db_metadata.remove_source_directory(path)
 
             # Remove from table
-            self.source_table.removeRow(current_row)
+            self.source_table.removeRow(row)
 
     def clear_all_sources(self):
         """Clear all source folders."""
         if self.source_table.rowCount() == 0:
-            QMessageBox.information(
-                self,
+            msg_box = QMessageBox(
+                QMessageBox.Information,
                 "No Folders",
-                "The source folder list is already empty."
+                "The source folder list is already empty.",
+                QMessageBox.Ok,
+                self
             )
+            self._center_dialog(msg_box)
+            msg_box.exec()
             return
 
-        response = QMessageBox.question(
-            self,
+        msg_box = QMessageBox(
+            QMessageBox.Question,
             "Clear All Source Folders?",
             f"Remove all {self.source_table.rowCount()} source folder(s) from the list?\n\n"
             f"This will not delete any files, only clear the list.",
             QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            self
         )
+        msg_box.setDefaultButton(QMessageBox.No)
+        self._center_dialog(msg_box)
+        response = msg_box.exec()
 
         if response == QMessageBox.Yes:
             # Clear from database if available
@@ -381,16 +436,20 @@ class SetupTab(QWidget):
         """Show informative dialog - destination is managed by database."""
         current_dest = self.dest_edit.text()
 
-        QMessageBox.information(
-            self,
+        msg_box = QMessageBox(
+            QMessageBox.Information,
             "Destination Managed by Database",
             f"The destination folder (archive location) is controlled by the database.\n\n"
             f"Current archive: {current_dest if current_dest else 'Not set'}\n\n"
             f"To change the archive location:\n"
             f"1. Go to the 'Database' tab\n"
             f"2. Use 'Change Archive Location' (coming soon)\n\n"
-            f"This ensures your photo archive stays connected to the correct database."
+            f"This ensures your photo archive stays connected to the correct database.",
+            QMessageBox.Ok,
+            self
         )
+        self._center_dialog(msg_box)
+        msg_box.exec()
 
     def set_destination_folder(self, folder):
         """
@@ -462,3 +521,121 @@ class SetupTab(QWidget):
         self.move_radio.setEnabled(enabled)
         self.start_btn.setEnabled(enabled)
         self.stop_btn.setEnabled(not enabled)
+
+    def _center_dialog(self, dialog):
+        """Center a dialog on the main application window."""
+        parent = self.parent()
+        if parent:
+            # Get the top-level window
+            main_window = parent.window()
+            if main_window:
+                # Force dialog to process geometry
+                dialog.adjustSize()
+
+                # Get geometries
+                parent_geo = main_window.frameGeometry()
+                dialog_geo = dialog.frameGeometry()
+
+                # Calculate center position
+                x = parent_geo.x() + (parent_geo.width() - dialog_geo.width()) // 2
+                y = parent_geo.y() + (parent_geo.height() - dialog_geo.height()) // 2
+
+                # Move dialog to center
+                dialog.move(x, y)
+
+    def on_item_clicked(self, item):
+        """Handle click on table item - support Shift/Ctrl selection on checkbox column."""
+        if item is None:
+            return
+
+        row = item.row()
+        column = item.column()
+
+        # Only handle clicks on checkbox column (column 0)
+        if column != 0:
+            # For non-checkbox columns, just update last clicked row for future shift-clicks
+            self.last_clicked_row = row
+            return
+
+        # Get the checkbox widget
+        checkbox_widget = self.source_table.cellWidget(row, 0)
+        if not checkbox_widget:
+            return
+
+        checkbox = checkbox_widget.findChild(QCheckBox)
+        if not checkbox:
+            return
+
+        # Get keyboard modifiers
+        from PySide6.QtWidgets import QApplication
+        modifiers = QApplication.keyboardModifiers()
+
+        # Handle Shift-click: select range and check all checkboxes in range
+        if modifiers & Qt.ShiftModifier and self.last_clicked_row >= 0:
+            start_row = min(self.last_clicked_row, row)
+            end_row = max(self.last_clicked_row, row)
+
+            # Determine the target state based on the clicked checkbox
+            target_state = checkbox.isChecked()
+
+            # Block signals temporarily to avoid triggering state changes
+            self.source_table.blockSignals(True)
+
+            # Select all rows in range and set their checkboxes
+            for r in range(start_row, end_row + 1):
+                # Select the row
+                self.source_table.selectRow(r)
+
+                # Set checkbox state
+                cb_widget = self.source_table.cellWidget(r, 0)
+                if cb_widget:
+                    cb = cb_widget.findChild(QCheckBox)
+                    if cb:
+                        cb.setChecked(target_state)
+
+            self.source_table.blockSignals(False)
+
+        # Handle Ctrl-click: toggle row selection and checkbox
+        elif modifiers & Qt.ControlModifier:
+            # The row selection is already handled by ExtendedSelection mode
+            # Just update last_clicked_row
+            self.last_clicked_row = row
+
+        # Handle normal click: select single row
+        else:
+            # Qt already handles the checkbox toggle
+            self.last_clicked_row = row
+
+    def on_item_double_clicked(self, item):
+        """Handle double-click on table item - toggle checkbox."""
+        if item is None:
+            return
+
+        row = item.row()
+        checkbox_widget = self.source_table.cellWidget(row, 0)
+
+        if checkbox_widget:
+            checkbox = checkbox_widget.findChild(QCheckBox)
+            if checkbox:
+                # Toggle checkbox state
+                checkbox.setChecked(not checkbox.isChecked())
+
+    def sync_checkboxes_with_selection(self):
+        """Sync checkbox states with row selection - checkboxes match selected rows."""
+        # Get selected rows
+        selected_rows = set(index.row() for index in self.source_table.selectedIndexes())
+
+        # Block signals to avoid recursive calls
+        self.source_table.blockSignals(True)
+
+        # Update all checkboxes to match selection
+        for row in range(self.source_table.rowCount()):
+            checkbox_widget = self.source_table.cellWidget(row, 0)
+            if checkbox_widget:
+                checkbox = checkbox_widget.findChild(QCheckBox)
+                if checkbox:
+                    is_selected = row in selected_rows
+                    if checkbox.isChecked() != is_selected:
+                        checkbox.setChecked(is_selected)
+
+        self.source_table.blockSignals(False)

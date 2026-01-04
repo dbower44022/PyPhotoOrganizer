@@ -573,6 +573,261 @@ Old databases automatically upgraded with `original_archive_path` column during 
 **Dependencies**:
 - `piexif>=1.1.3`: EXIF metadata writing for JPEG and TIFF formats
 
+### Grid Interaction Patterns (v2.2.1)
+
+**Purpose**: Provide consistent, intuitive grid interaction across all UI tables with standard Shift/Ctrl selection patterns and automatic checkbox synchronization.
+
+**Implementation Overview:**
+
+All grids in the application (Date Corrections, Setup, Filtered Files, Logs) share a common interaction model:
+
+1. **Read-Only Cells**: All table cells (except checkboxes) are read-only to prevent accidental data editing
+2. **Extended Selection**: Support for Shift/Ctrl multi-selection
+3. **Checkbox Auto-Sync**: Row selection and checkboxes automatically stay synchronized
+4. **Double-Click Toggle**: Double-click any row to toggle its checkbox
+5. **Checkbox Column Support**: Shift/Ctrl work on checkbox column same as other columns
+
+**Technical Implementation:**
+
+**1. Read-Only Cells (All QTableWidgetItem objects):**
+```python
+# Set flags to prevent editing while allowing selection
+item = QTableWidgetItem("Some Text")
+item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+self.table.setItem(row, column, item)
+```
+
+**Critical**: Apply to ALL QTableWidgetItem objects across all columns (except checkbox column which uses different mechanisms).
+
+**2. Extended Selection Mode:**
+```python
+# Enable Shift/Ctrl selection support
+self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+
+# Track last clicked row for Shift+Click range selection
+self.last_clicked_row = -1
+```
+
+**3. Signal Connections:**
+```python
+# Connect signals for interaction handling
+self.table.itemSelectionChanged.connect(self.sync_checkboxes_with_selection)
+self.table.itemDoubleClicked.connect(self.on_item_double_clicked)
+self.table.itemClicked.connect(self.on_item_clicked)
+```
+
+**4. Checkbox Synchronization (Auto-Sync Pattern):**
+```python
+def sync_checkboxes_with_selection(self):
+    """Sync checkbox states with row selection - checkboxes match selected rows."""
+    selected_rows = set(index.row() for index in self.table.selectedIndexes())
+
+    # Block signals to prevent recursive updates
+    self.table.blockSignals(True)
+
+    for row in range(self.table.rowCount()):
+        checkbox_item = self.table.item(row, 0)
+        if checkbox_item:
+            is_selected = row in selected_rows
+            new_state = Qt.Checked if is_selected else Qt.Unchecked
+            # Only update if state changed (efficiency)
+            if checkbox_item.checkState() != new_state:
+                checkbox_item.setCheckState(new_state)
+
+    self.table.blockSignals(False)
+```
+
+**5. Double-Click Checkbox Toggle:**
+```python
+def on_item_double_clicked(self, item):
+    """Handle double-click on row - toggle checkbox."""
+    if item is None:
+        return
+
+    row = item.row()
+    column = item.column()
+
+    # Don't toggle if double-clicking checkbox column (already toggles naturally)
+    if column == 0:
+        return
+
+    # Toggle checkbox in column 0
+    checkbox_item = self.table.item(row, 0)
+    if checkbox_item:
+        current_state = checkbox_item.checkState()
+        new_state = Qt.Unchecked if current_state == Qt.Checked else Qt.Checked
+        checkbox_item.setCheckState(new_state)
+```
+
+**6. Checkbox Column Click Handler (Critical for Shift/Ctrl on checkbox column):**
+```python
+def on_item_clicked(self, item):
+    """Handle click on table item - support Shift/Ctrl selection on checkbox column."""
+    if item is None:
+        return
+
+    row = item.row()
+    column = item.column()
+
+    # Only handle clicks on checkbox column (column 0)
+    if column != 0:
+        self.last_clicked_row = row
+        return
+
+    modifiers = QApplication.keyboardModifiers()
+
+    # Handle Shift-click: select range and check all checkboxes in range
+    if modifiers & Qt.ShiftModifier and self.last_clicked_row >= 0:
+        start_row = min(self.last_clicked_row, row)
+        end_row = max(self.last_clicked_row, row)
+        target_state = item.checkState()
+
+        self.table.blockSignals(True)
+        for r in range(start_row, end_row + 1):
+            self.table.selectRow(r)
+            checkbox_item = self.table.item(r, 0)
+            if checkbox_item:
+                checkbox_item.setCheckState(target_state)
+        self.table.blockSignals(False)
+        # Trigger any dependent updates
+        self.on_selection_changed()
+
+    # Handle Ctrl-click: toggle row selection (checkbox handled by sync)
+    elif modifiers & Qt.ControlModifier:
+        if self.table.isRowSelected(row):
+            self.table.selectRow(row)
+        # Checkbox will auto-sync via itemSelectionChanged signal
+
+    # Normal click: select row
+    else:
+        self.table.selectRow(row)
+
+    self.last_clicked_row = row
+```
+
+**Two Checkbox Types (Different Implementations):**
+
+**Type 1: QTableWidgetItem with ItemIsUserCheckable (Date Corrections Tab):**
+```python
+# Creating checkbox column
+checkbox_item = QTableWidgetItem()
+checkbox_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
+checkbox_item.setCheckState(Qt.Unchecked)
+self.table.setItem(row, 0, checkbox_item)
+
+# Accessing state
+checkbox_item = self.table.item(row, 0)
+if checkbox_item.checkState() == Qt.Checked:
+    # Row is selected
+```
+
+**Type 2: QCheckBox Widget (Setup Tab):**
+```python
+# Creating checkbox column
+checkbox = QCheckBox()
+checkbox_widget = QWidget()
+checkbox_layout = QHBoxLayout(checkbox_widget)
+checkbox_layout.addWidget(checkbox)
+checkbox_layout.setAlignment(Qt.AlignCenter)
+checkbox_layout.setContentsMargins(0, 0, 0, 0)
+self.table.setCellWidget(row, 0, checkbox_widget)
+
+# Accessing state (requires finding child widget)
+checkbox_widget = self.table.cellWidget(row, 0)
+if checkbox_widget:
+    checkbox = checkbox_widget.findChild(QCheckBox)
+    if checkbox and checkbox.isChecked():
+        # Row is selected
+```
+
+**Important**: Click handlers must adapt to checkbox type. Date Corrections uses `item.checkState()`, Setup uses `checkbox.isChecked()`.
+
+**7. Dialog Centering (Multi-Monitor Support):**
+```python
+def _center_dialog(self, dialog):
+    """Center a dialog on the main application window."""
+    parent = self.parent()
+    if parent:
+        # Get top-level window (not intermediate parent widget)
+        main_window = parent.window()
+        if main_window:
+            # Ensure dialog has correct size
+            dialog.adjustSize()
+
+            # Use frameGeometry() to include window decorations
+            parent_geo = main_window.frameGeometry()
+            dialog_geo = dialog.frameGeometry()
+
+            # Calculate centered position
+            x = parent_geo.x() + (parent_geo.width() - dialog_geo.width()) // 2
+            y = parent_geo.y() + (parent_geo.height() - dialog_geo.height()) // 2
+
+            dialog.move(x, y)
+```
+
+**Critical**: Use `parent.window()` (not `self.parent()`) to get top-level window, and `frameGeometry()` (not `geometry()`) to include window decorations. This ensures correct positioning on multi-monitor setups.
+
+**8. Error-Only Dialogs (Batch Operations):**
+```python
+# After batch operation completes
+if error_count > 0 or exif_failures or db_failures:
+    # Show detailed error dialog
+    msg_box = QMessageBox(
+        QMessageBox.Warning,
+        "Corrections Complete with Issues",
+        f"Successfully corrected: {success_count}\nFailed: {error_count}",
+        QMessageBox.Ok,
+        self
+    )
+    self._center_dialog(msg_box)
+    msg_box.exec()
+else:
+    # Silent success - no dialog shown
+    # Success information already logged in detail
+    pass
+
+self.accept()  # Close dialog
+```
+
+**Rationale**: Suppressing success dialogs for batch operations allows users to rapidly correct large numbers of files without interruption. Errors are still shown to ensure user awareness.
+
+**Signal Blocking (Preventing Recursive Updates):**
+```python
+# Block signals before batch updates
+self.table.blockSignals(True)
+
+# Perform updates (won't trigger itemSelectionChanged, etc.)
+for row in range(self.table.rowCount()):
+    checkbox_item.setCheckState(Qt.Checked)
+    self.table.selectRow(row)
+
+# Unblock signals
+self.table.blockSignals(False)
+
+# Manually trigger any dependent updates
+self.on_selection_changed()
+```
+
+**When to Use Signal Blocking:**
+- Batch checkbox updates in sync_checkboxes_with_selection()
+- Shift-click range selection (updating multiple rows)
+- Programmatic row selection that shouldn't trigger cascade updates
+
+**Common Pitfalls:**
+
+1. **Forgetting to set read-only flags**: Cells will be editable
+2. **Not using window().frameGeometry()**: Dialogs appear on wrong monitor
+3. **Checkbox type mismatch**: Using QTableWidgetItem methods on QCheckBox widgets
+4. **Infinite signal loops**: Not blocking signals during sync operations
+5. **Not updating last_clicked_row**: Shift-click range selection breaks
+6. **Not adapting for checkbox column**: Shift/Ctrl don't work on checkbox column
+
+**Files Implementing This Pattern:**
+- `ui/date_corrections_tab.py`: QTableWidgetItem checkboxes (lines 283-742)
+- `ui/setup_tab.py`: QCheckBox widgets (lines 42-629)
+- `ui/date_correction_dialog.py`: Dialog centering (lines 481-500)
+
 ### File Type Verification
 - Uses PIL/Pillow to verify file format matches extension
 - Automatically corrects mismatched extensions (e.g., `.png` file with `.jpg` extension)
