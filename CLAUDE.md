@@ -388,8 +388,187 @@ Flagged files are automatically inserted into the `UnreliableDates` table during
 - Copy-verify-delete pattern prevents data loss
 - Progress dialogs for all long-running operations
 - Cancellation support
-- Detailed error logging
+- Comprehensive error logging with visual indicators
 - Files with missing EXIF can still be reorganized (without EXIF write)
+- Audit trail maintains original archive locations for verification
+
+**Enhanced Logging System (v2.2.1)**:
+
+The date correction system features comprehensive logging with visual indicators for easy log navigation:
+
+**Visual Indicators:**
+- `✓` - Successful operations
+- `✗` - Failed operations
+- `⚠` - Warnings (e.g., file collisions)
+- `ℹ` - Informational messages
+
+**Section Markers:**
+- `========...` (80 chars) - Process start/end boundaries
+- `--------...` (60 chars) - Individual file processing boundaries
+
+**Log Levels:**
+- Process start/end: `INFO` level with section markers
+- Step-by-step operations: `INFO` level with visual indicators
+- Errors: `ERROR` level with full stack traces (`exc_info=True`)
+- Warnings: `WARNING` level for non-fatal issues
+- Critical failures: `CRITICAL` level for configuration/system errors
+
+**Date Correction Dialog Logging:**
+- Per-file EXIF write tracking (source + archive)
+- Separate error lists: `exif_failures`, `db_failures`
+- Detailed summary reports with breakdown by error type
+- Success/failure counts for each operation
+
+**Reorganization Worker Logging:**
+- Per-file detailed logging:
+  - File hash, original date, corrected date
+  - Old and new archive paths
+  - Directory creation status
+  - File collision handling
+  - Copy size verification
+  - Database update confirmation
+- Empty directory cleanup tracking
+- Final summary with success rate percentage
+
+**Example Log Output:**
+```
+2026-01-04 10:23:15 INFO ================================================================
+2026-01-04 10:23:15 INFO STARTING DATE CORRECTION PROCESS
+2026-01-04 10:23:15 INFO Files to process: 15
+2026-01-04 10:23:15 INFO ----------------------------------------------------------------
+2026-01-04 10:23:15 INFO Processing file 1/15: vacation_001.jpg
+2026-01-04 10:23:15 INFO   → Source file: /source/vacation_001.jpg
+2026-01-04 10:23:15 INFO   ✓ EXIF written to source file successfully
+2026-01-04 10:23:15 INFO   → Archive file: /archive/2024/01/01/vacation_001.jpg
+2026-01-04 10:23:15 INFO   ✓ EXIF written to archive file successfully
+2026-01-04 10:23:15 INFO   ✓ Database updated successfully
+2026-01-04 10:23:15 INFO ✓✓✓ FILE CORRECTION COMPLETED SUCCESSFULLY ✓✓✓
+```
+
+**Audit Trail System (v2.2.1)**:
+
+The system maintains a complete audit trail of all file reorganizations:
+
+**Database Column: `original_archive_path`**
+- Stores the file's location BEFORE reorganization
+- NULL for files never reorganized
+- Preserved after reorganization for verification
+- Displayed in Date Corrections tab details panel
+
+**Status Tracking:**
+Files progress through three states:
+1. **Pending**: No correction applied yet
+   - `corrected_date` is NULL
+   - Status color: Gray
+   - Default filter: SHOW
+2. **Corrected**: Date corrected, waiting for reorganization
+   - `corrected_date` set, `needs_reorganization=1`
+   - Status color: Dark Green
+   - Status text: "Corrected: YYYY-MM-DD"
+   - Default filter: SHOW
+3. **Reorganized**: File moved to correct date folder
+   - `corrected_date` set, `needs_reorganization=0`
+   - `original_archive_path` populated
+   - Status color: Blue
+   - Status text: "Reorganized: YYYY-MM-DD"
+   - Default filter: HIDE (reduces clutter, available for auditing)
+
+**Status Filters (Checkboxes):**
+- "Pending" - Show files awaiting correction
+- "Corrected" - Show files corrected but not yet reorganized
+- "Reorganized" - Show files already reorganized (for auditing)
+
+**Audit Workflow:**
+1. User corrects date → Status changes to "Corrected" (Green)
+2. User clicks "Reorganize All Marked"
+3. System saves current `archive_path` to `original_archive_path`
+4. File moved to new location based on corrected date
+5. Status changes to "Reorganized" (Blue)
+6. Details panel shows both paths:
+   ```
+   Archive: /archive/1995/07/15/photo.jpg
+   Original: /archive/2024/01/01/photo.jpg
+   ```
+7. User can verify file was moved from correct original location
+
+**EXIF Dual-Write Pattern (v2.2.1)**:
+
+**Critical Implementation Detail:**
+EXIF data must be written to BOTH source and archive files to ensure data persistence during reorganization.
+
+**Why Both Files?**
+- **Source file**: User's original file, may be re-imported in the future
+- **Archive file**: This is what gets copied during reorganization
+- If EXIF only written to source, reorganized file will have OLD date in EXIF
+- Result: File in correct folder (1995/07/15/) but EXIF shows wrong date (2024/01/01)
+
+**Implementation (date_correction_dialog.py):**
+```python
+# Write to source file if it exists
+if os.path.exists(record['source_path']):
+    write_exif_date(record['source_path'], year_str, month_str, day_str)
+    logger.info("✓ EXIF written to source file successfully")
+
+# CRITICAL: Also write to archive file (this is what gets reorganized!)
+if record.get('archive_path') and os.path.exists(record['archive_path']):
+    write_exif_date(record['archive_path'], year_str, month_str, day_str)
+    logger.info("✓ EXIF written to archive file successfully")
+```
+
+**Error Tracking:**
+- Separate failure lists for source and archive EXIF writes
+- Detailed error messages show which file failed
+- Summary reports show success counts for both targets
+
+**Zoom Functionality in Preview Panel (v2.2.1)**:
+
+The Date Corrections tab preview panel supports rubber band zoom for detailed image inspection:
+
+**Features:**
+- **Rubber Band Selection**: Click and drag to select zoom region
+- **Zoom Application**: Release mouse to zoom into selected area
+- **Minimum Size**: Rectangle must be > 10 pixels to prevent accidental zooms
+- **Reset Zoom**: Double-click anywhere to reset to fit-in-view mode
+- **Zoom Persistence**: Custom zoom maintained during window resize
+
+**Implementation Details (ZoomableGraphicsView class):**
+- `is_custom_zoom` flag tracks zoom state
+- Prevents `resizeEvent()` from resetting user's custom zoom
+- `fitInView()` only called on double-click or new image load
+- Rubber band drawn with QRubberBand widget
+- Zoom applied to QRectF calculated from rubber band geometry
+
+**Usage:**
+1. Select file in grid → Image appears in preview panel
+2. Click and drag to select area of interest
+3. Release mouse → Preview zooms to selected area
+4. Double-click → Reset to full image view
+5. Window resize → Zoom level maintained (won't auto-reset)
+
+**Database Path Synchronization (v2.2.1)**:
+
+The system includes intelligent synchronization to fix archive paths that may have been incorrectly stored:
+
+**Method: `sync_archive_paths_from_unique_photos()`**
+- Updates NULL `archive_path` values from `UniquePhotos` table
+- Detects source paths incorrectly stored as archive paths
+- Reconstructs correct archive paths using organization template + date
+- Verifies files exist before updating
+- Updates both `UnreliableDates` and `UniquePhotos` tables
+- Returns count of records synchronized
+
+**Detection Logic:**
+```python
+# Check if archive_path doesn't start with archive base location
+if not current_archive_path.startswith(archive_base):
+    # This is likely a source path, reconstruct correct archive path
+    file_date = datetime(int(year), int(month), int(day))
+    folder_path = OrganizationTemplate.parse(template_str, file_date)
+    correct_archive_path = os.path.join(archive_base, folder_path, filename)
+```
+
+**Auto-Upgrade Support:**
+Old databases automatically upgraded with `original_archive_path` column during first access.
 
 **Dependencies**:
 - `piexif>=1.1.3`: EXIF metadata writing for JPEG and TIFF formats
