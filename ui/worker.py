@@ -83,6 +83,7 @@ class ProcessingWorker(QThread):
                 'total_new_original_files': final_results.get('total_new_original_files', 0),
                 'total_duplicates': final_results.get('total_duplicates', 0),
                 'total_filtered': final_results.get('total_filtered', 0),
+                'total_unreliable_dates': final_results.get('total_unreliable_dates', 0),
                 'processing_time': processing_time,
                 'filter_statistics': final_results.get('filter_statistics', {}),
                 'filtered_files': final_results.get('filtered_files', [])

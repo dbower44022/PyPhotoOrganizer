@@ -4,6 +4,9 @@
 # Image processing and EXIF extraction
 Pillow>=10.0.0
 
+# EXIF writing for date correction
+piexif>=1.1.3
+
 # HEIC/HEIF format support for Apple photos
 pillow-heif>=0.13.0
 

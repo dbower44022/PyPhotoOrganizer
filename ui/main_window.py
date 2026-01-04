@@ -18,6 +18,7 @@ from ui.logs_tab import LogsTab
 from ui.settings_tab import SettingsTab
 from ui.database_tab import DatabaseTab
 from ui.filtered_files_tab import FilteredFilesTab
+from ui.date_corrections_tab import DateCorrectionsTab
 from ui.database_selector_dialog import DatabaseSelectorDialog
 from ui.worker import ProcessingWorker
 from database_metadata import DatabaseMetadata
@@ -78,6 +79,7 @@ class MainWindow(QMainWindow):
         self.logs_tab = LogsTab()
         self.settings_tab = SettingsTab()
         self.database_tab = DatabaseTab()
+        self.date_corrections_tab = DateCorrectionsTab()
 
         # Add tabs
         self.tabs.addTab(self.setup_tab, "Setup")
@@ -87,6 +89,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.logs_tab, "Logs")
         self.tabs.addTab(self.settings_tab, "Settings")
         self.tabs.addTab(self.database_tab, "Database")
+        self.tabs.addTab(self.date_corrections_tab, "Date Corrections")
 
         # Connect signals
         self.setup_tab.start_clicked.connect(self.start_processing)
@@ -133,11 +136,19 @@ class MainWindow(QMainWindow):
             # Update config with folder selections from setup tab (only enabled ones)
             source_folders = self.setup_tab.get_enabled_source_folders()
 
+            # Debug logging
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"Enabled source folders from setup tab: {source_folders}")
+
             # Get destination from database
             destination_folder = self.database_metadata.get_archive_location()
+            logger.info(f"Destination folder from database: {destination_folder}")
 
             if not source_folders:
-                QMessageBox.warning(self, "Error", "Please select at least one source folder")
+                QMessageBox.warning(self, "Error",
+                                  "Please select at least one source folder.\n\n"
+                                  "Make sure the checkbox next to the source folder is checked!")
                 return
 
             if not destination_folder:
@@ -244,13 +255,15 @@ class MainWindow(QMainWindow):
         originals = results.get('total_new_original_files', 0)
         duplicates = results.get('total_duplicates', 0)
         filtered = results.get('total_filtered', 0)
+        unreliable_dates = results.get('total_unreliable_dates', 0)
 
         QMessageBox.information(self, "Processing Complete",
                               f"Processing complete!\n\n"
                               f"Total files examined: {total_examined}\n"
                               f"New original photos: {originals}\n"
                               f"Duplicates found: {duplicates}\n"
-                              f"Filtered files: {filtered}")
+                              f"Filtered files: {filtered}\n"
+                              f"Files with suspicious dates: {unreliable_dates}")
 
     def processing_error(self, error_msg):
         """Handle processing error."""
@@ -313,6 +326,9 @@ class MainWindow(QMainWindow):
 
         # Update settings tab with database (loads organization template)
         self.settings_tab.set_database(self.database_metadata)
+
+        # Update date corrections tab with database
+        self.date_corrections_tab.set_database(self.database_metadata)
 
         # Update window title
         metadata = self.database_metadata.get_metadata()

@@ -32,7 +32,8 @@ class DatabaseMetadata:
             schema_version INTEGER DEFAULT 1,
             total_photos INTEGER DEFAULT 0,
             organization_template TEXT DEFAULT '{YYYY}/{MM}/{DD}',
-            file_type_organization TEXT DEFAULT 'combined'
+            file_type_organization TEXT DEFAULT 'combined',
+            user_specified_unreliable_paths TEXT DEFAULT '[]'
         );
     """
 
@@ -47,6 +48,23 @@ class DatabaseMetadata:
         );
     """
 
+    UNRELIABLE_DATES_TABLE_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS UnreliableDates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_hash TEXT NOT NULL,
+            source_path TEXT NOT NULL,
+            archive_path TEXT,
+            original_archive_path TEXT,
+            original_date TEXT,
+            date_source TEXT,
+            flag_reason TEXT,
+            corrected_date TEXT,
+            correction_timestamp TEXT,
+            needs_reorganization INTEGER DEFAULT 0,
+            FOREIGN KEY (file_hash) REFERENCES UniquePhotos(hash)
+        );
+    """
+
     def __init__(self, database_path: str):
         """
         Initialize database metadata manager.
@@ -57,6 +75,7 @@ class DatabaseMetadata:
         self.database_path = database_path
         self._ensure_metadata_table()
         self._ensure_source_directories_table()
+        self._ensure_unreliable_dates_table()
 
     def _ensure_metadata_table(self):
         """Ensure the metadata table exists in the database with all columns."""
@@ -91,6 +110,11 @@ class DatabaseMetadata:
                     logger.info("Upgrading database: adding file_type_organization column")
                     cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN file_type_organization TEXT DEFAULT 'combined'")
 
+                # Add user_specified_unreliable_paths column if missing
+                if 'user_specified_unreliable_paths' not in columns:
+                    logger.info("Upgrading database: adding user_specified_unreliable_paths column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN user_specified_unreliable_paths TEXT DEFAULT '[]'")
+
                 conn.commit()
                 logger.debug(f"Metadata table ensured in {self.database_path}")
 
@@ -112,6 +136,31 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to create SourceDirectories table: {e}")
+            raise
+
+    def _ensure_unreliable_dates_table(self):
+        """Ensure the UnreliableDates table exists in the database."""
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                # Create table if it doesn't exist
+                cursor.execute(self.UNRELIABLE_DATES_TABLE_SCHEMA)
+
+                # Check if new columns exist (for upgrading old databases)
+                cursor.execute("PRAGMA table_info(UnreliableDates)")
+                columns = [row[1] for row in cursor.fetchall()]
+
+                # Add original_archive_path column if missing
+                if 'original_archive_path' not in columns:
+                    logger.info("Upgrading database: adding original_archive_path column to UnreliableDates")
+                    cursor.execute("ALTER TABLE UnreliableDates ADD COLUMN original_archive_path TEXT")
+
+                conn.commit()
+                logger.debug(f"UnreliableDates table ensured in {self.database_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to create UnreliableDates table: {e}")
             raise
 
     def ensure_all_tables(self):
@@ -689,6 +738,415 @@ class DatabaseMetadata:
         except Exception as e:
             logger.error(f"Failed to reorder source directories: {e}")
             return False
+
+    # ========== Unreliable Dates Management ==========
+
+    def insert_unreliable_date(self, file_hash: str, source_path: str,
+                               archive_path: Optional[str], original_date: str,
+                               date_source: str, flag_reason: str) -> bool:
+        """
+        Insert a record for a file with unreliable date information.
+
+        Args:
+            file_hash: SHA-256 hash of the file
+            source_path: Original source path of the file
+            archive_path: Archive path where file was stored
+            original_date: Original detected date (YYYY-MM-DD format)
+            date_source: Source of date ('exif', 'os_metadata', 'fallback')
+            flag_reason: Reason for flagging ('no_exif', 'year_1000', 'suspicious', 'user_specified')
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                # Check if record already exists for this file
+                cursor.execute("SELECT COUNT(*) FROM UnreliableDates WHERE file_hash = ?", (file_hash,))
+                if cursor.fetchone()[0] > 0:
+                    logger.debug(f"Unreliable date record already exists for {file_hash}")
+                    return True
+
+                # Insert new record
+                cursor.execute("""
+                    INSERT INTO UnreliableDates
+                    (file_hash, source_path, archive_path, original_date, date_source, flag_reason)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (file_hash, source_path, archive_path, original_date, date_source, flag_reason))
+
+                conn.commit()
+                logger.debug(f"Inserted unreliable date record for {source_path}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to insert unreliable date record: {e}")
+            return False
+
+    def get_unreliable_dates(self, filter_reason: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Get all files flagged with unreliable dates.
+
+        Args:
+            filter_reason: Optional filter ('no_exif', 'year_1000', 'suspicious', 'user_specified')
+
+        Returns:
+            List of dict records with unreliable date information
+        """
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                if filter_reason:
+                    cursor.execute("""
+                        SELECT id, file_hash, source_path, archive_path, original_archive_path,
+                               original_date, date_source, flag_reason, corrected_date,
+                               correction_timestamp, needs_reorganization
+                        FROM UnreliableDates
+                        WHERE flag_reason = ?
+                        ORDER BY source_path
+                    """, (filter_reason,))
+                else:
+                    cursor.execute("""
+                        SELECT id, file_hash, source_path, archive_path, original_archive_path,
+                               original_date, date_source, flag_reason, corrected_date,
+                               correction_timestamp, needs_reorganization
+                        FROM UnreliableDates
+                        ORDER BY source_path
+                    """)
+
+                rows = cursor.fetchall()
+                records = []
+
+                for row in rows:
+                    records.append({
+                        'id': row[0],
+                        'file_hash': row[1],
+                        'source_path': row[2],
+                        'archive_path': row[3],
+                        'original_archive_path': row[4],
+                        'original_date': row[5],
+                        'date_source': row[6],
+                        'flag_reason': row[7],
+                        'corrected_date': row[8],
+                        'correction_timestamp': row[9],
+                        'needs_reorganization': bool(row[10])
+                    })
+
+                return records
+
+        except Exception as e:
+            logger.error(f"Failed to get unreliable dates: {e}")
+            return []
+
+    def update_corrected_date(self, file_hash: str, new_date: str,
+                             mark_for_reorganization: bool = True) -> bool:
+        """
+        Update corrected date for a file.
+
+        Args:
+            file_hash: SHA-256 hash of file
+            new_date: New date as "YYYY-MM-DD"
+            mark_for_reorganization: Whether to set needs_reorganization flag
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    UPDATE UnreliableDates
+                    SET corrected_date = ?,
+                        correction_timestamp = ?,
+                        needs_reorganization = ?
+                    WHERE file_hash = ?
+                """, (new_date, datetime.now().isoformat(),
+                     1 if mark_for_reorganization else 0, file_hash))
+
+                if cursor.rowcount == 0:
+                    logger.warning(f"No unreliable date record found for hash: {file_hash}")
+                    return False
+
+                conn.commit()
+                logger.info(f"Updated corrected date to {new_date} for {file_hash}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to update corrected date: {e}")
+            return False
+
+    def get_files_needing_reorganization(self) -> List[Dict[str, Any]]:
+        """
+        Get all files with needs_reorganization=1.
+
+        Returns:
+            List of dict records that need reorganization
+        """
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    SELECT id, file_hash, source_path, archive_path, original_archive_path,
+                           original_date, corrected_date, correction_timestamp
+                    FROM UnreliableDates
+                    WHERE needs_reorganization = 1
+                    ORDER BY corrected_date
+                """)
+
+                rows = cursor.fetchall()
+                records = []
+
+                for row in rows:
+                    records.append({
+                        'id': row[0],
+                        'file_hash': row[1],
+                        'source_path': row[2],
+                        'archive_path': row[3],
+                        'original_archive_path': row[4],
+                        'original_date': row[5],
+                        'corrected_date': row[6],
+                        'correction_timestamp': row[7]
+                    })
+
+                return records
+
+        except Exception as e:
+            logger.error(f"Failed to get files needing reorganization: {e}")
+            return []
+
+    def sync_archive_paths_from_unique_photos(self) -> int:
+        """
+        Sync archive_path from UniquePhotos to UnreliableDates, and repair archive paths
+        that are currently pointing to source paths.
+
+        This fixes records that were created before archive_path tracking was added.
+
+        Returns:
+            Number of records updated
+        """
+        try:
+            from datetime import datetime
+            from organization_template import OrganizationTemplate
+            import os
+
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                # Get organization settings
+                template_str = self.get_organization_template()
+                archive_base = self.get_archive_location()
+
+                if not archive_base:
+                    logger.warning("No archive location configured, skipping archive path sync")
+                    return 0
+
+                # First, update NULL archive_paths from UniquePhotos
+                cursor.execute("""
+                    UPDATE UnreliableDates
+                    SET archive_path = (
+                        SELECT file_name
+                        FROM UniquePhotos
+                        WHERE UniquePhotos.file_hash = UnreliableDates.file_hash
+                    )
+                    WHERE archive_path IS NULL
+                    AND EXISTS (
+                        SELECT 1
+                        FROM UniquePhotos
+                        WHERE UniquePhotos.file_hash = UnreliableDates.file_hash
+                    )
+                """)
+                updated_null = cursor.rowcount
+
+                # Now repair archive_paths that look like source paths (don't start with archive_base)
+                cursor.execute("""
+                    SELECT u.file_hash, u.archive_path, p.create_year, p.create_month, p.create_day, p.file_name
+                    FROM UnreliableDates u
+                    JOIN UniquePhotos p ON u.file_hash = p.file_hash
+                    WHERE u.archive_path IS NOT NULL
+                """)
+
+                records_to_fix = []
+                for row in cursor.fetchall():
+                    file_hash, current_archive_path, year, month, day, unique_photos_path = row
+
+                    # Check if archive_path looks like a source path (not in archive)
+                    if not current_archive_path.startswith(archive_base):
+                        # Reconstruct the correct archive path
+                        try:
+                            file_date = datetime(int(year), int(month), int(day))
+                            folder_path = OrganizationTemplate.parse(template_str, file_date)
+                            filename = os.path.basename(current_archive_path)
+                            correct_archive_path = os.path.join(archive_base, folder_path, filename)
+
+                            # Verify the file exists at this location
+                            if os.path.exists(correct_archive_path):
+                                records_to_fix.append((correct_archive_path, file_hash))
+                                logger.debug(f"Will repair path: {current_archive_path} -> {correct_archive_path}")
+                        except Exception as e:
+                            logger.debug(f"Could not reconstruct path for {file_hash[:16]}...: {e}")
+
+                # Update the repaired paths
+                repaired_count = 0
+                for correct_path, file_hash in records_to_fix:
+                    # Update UnreliableDates
+                    cursor.execute("""
+                        UPDATE UnreliableDates
+                        SET archive_path = ?
+                        WHERE file_hash = ?
+                    """, (correct_path, file_hash))
+
+                    # Also update UniquePhotos
+                    cursor.execute("""
+                        UPDATE UniquePhotos
+                        SET file_name = ?
+                        WHERE file_hash = ?
+                    """, (correct_path, file_hash))
+
+                    repaired_count += 1
+
+                conn.commit()
+
+                total_updated = updated_null + repaired_count
+                if total_updated > 0:
+                    logger.info(f"Synced archive paths: {updated_null} NULL paths, {repaired_count} source paths repaired")
+
+                return total_updated
+
+        except Exception as e:
+            logger.error(f"Failed to sync archive paths: {e}", exc_info=True)
+            return 0
+
+    def mark_reorganized(self, file_hash: str) -> bool:
+        """
+        Set needs_reorganization=0 for file after successful reorganization.
+
+        Args:
+            file_hash: SHA-256 hash of file
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    UPDATE UnreliableDates
+                    SET needs_reorganization = 0
+                    WHERE file_hash = ?
+                """, (file_hash,))
+
+                if cursor.rowcount == 0:
+                    logger.warning(f"No unreliable date record found for hash: {file_hash}")
+                    return False
+
+                conn.commit()
+                logger.debug(f"Marked file as reorganized: {file_hash}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to mark file as reorganized: {e}")
+            return False
+
+    def update_photo_path(self, file_hash: str, new_path: str) -> bool:
+        """
+        Update the file path in UniquePhotos table (for reorganization).
+
+        Args:
+            file_hash: SHA-256 hash of file
+            new_path: New file path after reorganization
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                # Update UniquePhotos table
+                cursor.execute("""
+                    UPDATE UniquePhotos
+                    SET file_name = ?
+                    WHERE file_hash = ?
+                """, (new_path, file_hash))
+
+                if cursor.rowcount == 0:
+                    logger.warning(f"No photo found in UniquePhotos for hash: {file_hash}")
+                    return False
+
+                # Also update archive_path in UnreliableDates table
+                cursor.execute("""
+                    UPDATE UnreliableDates
+                    SET archive_path = ?
+                    WHERE file_hash = ?
+                """, (new_path, file_hash))
+
+                conn.commit()
+                logger.info(f"Updated photo path to: {new_path}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to update photo path: {e}")
+            return False
+
+    def get_user_specified_paths(self) -> List[str]:
+        """
+        Get list of user-specified unreliable paths.
+
+        Returns:
+            List of folder path strings
+        """
+        try:
+            import json
+
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("SELECT user_specified_unreliable_paths FROM DatabaseMetadata WHERE id = 1")
+                row = cursor.fetchone()
+
+                if row and row[0]:
+                    return json.loads(row[0])
+                return []
+
+        except Exception as e:
+            logger.error(f"Failed to get user-specified paths: {e}")
+            return []
+
+    def set_user_specified_paths(self, paths: List[str]) -> bool:
+        """
+        Save list of user-specified unreliable paths.
+
+        Args:
+            paths: List of folder path strings
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            import json
+
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET user_specified_unreliable_paths = ?
+                    WHERE id = 1
+                """, (json.dumps(paths),))
+
+                conn.commit()
+                logger.info(f"Updated user-specified unreliable paths: {len(paths)} paths")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to set user-specified paths: {e}")
+            return False
+
+    # ========== Static Methods ==========
 
     @staticmethod
     def find_databases(search_path: str = ".") -> List[Dict[str, Any]]:
