@@ -261,12 +261,16 @@ class DateCorrectionDialog(QDialog):
         if not valid:
             logger.error(f"Date validation failed: {error_msg}")
             if error_msg:
-                QMessageBox.warning(self, "Validation Error", error_msg)
+                msg_box = QMessageBox(QMessageBox.Warning, "Validation Error", error_msg, QMessageBox.Ok, self)
+                self._center_dialog(msg_box)
+                msg_box.exec()
             return
 
         if not self.db_metadata:
             logger.critical("No database connection available")
-            QMessageBox.critical(self, "Error", "No database connection")
+            msg_box = QMessageBox(QMessageBox.Critical, "Error", "No database connection", QMessageBox.Ok, self)
+            self._center_dialog(msg_box)
+            msg_box.exec()
             return
 
         # Get date components
@@ -439,7 +443,8 @@ class DateCorrectionDialog(QDialog):
                 logger.error(f"  - {failure}")
         logger.info("=" * 80)
 
-        # Show results with detailed breakdown
+        # Only show completion dialog if there were errors (to avoid slowing down bulk operations)
+        # Success information is already logged in detail
         if error_count > 0 or exif_failures or db_failures:
             details = []
             details.append(f"Successfully corrected: {success_count} file(s)")
@@ -460,22 +465,24 @@ class DateCorrectionDialog(QDialog):
             details.append("")
             details.append("Check logs for detailed error information.")
 
-            QMessageBox.warning(
-                self,
+            msg_box = QMessageBox(
+                QMessageBox.Warning,
                 "Corrections Complete with Issues",
-                "\n".join(details)
+                "\n".join(details),
+                QMessageBox.Ok,
+                self
             )
-        else:
-            details = [f"Successfully corrected {success_count} file(s)!"]
-            if write_exif:
-                details.append("")
-                details.append(f"EXIF written to {exif_source_success} source file(s)")
-                details.append(f"EXIF written to {exif_archive_success} archive file(s)")
+            self._center_dialog(msg_box)
+            msg_box.exec()
 
-            QMessageBox.information(
-                self,
-                "Corrections Complete",
-                "\n".join(details)
-            )
-
+        # No success dialog shown - allows rapid bulk corrections without interruption
         self.accept()
+
+    def _center_dialog(self, dialog):
+        """Center a dialog on the parent window."""
+        if self.parent():
+            parent_geo = self.parent().geometry()
+            dialog_geo = dialog.geometry()
+            x = parent_geo.x() + (parent_geo.width() - dialog_geo.width()) // 2
+            y = parent_geo.y() + (parent_geo.height() - dialog_geo.height()) // 2
+            dialog.move(x, y)
