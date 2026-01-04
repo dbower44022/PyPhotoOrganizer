@@ -265,15 +265,21 @@ class FilteredFilesTab(QWidget):
             # Filename
             file_path = file_info.get('file_path', '')
             filename = os.path.basename(file_path)
-            self.files_table.setItem(row, 0, QTableWidgetItem(filename))
+            filename_item = QTableWidgetItem(filename)
+            filename_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.files_table.setItem(row, 0, filename_item)
 
             # Filter Reason
-            self.files_table.setItem(row, 1, QTableWidgetItem(reason))
+            reason_item = QTableWidgetItem(reason)
+            reason_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.files_table.setItem(row, 1, reason_item)
 
             # Size
             size = file_info.get('file_size', 0)
             size_str = self.format_file_size(size)
-            self.files_table.setItem(row, 2, QTableWidgetItem(size_str))
+            size_item = QTableWidgetItem(size_str)
+            size_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.files_table.setItem(row, 2, size_item)
 
             # Dimensions
             width = file_info.get('width', 0)
@@ -282,10 +288,14 @@ class FilteredFilesTab(QWidget):
                 dimensions = f"{width} x {height}"
             else:
                 dimensions = "N/A"
-            self.files_table.setItem(row, 3, QTableWidgetItem(dimensions))
+            dimensions_item = QTableWidgetItem(dimensions)
+            dimensions_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.files_table.setItem(row, 3, dimensions_item)
 
             # Path
-            self.files_table.setItem(row, 4, QTableWidgetItem(file_path))
+            path_item = QTableWidgetItem(file_path)
+            path_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.files_table.setItem(row, 4, path_item)
 
             # Store full file info in first column
             self.files_table.item(row, 0).setData(Qt.UserRole, file_info)

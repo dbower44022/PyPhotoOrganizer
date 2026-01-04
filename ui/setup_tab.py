@@ -253,11 +253,13 @@ class SetupTab(QWidget):
             icon_item.setForeground(QColor(200, 0, 0))  # Red
         icon_item.setTextAlignment(Qt.AlignCenter)
         icon_item.setToolTip(status_detail)
+        icon_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         self.source_table.setItem(row_position, 1, icon_item)
 
         # Column 2: Path
         path_item = QTableWidgetItem(path)
         path_item.setToolTip(status_detail)
+        path_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         self.source_table.setItem(row_position, 2, path_item)
 
         # Column 3: Last Scanned
@@ -272,6 +274,7 @@ class SetupTab(QWidget):
             scanned_text = "Never"
         scanned_item = QTableWidgetItem(scanned_text)
         scanned_item.setToolTip(f"Last scanned: {scanned_text}")
+        scanned_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         self.source_table.setItem(row_position, 3, scanned_item)
 
         # Column 4: Status
@@ -279,6 +282,7 @@ class SetupTab(QWidget):
         status_item.setToolTip(status_detail)
         if not is_available:
             status_item.setForeground(QColor(200, 0, 0))  # Red text
+        status_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         self.source_table.setItem(row_position, 4, status_item)
 
     def _validate_path(self, path: str) -> tuple:

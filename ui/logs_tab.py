@@ -426,13 +426,30 @@ class LogsTab(QWidget):
         row = self.log_table.rowCount()
         self.log_table.insertRow(row)
 
-        # Set items
-        self.log_table.setItem(row, 0, QTableWidgetItem(entry['timestamp']))
-        self.log_table.setItem(row, 1, QTableWidgetItem(entry['level']))
-        self.log_table.setItem(row, 2, QTableWidgetItem(entry['module']))
-        self.log_table.setItem(row, 3, QTableWidgetItem(entry['function']))
-        self.log_table.setItem(row, 4, QTableWidgetItem(entry['line']))
-        self.log_table.setItem(row, 5, QTableWidgetItem(entry['message']))
+        # Set items (all read-only)
+        timestamp_item = QTableWidgetItem(entry['timestamp'])
+        timestamp_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        self.log_table.setItem(row, 0, timestamp_item)
+
+        level_item = QTableWidgetItem(entry['level'])
+        level_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        self.log_table.setItem(row, 1, level_item)
+
+        module_item = QTableWidgetItem(entry['module'])
+        module_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        self.log_table.setItem(row, 2, module_item)
+
+        function_item = QTableWidgetItem(entry['function'])
+        function_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        self.log_table.setItem(row, 3, function_item)
+
+        line_item = QTableWidgetItem(entry['line'])
+        line_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        self.log_table.setItem(row, 4, line_item)
+
+        message_item = QTableWidgetItem(entry['message'])
+        message_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        self.log_table.setItem(row, 5, message_item)
 
         # Store full entry in first column's data
         self.log_table.item(row, 0).setData(Qt.UserRole, entry)

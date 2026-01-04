@@ -281,7 +281,7 @@ class DateCorrectionsTab(QWidget):
 
         # Configure table
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)  # Supports Shift/Ctrl selection
         self.table.setSortingEnabled(True)
         self.table.setAlternatingRowColors(True)
 
@@ -299,8 +299,9 @@ class DateCorrectionsTab(QWidget):
 
         self.table.setColumnWidth(0, 30)  # Checkbox column
 
-        # Connect selection change
+        # Connect selection change and double-click
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
+        self.table.itemDoubleClicked.connect(self.on_item_double_clicked)
 
         left_layout.addWidget(self.table)
 
@@ -443,7 +444,9 @@ class DateCorrectionsTab(QWidget):
 
         except Exception as e:
             logger.error(f"Failed to load unreliable dates: {e}")
-            QMessageBox.critical(self, "Error", f"Failed to load data:\n\n{str(e)}")
+            msg_box = QMessageBox(QMessageBox.Critical, "Error", f"Failed to load data:\n\n{str(e)}", QMessageBox.Ok, self)
+            self._center_dialog(msg_box)
+            msg_box.exec()
 
     def apply_filters(self):
         """Apply filter checkboxes to show/hide rows."""
@@ -507,33 +510,45 @@ class DateCorrectionsTab(QWidget):
 
             # Filename
             filename = os.path.basename(record['source_path'])
-            self.table.setItem(row, 1, QTableWidgetItem(filename))
+            filename_item = QTableWidgetItem(filename)
+            filename_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.table.setItem(row, 1, filename_item)
 
             # Source location (truncated with tooltip)
             source_item = QTableWidgetItem(self._truncate_path(record['source_path'], 50))
             source_item.setToolTip(record['source_path'])
+            source_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             self.table.setItem(row, 2, source_item)
 
             # Archive location
             archive_path = record['archive_path'] or "Not yet organized"
             archive_item = QTableWidgetItem(self._truncate_path(archive_path, 50))
             archive_item.setToolTip(archive_path)
+            archive_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             self.table.setItem(row, 3, archive_item)
 
             # Detected date
-            self.table.setItem(row, 4, QTableWidgetItem(record['original_date'] or "-"))
+            detected_item = QTableWidgetItem(record['original_date'] or "-")
+            detected_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.table.setItem(row, 4, detected_item)
 
             # EXIF date (read from file if possible)
             exif_date = self._get_exif_date_for_display(record)
-            self.table.setItem(row, 5, QTableWidgetItem(exif_date))
+            exif_item = QTableWidgetItem(exif_date)
+            exif_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.table.setItem(row, 5, exif_item)
 
             # File date (OS metadata)
             file_date = self._get_file_date_for_display(record)
-            self.table.setItem(row, 6, QTableWidgetItem(file_date))
+            file_date_item = QTableWidgetItem(file_date)
+            file_date_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.table.setItem(row, 6, file_date_item)
 
             # Flag reason
             reason_text = record['flag_reason'].replace('_', ' ').title()
-            self.table.setItem(row, 7, QTableWidgetItem(reason_text))
+            reason_item = QTableWidgetItem(reason_text)
+            reason_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.table.setItem(row, 7, reason_item)
 
             # Status
             if record['corrected_date']:
@@ -549,6 +564,7 @@ class DateCorrectionsTab(QWidget):
                 status = "Pending"
                 status_item = QTableWidgetItem(status)
                 status_item.setForeground(Qt.darkGray)
+            status_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             self.table.setItem(row, 8, status_item)
 
             # Store record data in first column for later retrieval
@@ -631,6 +647,20 @@ class DateCorrectionsTab(QWidget):
 
         self.correct_date_btn.setEnabled(True)
 
+    def on_item_double_clicked(self, item):
+        """Handle double-click on table item - toggle checkbox."""
+        if item is None:
+            return
+
+        row = item.row()
+        checkbox_item = self.table.item(row, 0)
+
+        if checkbox_item:
+            # Toggle checkbox state
+            current_state = checkbox_item.checkState()
+            new_state = Qt.Unchecked if current_state == Qt.Checked else Qt.Checked
+            checkbox_item.setCheckState(new_state)
+
     def load_preview(self, file_path):
         """Load and display image preview with zoom capabilities."""
         try:
@@ -685,7 +715,9 @@ class DateCorrectionsTab(QWidget):
         selected_records = self.get_selected_records()
 
         if not selected_records:
-            QMessageBox.warning(self, "No Selection", "Please select files to correct.")
+            msg_box = QMessageBox(QMessageBox.Warning, "No Selection", "Please select files to correct.", QMessageBox.Ok, self)
+            self._center_dialog(msg_box)
+            msg_box.exec()
             return
 
         # Open date correction dialog in batch mode
@@ -698,7 +730,9 @@ class DateCorrectionsTab(QWidget):
     def on_manage_paths(self):
         """Open manage unreliable paths dialog."""
         if not self.db_metadata:
-            QMessageBox.warning(self, "No Database", "Please select a database first.")
+            msg_box = QMessageBox(QMessageBox.Warning, "No Database", "Please select a database first.", QMessageBox.Ok, self)
+            self._center_dialog(msg_box)
+            msg_box.exec()
             return
 
         from ui.manage_unreliable_paths_dialog import ManageUnreliablePathsDialog
@@ -709,7 +743,9 @@ class DateCorrectionsTab(QWidget):
     def on_reorganize_all(self):
         """Reorganize all files marked for reorganization."""
         if not self.db_metadata:
-            QMessageBox.warning(self, "No Database", "Please select a database first.")
+            msg_box = QMessageBox(QMessageBox.Warning, "No Database", "Please select a database first.", QMessageBox.Ok, self)
+            self._center_dialog(msg_box)
+            msg_box.exec()
             return
 
         # Sync archive paths from UniquePhotos first (fixes NULL paths)
@@ -721,16 +757,20 @@ class DateCorrectionsTab(QWidget):
         files_to_reorganize = self.db_metadata.get_files_needing_reorganization()
 
         if not files_to_reorganize:
-            QMessageBox.information(
-                self,
+            msg_box = QMessageBox(
+                QMessageBox.Information,
                 "No Files to Reorganize",
-                "There are no files marked for reorganization."
+                "There are no files marked for reorganization.",
+                QMessageBox.Ok,
+                self
             )
+            self._center_dialog(msg_box)
+            msg_box.exec()
             return
 
         # Confirm
-        response = QMessageBox.question(
-            self,
+        msg_box = QMessageBox(
+            QMessageBox.Question,
             "Reorganize Files",
             f"Reorganize {len(files_to_reorganize)} file(s) based on corrected dates?\n\n"
             f"This will:\n"
@@ -739,8 +779,11 @@ class DateCorrectionsTab(QWidget):
             f"• Update database paths\n\n"
             f"Continue?",
             QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            self
         )
+        msg_box.setDefaultButton(QMessageBox.No)
+        self._center_dialog(msg_box)
+        response = msg_box.exec()
 
         if response == QMessageBox.Yes:
             # Import and run reorganization
@@ -750,19 +793,36 @@ class DateCorrectionsTab(QWidget):
 
             # Show results
             if failed:
-                QMessageBox.warning(
-                    self,
+                msg_box = QMessageBox(
+                    QMessageBox.Warning,
                     "Reorganization Complete with Errors",
                     f"Successfully reorganized: {success} file(s)\n"
                     f"Failed: {failed} file(s)\n\n"
-                    f"Check logs for details."
+                    f"Check logs for details.",
+                    QMessageBox.Ok,
+                    self
                 )
+                self._center_dialog(msg_box)
+                msg_box.exec()
             else:
-                QMessageBox.information(
-                    self,
+                msg_box = QMessageBox(
+                    QMessageBox.Information,
                     "Reorganization Complete",
-                    f"Successfully reorganized {success} file(s)!"
+                    f"Successfully reorganized {success} file(s)!",
+                    QMessageBox.Ok,
+                    self
                 )
+                self._center_dialog(msg_box)
+                msg_box.exec()
 
             # Refresh display
             self.refresh_data()
+
+    def _center_dialog(self, dialog):
+        """Center a dialog on the main window."""
+        if self.parent():
+            parent_geo = self.parent().geometry()
+            dialog_geo = dialog.geometry()
+            x = parent_geo.x() + (parent_geo.width() - dialog_geo.width()) // 2
+            y = parent_geo.y() + (parent_geo.height() - dialog_geo.height()) // 2
+            dialog.move(x, y)
