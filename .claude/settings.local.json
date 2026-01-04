@@ -10,7 +10,9 @@
       "Bash(mount:*)",
       "Bash(.venv/bin/pip install:*)",
       "Bash(sudo apt-get install:*)",
-      "Bash(timeout 5 .venv/bin/python:*)"
+      "Bash(timeout 5 .venv/bin/python:*)",
+      "Bash(grep:*)",
+      "Bash(cat:*)"
     ]
   }
 }

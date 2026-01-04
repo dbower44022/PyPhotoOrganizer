@@ -59,6 +59,7 @@ import filecmp
 import json
 import logging
 import os
+import sqlite3
 
 from PIL import Image
 from PIL.ExifTags import TAGS
@@ -196,6 +197,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             original_files = results.get('original_files')
             filtered_files = results.get('filtered_files', [])
             filter_stats = results.get('filter_statistics')
+            unreliable_dates_count = results.get('unreliable_dates_count', 0)
 
             # Log filter statistics if filtering was enabled
             if filter_stats and filter_stats['total_filtered'] > 0:
@@ -255,8 +257,9 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                             pass
 
                     logger.info(f"file_path = {file_path}")
-                    year, month, day = DuplicateFileDetection.get_creation_date(file_path)
+                    year, month, day, date_source, is_reliable = DuplicateFileDetection.get_creation_date(file_path)
                     # The year, month and day will be returned as strings.
+                    # date_source and is_reliable are tracked but not used here
 
                     # Convert year, month, day strings to datetime object for template parsing
                     try:
@@ -322,6 +325,54 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                         else:
                             logger.info("ERROR - Move and Copy files are not supported simultaneously")
 
+                        # Update database with archive path after successful organization
+                        try:
+                            file_hash = original_file.get("file_hash")
+                            logger.debug(f"Updating database with archive path for file_hash: {file_hash}")
+
+                            if file_hash:
+                                with sqlite3.connect(database_path) as conn:
+                                    cursor = conn.cursor()
+
+                                    # Update UniquePhotos table with archive path
+                                    cursor.execute("""
+                                        UPDATE UniquePhotos
+                                        SET file_name = ?
+                                        WHERE file_hash = ?
+                                    """, (target_path, file_hash))
+
+                                    if cursor.rowcount > 0:
+                                        logger.debug(f"✓ Updated UniquePhotos.file_name: {file_hash[:16]}... -> {target_path}")
+                                    else:
+                                        logger.warning(f"File not found in UniquePhotos: {file_hash[:16]}...")
+
+                                    # Update archive_path in UnreliableDates (if this file has unreliable date)
+                                    cursor.execute("""
+                                        SELECT file_hash, archive_path
+                                        FROM UnreliableDates
+                                        WHERE file_hash = ?
+                                    """, (file_hash,))
+                                    unreliable_record = cursor.fetchone()
+
+                                    if unreliable_record:
+                                        logger.info(f"Found file in UnreliableDates: hash={file_hash[:16]}..., current archive_path={unreliable_record[1]}")
+
+                                        cursor.execute("""
+                                            UPDATE UnreliableDates
+                                            SET archive_path = ?
+                                            WHERE file_hash = ?
+                                        """, (target_path, file_hash))
+
+                                        if cursor.rowcount > 0:
+                                            logger.info(f"✓ Updated UnreliableDates.archive_path: {file_hash[:16]}... -> {target_path}")
+
+                                    conn.commit()
+                            else:
+                                logger.warning(f"No file_hash found in original_file dict for: {file_path}")
+
+                        except Exception as e:
+                            logger.error(f"Failed to update database with archive path: {e}", exc_info=True)
+
                         # if file = heic convert to jpeg
                         try:
                             if file_path.endswith(constants.HEIC_EXTENSIONS):
@@ -367,6 +418,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             "total_new_original_files": total_new_original_files,
             "total_duplicates": len(duplicate_files),
             "total_filtered": len(filtered_files),
+            "total_unreliable_dates": unreliable_dates_count,
             "filter_statistics": filter_stats or {},
             "filtered_files": filtered_files
         }
@@ -379,6 +431,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             "total_new_original_files": total_new_original_files,
             "total_duplicates": len(duplicate_files),
             "total_filtered": len(filtered_files),
+            "total_unreliable_dates": unreliable_dates_count,
             "filter_statistics": filter_stats or {},
             "filtered_files": filtered_files
         }

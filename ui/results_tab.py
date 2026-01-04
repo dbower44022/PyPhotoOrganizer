@@ -38,6 +38,7 @@ class ResultsTab(QWidget):
             "New original photos: 0 (0%)\n"
             "Duplicate files: 0 (0%)\n"
             "Filtered files: 0 (0%)\n"
+            "Files with suspicious dates: 0 (0%)\n"
             "Processing time: 00:00:00\n"
             "Average speed: 0.0 files/sec"
         )
@@ -84,6 +85,7 @@ class ResultsTab(QWidget):
         originals = results.get('total_new_original_files', 0)
         duplicates = results.get('total_duplicates', 0)
         filtered = results.get('total_filtered', 0)
+        unreliable_dates = results.get('total_unreliable_dates', 0)
         processing_time = results.get('processing_time', 0)
 
         # Build summary text
@@ -94,9 +96,11 @@ class ResultsTab(QWidget):
             orig_pct = (originals / total) * 100
             dup_pct = (duplicates / total) * 100
             filt_pct = (filtered / total) * 100
+            unreliable_pct = (unreliable_dates / total) * 100
             summary_lines.append(f"New original photos: {originals} ({orig_pct:.1f}%)")
             summary_lines.append(f"Duplicate files: {duplicates} ({dup_pct:.1f}%)")
             summary_lines.append(f"Filtered files: {filtered} ({filt_pct:.1f}%)")
+            summary_lines.append(f"Files with suspicious dates: {unreliable_dates} ({unreliable_pct:.1f}%)")
 
             if processing_time > 0:
                 avg_speed = total / processing_time
@@ -107,6 +111,7 @@ class ResultsTab(QWidget):
             summary_lines.append(f"New original photos: 0 (0%)")
             summary_lines.append(f"Duplicate files: 0 (0%)")
             summary_lines.append(f"Filtered files: 0 (0%)")
+            summary_lines.append(f"Files with suspicious dates: 0 (0%)")
             summary_lines.append(f"Average speed: 0.0 files/sec")
 
         summary_lines.append(f"Processing time: {self._format_time(processing_time)}")
@@ -136,6 +141,10 @@ class ResultsTab(QWidget):
                 reason_item = QTreeWidgetItem([f"  {reason}", str(count)])
                 filtered_item.addChild(reason_item)
             filtered_item.setExpanded(True)
+
+        # Files with suspicious dates
+        unreliable_item = QTreeWidgetItem(["Files with Suspicious Dates", str(unreliable_dates)])
+        self.breakdown_tree.addTopLevelItem(unreliable_item)
 
         # Enable export button
         self.export_btn.setEnabled(True)
@@ -187,16 +196,19 @@ class ResultsTab(QWidget):
             originals = self.results_data.get('total_new_original_files', 0)
             duplicates = self.results_data.get('total_duplicates', 0)
             filtered = self.results_data.get('total_filtered', 0)
+            unreliable_dates = self.results_data.get('total_unreliable_dates', 0)
 
             writer.writerow(['Total Files Examined', total])
             writer.writerow(['New Original Photos', originals])
             writer.writerow(['Duplicate Files', duplicates])
             writer.writerow(['Filtered Files', filtered])
+            writer.writerow(['Files with Suspicious Dates', unreliable_dates])
 
             if total > 0:
                 writer.writerow(['Original %', f"{(originals/total)*100:.1f}"])
                 writer.writerow(['Duplicate %', f"{(duplicates/total)*100:.1f}"])
                 writer.writerow(['Filtered %', f"{(filtered/total)*100:.1f}"])
+                writer.writerow(['Suspicious Dates %', f"{(unreliable_dates/total)*100:.1f}"])
 
     def copy_statistics(self):
         """Copy summary statistics to clipboard."""

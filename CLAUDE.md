@@ -13,7 +13,10 @@ PhotoOrganizer is a Python-based photo and video duplicate detection and organiz
 ## Running the Application
 
 ```bash
-# Run the main photo organizer
+# Run the GUI application (recommended)
+python main_gui.py
+
+# Run the CLI photo organizer
 python main.py
 
 # Run duplicate detection module standalone
@@ -23,7 +26,9 @@ python DuplicateFileDetection.py
 python TestRoutines.py
 ```
 
-Configuration is loaded from `settings.json` in the project root directory.
+**GUI Mode** (`main_gui.py`): Full-featured interface with database management, source directory configuration, real-time progress tracking, and date correction tools. Database-first approach where each database is bound to a specific archive location.
+
+**CLI Mode** (`main.py`): Command-line interface using configuration from `settings.json` in the project root directory.
 
 ## Architecture
 
@@ -87,9 +92,50 @@ Configuration is loaded from `settings.json` in the project root directory.
     - `update_source_last_scanned(path, timestamp)`: Update timestamp after processing
     - `update_source_enabled(path, enabled)`: Toggle enabled status
     - `clear_all_source_directories()`: Remove all sources
+  - **Unreliable Dates Management** (NEW in v2.2):
+    - `insert_unreliable_date()`: Record files with questionable date information
+    - `get_unreliable_dates(filter_reason)`: Query files with unreliable dates
+    - `update_corrected_date()`: Update when user corrects a file's date
+    - `get_files_needing_reorganization()`: Get files marked for reorganization
+    - `mark_reorganized()`: Clear reorganization flag after completion
+    - `update_photo_path()`: Update file paths after reorganization
+    - `get_user_specified_paths()` / `set_user_specified_paths()`: Manage user-specified unreliable paths
   - `find_databases(path)`: Search for all PyPhotoOrganizer databases in directory
   - `create_database()`: Create new database with all required tables
   - `ensure_all_tables()`: Upgrade old databases by adding missing tables/columns
+
+**exif_writer.py** - EXIF metadata modification (NEW in v2.2)
+- `write_exif_date(file_path, year, month, day)`: Writes corrected date to EXIF data
+  - Creates EXIF structure if image has none
+  - Writes to DateTimeOriginal, DateTime, and DateTimeDigitized fields
+  - Preserves image quality during save
+  - Supports JPEG and TIFF formats
+- `read_exif_date(file_path)`: Reads DateTimeOriginal from EXIF
+- `verify_exif_write(file_path, year, month, day)`: Verifies EXIF write succeeded
+
+**GUI Modules** (ui/ directory):
+- `main_window.py`: Main application window with tab-based interface
+- `setup_tab.py`: Source directory selection and processing controls
+- `progress_tab.py`: Real-time processing progress display
+- `results_tab.py`: Processing results summary
+- `filtered_files_tab.py`: Files filtered by photo filter
+- `logs_tab.py`: Application log viewer
+- `settings_tab.py`: Organization template and settings configuration
+- `database_tab.py`: Database selection, creation, and metadata management
+- **`date_corrections_tab.py`** (NEW in v2.2): Date correction interface
+  - Grid view with sortable columns and filtering
+  - Image preview panel
+  - Single and batch date correction
+  - Reorganization management
+- **`date_correction_dialog.py`** (NEW in v2.2): Date input dialog
+  - Single file mode with date picker
+  - Batch mode with same/sequential date options
+  - EXIF writing and reorganization flags
+- **`manage_unreliable_paths_dialog.py`** (NEW in v2.2): User-specified unreliable paths management
+- **`reorganize_worker.py`** (NEW in v2.2): Safe file reorganization logic
+  - Copy-verify-delete pattern
+  - Empty directory cleanup
+  - Database path updates
 
 **Database**: SQLite database (configurable via `settings.json`, defaults to `PhotoDB.db`)
 - **Table `DatabaseMetadata`**: Stores database metadata and configuration
@@ -110,6 +156,16 @@ Configuration is loaded from `settings.json` in the project root directory.
   - `enabled`: Whether source is enabled for scanning (checkbox state)
   - Sources persist across sessions - automatically loaded when database is selected
   - Allows selective processing with checkboxes (only enabled sources are scanned)
+- **Table `UnreliableDates`** (NEW in v2.2): Tracks files with questionable date information
+  - `file_hash`: SHA-256 hash linking to UniquePhotos table
+  - `source_path`, `archive_path`: Original and archive file locations
+  - `original_date`: Date extracted during processing
+  - `date_source`: Where date came from ('exif', 'os_metadata', 'fallback')
+  - `flag_reason`: Why flagged ('no_exif', 'year_1000', 'suspicious', 'user_specified')
+  - `corrected_date`: User-corrected date (YYYY-MM-DD format)
+  - `correction_timestamp`: When correction was made
+  - `needs_reorganization`: Flag indicating file needs to be moved to correct date folder
+  - Automatically populated during processing when unreliable dates detected
 
 ### Data Flow
 
@@ -125,8 +181,13 @@ Configuration is loaded from `settings.json` in the project root directory.
    - Small files (< 1MB): Direct full hash
    - Large files (≥ 1MB): Partial hash first, full hash only if potential duplicate
 6. Hash is checked against database to determine if file is duplicate
-7. Unique files are copied to destination in `YYYY/MM/DD` folder structure based on EXIF or OS creation date
-8. Database is updated with new unique file hashes (including partial hash for optimization)
+7. **Date extraction with reliability tracking** (NEW in v2.2):
+   - `get_creation_date()` extracts date from EXIF or OS metadata
+   - Returns: (year, month, day, date_source, is_reliable)
+   - Unreliable dates automatically flagged and recorded in `UnreliableDates` table
+   - Detection criteria: no EXIF, year 1000 fallback, suspicious dates, user-specified paths
+8. Unique files are copied to destination in `YYYY/MM/DD` folder structure based on extracted creation date
+9. Database is updated with new unique file hashes (including partial hash for optimization)
 
 ### Settings Configuration
 
@@ -264,6 +325,75 @@ The `settings.json` file controls application behavior:
 
 **Disable filtering**: Set `"photo_filter_enabled": false` in settings.json
 
+### Date Correction System (NEW in v2.2)
+
+**Purpose**: Identify files with unreliable date information and provide tools to correct them, ensuring files are organized in the correct date-based folders.
+
+**exif_writer.py** - EXIF date modification module
+- `write_exif_date(file_path, year, month, day)`: Writes corrected date to EXIF DateTimeOriginal field
+  - Creates EXIF data if file has none
+  - Writes to multiple EXIF fields (DateTimeOriginal, DateTime, DateTimeDigitized)
+  - Preserves image quality (quality=95 for JPEG)
+  - Returns True on success, False on failure
+- `read_exif_date(file_path)`: Reads EXIF DateTimeOriginal and returns (year, month, day) tuple
+- `verify_exif_write(file_path, expected_year, expected_month, expected_day)`: Verifies EXIF write succeeded
+
+**Automatic Detection During Processing**:
+During file processing, the system automatically flags files with unreliable dates based on:
+1. **No EXIF Data**: Image has no EXIF metadata (flag_reason: 'no_exif')
+2. **Year 1000 Fallback**: All date extraction methods failed (flag_reason: 'year_1000')
+3. **Suspicious Dates**:
+   - Year < 1990 (before consumer digital cameras)
+   - Year > current year + 1 (future date)
+   - Date is exactly 1970-01-01 (Unix epoch default)
+   - Flag reason: 'suspicious'
+4. **User-Specified Paths**: File's source path matches user-configured unreliable paths (flag_reason: 'user_specified')
+   - Example: `/old/scanned_photos/` or `D:\Legacy\Phone Backup\`
+
+Flagged files are automatically inserted into the `UnreliableDates` table during processing.
+
+**Date Corrections Tab (GUI)**:
+- **Grid View**: Sortable table displaying all flagged files
+  - Columns: Checkbox, Filename, Source Location, Archive Location, Detected Date, EXIF Date, File Date, Flag Reason, Status
+  - Filter by flag reason (checkboxes for no_exif, year_1000, suspicious, user_specified)
+  - Multi-select for batch operations
+- **Preview Panel**: Shows image preview and detailed metadata for selected file
+- **Single File Correction**: Opens dialog to correct individual file date
+- **Batch Correction**: Two modes:
+  - Same date for all selected files
+  - Sequential dates (auto-increment by 1 day per file)
+- **EXIF Writing**: Optionally writes corrected date back to source file EXIF data
+- **Reorganization**: Two-phase process
+  - Phase 1: Mark files for reorganization (immediate)
+  - Phase 2: Batch reorganize all marked files (user-triggered)
+
+**Reorganization Process**:
+1. User corrects date(s) - files marked with `needs_reorganization=1`
+2. User clicks "Reorganize All Marked" button
+3. System processes each file:
+   - Calculates new archive path based on corrected date and organization template
+   - Copies file from old location to new location
+   - Verifies copy succeeded (file exists, size matches)
+   - Deletes old file
+   - Cleans up empty directories
+   - Updates `UniquePhotos` table with new path
+   - Sets `needs_reorganization=0`
+
+**Manage Unreliable Paths Dialog**:
+- Add/remove folder paths that should be auto-flagged
+- Stored in `DatabaseMetadata.user_specified_unreliable_paths` as JSON array
+- Applied to future processing runs
+
+**Safety Features**:
+- Copy-verify-delete pattern prevents data loss
+- Progress dialogs for all long-running operations
+- Cancellation support
+- Detailed error logging
+- Files with missing EXIF can still be reorganized (without EXIF write)
+
+**Dependencies**:
+- `piexif>=1.1.3`: EXIF metadata writing for JPEG and TIFF formats
+
 ### File Type Verification
 - Uses PIL/Pillow to verify file format matches extension
 - Automatically corrects mismatched extensions (e.g., `.png` file with `.jpg` extension)
@@ -311,9 +441,11 @@ Progress bars work alongside logging without interference. All progress informat
 
 - `PIL` (Pillow): Image processing and EXIF extraction
 - `pillow_heif`: HEIC/HEIF format support for Apple photos
+- `piexif`: EXIF metadata writing for date correction feature (NEW in v2.2)
 - `sqlite3`: Database for tracking unique file hashes
 - `hashlib`: SHA-256 hashing for duplicate detection
 - `tqdm`: Progress bars for long-running operations
+- `PySide6`: Qt-based GUI framework (GUI mode only)
 
 ## Known Issues & TODOs
 
@@ -334,3 +466,84 @@ From main.py comments:
 - Date formatting and folder structure logic
 - Dictionary parameter handling patterns
 - Logging configuration validation
+
+## Date Correction Workflow (NEW in v2.2)
+
+**Typical Usage Scenario:**
+
+1. **Initial Processing**:
+   - User processes photos normally through Setup tab
+   - System automatically flags files with unreliable dates during processing
+   - Flagged files are recorded in `UnreliableDates` table with flag reasons
+
+2. **Review Flagged Files**:
+   - User opens "Date Corrections" tab
+   - Grid displays all flagged files with details (source, archive location, detected date, flag reason)
+   - User can filter by flag reason: no_exif, year_1000, suspicious, user_specified
+   - Preview panel shows selected image and metadata
+
+3. **Correct Single File**:
+   - User clicks on file in grid
+   - Preview panel shows image
+   - User clicks "Correct Date..." button
+   - Dialog opens showing current detected date
+   - User enters correct date using year/month/day spinboxes
+   - User chooses options:
+     - Write EXIF to source file (recommended, checked by default)
+     - Mark for reorganization (checked by default)
+   - User clicks "Apply"
+   - System writes EXIF to source file (if enabled)
+   - Database updated with corrected date
+   - File marked for reorganization
+
+4. **Batch Correction**:
+   - User selects multiple files (e.g., all from same event or scanned album)
+   - User clicks "Batch Correct" button
+   - Dialog offers two correction modes:
+     - **Same date**: Assign same date to all selected files
+     - **Sequential dates**: Assign dates incrementing by 1 day per file (useful for vacation photos or chronological albums)
+   - User enters starting date
+   - User chooses EXIF writing and reorganization options
+   - User clicks "Apply"
+   - System processes all files with progress dialog
+   - All files marked for reorganization
+
+5. **Manage User-Specified Unreliable Paths**:
+   - User clicks "Manage Unreliable Paths..." button
+   - Dialog displays list of user-specified paths
+   - User adds path like `/old/scanned_photos/` or `D:\Legacy\Phone Backup\`
+   - Paths saved to database
+   - Future processing automatically flags files from these paths
+
+6. **Reorganization**:
+   - User clicks "Reorganize All Marked" button
+   - System shows count of files to be reorganized
+   - User confirms operation
+   - Progress dialog displays reorganization progress
+   - For each file:
+     - New folder path calculated using corrected date and organization template
+     - File copied from old archive location to new location
+     - Copy verified (file exists, size matches)
+     - Old file deleted
+     - Empty directories cleaned up
+     - Database updated with new archive path
+     - Reorganization flag cleared
+   - Completion message shows success/failure counts
+
+**Example: Correcting Scanned Family Photos**
+
+Scenario: User scanned old family photos. Scanner assigned current date (2024) instead of actual photo dates.
+
+1. User adds scanner output folder to "Unreliable Paths": `D:\Scanned\Family Photos\`
+2. User processes scanned photos through Setup tab
+3. All photos automatically flagged with reason: 'user_specified'
+4. User opens Date Corrections tab and sees all 150 scanned photos
+5. User groups photos by event:
+   - Selects 15 photos from "Summer Vacation 1995"
+   - Batch corrects with sequential dates starting 1995-07-01
+   - Selects 20 photos from "Christmas 1998"
+   - Batch corrects with same date: 1998-12-25
+6. After correcting all photos, user clicks "Reorganize All Marked"
+7. System moves all 150 photos from incorrect `2024/` folders to correct year folders
+8. Photos now organized correctly: `1995/07/01/`, `1998/12/25/`, etc.
+9. EXIF data in source files now has correct dates for future imports

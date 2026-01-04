@@ -340,20 +340,75 @@ def get_file_list(sources, recursive=False, file_endings=None, progress_callback
         logger.exception(f"\n list_files process Failed : { sys.exc_info()} - {e}")
 
 
-def get_creation_date(file_path):
+def _check_date_reliability(year, month, day, has_exif):
+    """
+    Check if a date is considered reliable.
+
+    Args:
+        year (str): Year as string
+        month (str): Month as zero-padded string
+        day (str): Day as zero-padded string
+        has_exif (bool): Whether EXIF data was found
+
+    Returns:
+        bool: True if date is reliable, False otherwise
+    """
+    try:
+        # Check for fallback year (1000)
+        if year == constants.INVALID_DATE_YEAR:
+            return False
+
+        # Check if no EXIF data
+        if not has_exif:
+            return False
+
+        # Convert to integer for comparison
+        year_int = int(year)
+
+        # Get current year
+        from datetime import datetime as dt
+        current_year = dt.now().year
+
+        # Check for suspicious dates
+        if year_int < 1990:  # Before consumer digital cameras
+            return False
+
+        if year_int > current_year + 1:  # Future date
+            return False
+
+        # Check for Unix epoch date (1970-01-01)
+        if year == "1970" and month == "01" and day == "01":
+            return False
+
+        # Date passed all checks
+        return True
+
+    except Exception as e:
+        logger.error(f"Error checking date reliability: {e}")
+        return False  # Assume unreliable on error
+
+
+def get_creation_date(file_path, database_path=None):
     """
     Get the creation date of a file and extract year, month, and day.
+    Also tracks the date source and reliability.
 
     Parameters:
     file_path (str): The full file name with path.
+    database_path (str, optional): Path to database for user-specified unreliable paths check.
 
     Returns:
-    tuple: A tuple containing the year, month, and day.
+    tuple: A tuple containing (year, month, day, date_source, is_reliable).
+           - year, month, day: Date components as zero-padded strings
+           - date_source: 'exif', 'os_metadata', or 'fallback'
+           - is_reliable: Boolean indicating if date is considered reliable
     """
     try:
         logger.info("Initializing get_creation_date")
         # init required variables
         im = None
+        date_source = 'os_metadata'  # Default to OS metadata
+        has_exif = False  # Track if EXIF data exists
         exts = Image.registered_extensions()
         supported_extensions = {ex for ex, f in exts.items() if f in Image.OPEN}
         # logger.info(f"The supported extensions = {supported_extensions}.")
@@ -416,6 +471,8 @@ def get_creation_date(file_path):
                                     logger.info(f"fileDate = {fileDate}")
                                     if fileDate != '' and len(fileDate) > 10 and fileDate != "0000:00:00 00:00:00":
                                         # we located a proper file date in the exif data, so use that instead of date from OS.
+                                        has_exif = True  # Mark that we found EXIF data
+                                        date_source = 'exif'  # Date came from EXIF
                                         logger.info("------------------  File Dates --------------------------")
                                         logger.info(f"Date from os {datetime.datetime.fromtimestamp(creation_time)}, date from EXIF {fileDate}")
                                         logger.info(f"Converted EXIF fileDate = {datetime.datetime.strptime(fileDate, '%Y:%m:%d %H:%M:%S')}")
@@ -479,8 +536,11 @@ def get_creation_date(file_path):
         month = f"{creation_date:%m}"
         day = f"{creation_date:%d}"
 
-        logger.debug(f"File {file_path} creation date: {year}-{month}-{day}")
-        return year, month, day
+        # Check reliability
+        is_reliable = _check_date_reliability(year, month, day, has_exif)
+
+        logger.debug(f"File {file_path} creation date: {year}-{month}-{day}, source: {date_source}, reliable: {is_reliable}")
+        return year, month, day, date_source, is_reliable
 
     except Exception as e:
         logger.exception(f"\n When processing file {file_path},  get_creation_date process Failed : {sys.exc_info()} == {e}")
@@ -489,7 +549,9 @@ def get_creation_date(file_path):
         year = constants.INVALID_DATE_YEAR
         month = constants.INVALID_DATE_MONTH
         day = constants.INVALID_DATE_DAY
-        return year, month, day
+        date_source = 'fallback'
+        is_reliable = False  # Fallback is always unreliable
+        return year, month, day, date_source, is_reliable
 
 def hash_file(filename):
     """
@@ -619,6 +681,8 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
         files_processed = 0
         files_skipped = 0
         files_since_last_commit = 0
+        unreliable_dates_count = 0  # Count files with suspicious/unreliable dates
+        unreliable_dates_to_insert = []  # Batch unreliable date records to avoid DB lock
 
         # Initialize photo filter if config provided
         photo_filter = None
@@ -824,9 +888,53 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                             logger.info(f"Unique file - saving to database: {filename}")
                             hashes.append(file_hash)
 
-                            # Get the create date
-                            file_year, file_month, file_day = get_creation_date(filename)
+                            # Get the create date with reliability info
+                            file_year, file_month, file_day, date_source, is_reliable = get_creation_date(filename, database_path)
                             file_create_date = f"{file_year}-{file_month}-{file_day}"
+
+                            # Check if date is unreliable and determine flag reason
+                            if not is_reliable:
+                                # Import database metadata for unreliable dates tracking
+                                from database_metadata import DatabaseMetadata
+
+                                # Determine flag reason
+                                flag_reason = None
+                                if file_year == constants.INVALID_DATE_YEAR:
+                                    flag_reason = 'year_1000'
+                                elif date_source != 'exif':
+                                    flag_reason = 'no_exif'
+                                else:
+                                    # Check for suspicious dates
+                                    from datetime import datetime as dt
+                                    year_int = int(file_year)
+                                    current_year = dt.now().year
+                                    if year_int < 1990 or year_int > current_year + 1 or (file_year == "1970" and file_month == "01" and file_day == "01"):
+                                        flag_reason = 'suspicious'
+
+                                # Also check for user-specified unreliable paths
+                                if database_path:
+                                    try:
+                                        db_meta = DatabaseMetadata(database_path)
+                                        user_paths = db_meta.get_user_specified_paths()
+                                        for user_path in user_paths:
+                                            if filename.startswith(user_path):
+                                                flag_reason = 'user_specified'
+                                                break
+                                    except Exception as e:
+                                        logger.warning(f"Could not check user-specified paths: {e}")
+
+                                # Collect unreliable date record for batch insertion
+                                if flag_reason and database_path:
+                                    unreliable_dates_to_insert.append({
+                                        'file_hash': file_hash,
+                                        'source_path': filename,
+                                        'archive_path': None,  # Will be updated when file is organized
+                                        'original_date': file_create_date,
+                                        'date_source': date_source,
+                                        'flag_reason': flag_reason
+                                    })
+                                    unreliable_dates_count += 1  # Increment counter
+                                    logger.info(f"Flagged file with unreliable date: {filename} (reason: {flag_reason})")
 
                             original_file = {
                                 "file_hash": file_hash,
@@ -883,6 +991,27 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                 logger.info(f"Files filtered (non-photos): {len(filtered_files)}")
                 photo_filter.print_statistics()
 
+        # Batch insert unreliable date records (after PhotoDatabase context closed to avoid lock)
+        if unreliable_dates_to_insert and database_path:
+            try:
+                logger.info(f"Batch inserting {len(unreliable_dates_to_insert)} unreliable date records...")
+                db_meta = DatabaseMetadata(database_path)
+                for record in unreliable_dates_to_insert:
+                    try:
+                        db_meta.insert_unreliable_date(
+                            file_hash=record['file_hash'],
+                            source_path=record['source_path'],
+                            archive_path=record['archive_path'],
+                            original_date=record['original_date'],
+                            date_source=record['date_source'],
+                            flag_reason=record['flag_reason']
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to insert unreliable date for {record['source_path']}: {e}")
+                logger.info(f"Successfully inserted {len(unreliable_dates_to_insert)} unreliable date records")
+            except Exception as e:
+                logger.error(f"Failed to batch insert unreliable dates: {e}")
+
         # Return results
         results = {}
         results["duplicate_files"] = duplicate_files
@@ -891,6 +1020,7 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
         results["status"] = "completed"
         results["files_processed"] = files_processed
         results["files_skipped"] = files_skipped
+        results["unreliable_dates_count"] = unreliable_dates_count
 
         # Add filter statistics if filtering was enabled
         if photo_filter and photo_filter.enabled:

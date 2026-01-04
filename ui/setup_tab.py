@@ -227,6 +227,12 @@ class SetupTab(QWidget):
         checkbox = QCheckBox()
         checkbox.setChecked(enabled)
         checkbox.stateChanged.connect(lambda state, p=path: self._on_checkbox_changed(p, state))
+
+        # Debug logging
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Creating checkbox for {path}: enabled={enabled}, isChecked={checkbox.isChecked()}")
+
         checkbox_widget = QWidget()
         checkbox_layout = QHBoxLayout(checkbox_widget)
         checkbox_layout.addWidget(checkbox)
@@ -408,10 +414,25 @@ class SetupTab(QWidget):
             checkbox_widget = self.source_table.cellWidget(row, 0)
             if checkbox_widget:
                 checkbox = checkbox_widget.findChild(QCheckBox)
-                if checkbox and checkbox.isChecked():
+                if checkbox:
+                    is_checked = checkbox.isChecked()
                     path_item = self.source_table.item(row, 2)
                     if path_item:
-                        enabled_folders.append(path_item.text())
+                        path = path_item.text()
+                        # Debug logging
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.info(f"Source folder: {path}, Enabled: {is_checked}")
+                        if is_checked:
+                            enabled_folders.append(path)
+                else:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Could not find checkbox for row {row}")
+
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Total enabled folders: {len(enabled_folders)} out of {self.source_table.rowCount()}")
         return enabled_folders
 
     def get_destination_folder(self):
