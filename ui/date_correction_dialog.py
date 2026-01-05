@@ -141,9 +141,9 @@ class DateCorrectionDialog(QDialog):
         options_group = QGroupBox("Options")
         options_layout = QVBoxLayout()
 
-        self.write_exif_checkbox = QCheckBox("Write EXIF to source file")
+        self.write_exif_checkbox = QCheckBox("Write EXIF to archive file")
         self.write_exif_checkbox.setChecked(True)
-        self.write_exif_checkbox.setToolTip("Write corrected date to image EXIF data")
+        self.write_exif_checkbox.setToolTip("Write corrected date to archive file EXIF data (source files are never modified)")
         options_layout.addWidget(self.write_exif_checkbox)
 
         self.mark_reorganize_checkbox = QCheckBox("Mark for reorganization")
@@ -303,7 +303,6 @@ class DateCorrectionDialog(QDialog):
 
         success_count = 0
         error_count = 0
-        exif_source_success = 0
         exif_archive_success = 0
         exif_failures = []
         db_failures = []
@@ -337,35 +336,11 @@ class DateCorrectionDialog(QDialog):
 
                 # Write EXIF if requested
                 if write_exif:
-                    logger.info("Writing EXIF data to files...")
+                    logger.info("Writing EXIF data to archive file...")
                     from exif_writer import write_exif_date
 
-                    # Write to source file if it exists
-                    source_exif_written = False
-                    if os.path.exists(record['source_path']):
-                        logger.info(f"  → Source file: {record['source_path']}")
-                        try:
-                            exif_success = write_exif_date(
-                                record['source_path'],
-                                year_str,
-                                month_str,
-                                day_str
-                            )
-
-                            if exif_success:
-                                logger.info(f"  ✓ EXIF written to source file successfully")
-                                exif_source_success += 1
-                                source_exif_written = True
-                            else:
-                                logger.error(f"  ✗ EXIF write FAILED for source file (no exception, returned False)")
-                                exif_failures.append(f"{filename} (source)")
-                        except Exception as e:
-                            logger.error(f"  ✗ EXIF write exception for source: {e}", exc_info=True)
-                            exif_failures.append(f"{filename} (source): {str(e)}")
-                    else:
-                        logger.warning(f"  ⚠ Source file not found: {record['source_path']}")
-
-                    # CRITICAL: Also write to archive file (this is what gets reorganized!)
+                    # IMPORTANT: We NEVER modify source files to prevent corruption
+                    # Only write EXIF to archive file (our managed copy)
                     archive_exif_written = False
                     if record.get('archive_path'):
                         if os.path.exists(record['archive_path']):
@@ -382,6 +357,28 @@ class DateCorrectionDialog(QDialog):
                                     logger.info(f"  ✓ EXIF written to archive file successfully")
                                     exif_archive_success += 1
                                     archive_exif_written = True
+
+                                    # Update hash history after EXIF modification
+                                    # This preserves duplicate detection capability
+                                    try:
+                                        from exif_writer import update_file_hash_after_modification
+                                        if record.get('file_hash'):
+                                            new_hash = update_file_hash_after_modification(
+                                                self.db_metadata.database_path,
+                                                record['file_hash'],
+                                                record['archive_path'],
+                                                reason='date_correction'
+                                            )
+                                            if new_hash and new_hash != record['file_hash']:
+                                                logger.info(f"  ✓ Hash history updated: {record['file_hash'][:16]}... → {new_hash[:16]}...")
+                                                # Update record with new hash for subsequent operations
+                                                record['file_hash'] = new_hash
+                                            elif new_hash:
+                                                logger.info(f"  ℹ Hash unchanged after EXIF write")
+                                            else:
+                                                logger.warning(f"  ⚠ Hash history update failed")
+                                    except Exception as hash_e:
+                                        logger.error(f"  ⚠ Failed to update hash history: {hash_e}", exc_info=True)
                                 else:
                                     logger.error(f"  ✗ EXIF write FAILED for archive file (no exception, returned False)")
                                     exif_failures.append(f"{filename} (archive)")
@@ -394,8 +391,8 @@ class DateCorrectionDialog(QDialog):
                         logger.warning(f"  ⚠ No archive_path in record for {filename}")
 
                     # Summary for this file
-                    if source_exif_written or archive_exif_written:
-                        logger.info(f"  Summary: EXIF updated - Source: {source_exif_written}, Archive: {archive_exif_written}")
+                    if archive_exif_written:
+                        logger.info(f"  Summary: EXIF updated in archive file")
                     else:
                         logger.warning(f"  Summary: NO EXIF data was written for this file!")
                 else:
@@ -431,7 +428,6 @@ class DateCorrectionDialog(QDialog):
         logger.info(f"Successful corrections: {success_count}")
         logger.info(f"Failed corrections: {error_count}")
         if write_exif:
-            logger.info(f"EXIF written to source files: {exif_source_success}/{len(self.records)}")
             logger.info(f"EXIF written to archive files: {exif_archive_success}/{len(self.records)}")
             if exif_failures:
                 logger.error(f"EXIF write failures ({len(exif_failures)}):")
@@ -453,7 +449,6 @@ class DateCorrectionDialog(QDialog):
             if write_exif:
                 details.append("")
                 details.append("EXIF Writing:")
-                details.append(f"  Source files: {exif_source_success}/{len(self.records)}")
                 details.append(f"  Archive files: {exif_archive_success}/{len(self.records)}")
                 if exif_failures:
                     details.append(f"  Failures: {len(exif_failures)}")

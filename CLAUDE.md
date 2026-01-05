@@ -10,6 +10,29 @@ PhotoOrganizer is a Python-based photo and video duplicate detection and organiz
 
 **Flow Diagram**: https://lucid.app/lucidchart/d52adf95-4275-4107-ad41-20c4cfd5c72c/edit?invitationId=inv_70bff327-b21c-4508-9ae6-03f07b9bdefe&page=4wTk8nA8b3At#
 
+## CRITICAL: Source File Protection
+
+**SOURCE FILES MUST NEVER BE MODIFIED UNDER ANY CIRCUMSTANCES.**
+
+This is a fundamental architectural principle of the application:
+
+1. **Read-Only Source Access**: All source directories are treated as read-only. Files are copied FROM sources, never written TO sources.
+
+2. **No EXIF Writing to Sources**: When correcting dates, EXIF data is written ONLY to archive files (our managed copies), never to source files.
+
+3. **Rationale**:
+   - Prevents accidental corruption of original photos
+   - Preserves original file integrity and metadata
+   - Source files may be on shared drives, backups, or read-only media
+   - Users trust their source files remain untouched
+
+4. **Implementation**:
+   - `date_correction_dialog.py`: Only writes EXIF to `archive_path`, never to `source_path`
+   - `main.py`: Uses copy operations, never modifies source files
+   - All file modifications (EXIF, reorganization) operate exclusively on archive copies
+
+**When implementing new features**: Always ask "Does this modify a source file?" If yes, redesign to only modify archive files.
+
 ## Running the Application
 
 ```bash
@@ -297,6 +320,66 @@ The `settings.json` file controls application behavior:
 }
 ```
 
+### Hash History System (NEW in v2.2.3)
+
+**Purpose**: Preserve duplicate detection capability after EXIF modifications. When date corrections are written to image EXIF data, the file bytes change, which changes the SHA-256 hash. Without hash history, the modified file would no longer be detected as a duplicate of the original.
+
+**Problem Solved:**
+1. User processes file → hash=AAA stored in database
+2. User corrects date → EXIF written → file hash changes to BBB
+3. Same original file processed again → hash=AAA
+4. **Without history**: AAA ≠ BBB → File copied again (duplicate!)
+5. **With history**: AAA found in FileHashHistory → Detected as duplicate ✓
+
+**Database Schema:**
+
+**FileHashHistory Table:**
+```sql
+CREATE TABLE FileHashHistory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    current_file_hash TEXT NOT NULL,   -- Current hash in UniquePhotos
+    historical_hash TEXT NOT NULL,      -- Hash at some point in file's history
+    created_date TEXT NOT NULL,         -- When this hash was recorded
+    reason TEXT NOT NULL,               -- 'original', 'migration', 'exif_edit', 'date_correction'
+    FOREIGN KEY (current_file_hash) REFERENCES UniquePhotos(file_hash)
+);
+
+-- Critical index for fast duplicate detection
+CREATE INDEX idx_historical_hash ON FileHashHistory(historical_hash);
+```
+
+**Data Flow Example:**
+```
+Step 1: Photo imported (vacation.jpg, hash=AAA)
+  UniquePhotos: file_hash=AAA
+  FileHashHistory: current_file_hash=AAA, historical_hash=AAA, reason='original'
+
+Step 2: Date correction applied, EXIF written (hash changes to BBB)
+  UniquePhotos: file_hash=BBB (updated)
+  FileHashHistory: [AAA entry preserved], new entry: current_file_hash=BBB, historical_hash=BBB, reason='date_correction'
+
+Result: Both AAA and BBB will match this photo during duplicate detection
+```
+
+**Key Methods (DuplicateFileDetection.py):**
+- `is_duplicate_hash_in_history(hash)`: Check if hash exists in any historical record
+- `get_all_historical_hashes()`: Load all historical hashes for batch checking
+- `add_hash_to_history(old_hash, new_hash, reason)`: Record new hash after modification; also updates `UniquePhotos.file_hash` and `UnreliableDates.file_hash`
+- `get_photo_by_historical_hash(hash)`: Find photo record by any historical hash
+
+**Key Methods (exif_writer.py):**
+- `update_file_hash_after_modification(db_path, old_hash, file_path, reason)`: Recalculate hash after EXIF write and update history
+
+**Integration Points:**
+- `date_correction_dialog.py`: Calls `update_file_hash_after_modification()` after successful EXIF write
+- `find_duplicates()`: Checks both current and historical hashes during duplicate detection
+
+**Migration:**
+Existing databases are automatically migrated when opened:
+- FileHashHistory table created if missing
+- Existing UniquePhotos records copied to history with reason='migration'
+- No manual action required
+
 ### Photo Filtering (Icon/Thumbnail Exclusion)
 
 **Purpose**: Automatically filter out non-photograph files (icons, web graphics, thumbnails) to prevent them from corrupting the photo archive.
@@ -463,7 +546,7 @@ Flagged files are automatically inserted into the `UnreliableDates` table during
 - **Batch Correction**: Two modes:
   - Same date for all selected files
   - Sequential dates (auto-increment by 1 day per file)
-- **EXIF Writing**: Optionally writes corrected date back to source file EXIF data
+- **EXIF Writing**: Optionally writes corrected date to archive file EXIF data (source files are never modified)
 - **Reorganization**: Two-phase process
   - Phase 1: Mark files for reorganization (immediate)
   - Phase 2: Batch reorganize all marked files (user-triggered)
@@ -538,12 +621,11 @@ The date correction system features comprehensive logging with visual indicators
 2026-01-04 10:23:15 INFO Files to process: 15
 2026-01-04 10:23:15 INFO ----------------------------------------------------------------
 2026-01-04 10:23:15 INFO Processing file 1/15: vacation_001.jpg
-2026-01-04 10:23:15 INFO   → Source file: /source/vacation_001.jpg
-2026-01-04 10:23:15 INFO   ✓ EXIF written to source file successfully
 2026-01-04 10:23:15 INFO   → Archive file: /archive/2024/01/01/vacation_001.jpg
 2026-01-04 10:23:15 INFO   ✓ EXIF written to archive file successfully
+2026-01-04 10:23:15 INFO   ✓ Hash history updated: abc123... → def456...
 2026-01-04 10:23:15 INFO   ✓ Database updated successfully
-2026-01-04 10:23:15 INFO ✓✓✓ FILE CORRECTION COMPLETED SUCCESSFULLY ✓✓✓
+2026-01-04 10:23:15 INFO ✓ File 1 completed successfully
 ```
 
 **Audit Trail System (v2.2.1)**:
@@ -592,34 +674,30 @@ Files progress through three states:
    ```
 7. User can verify file was moved from correct original location
 
-**EXIF Dual-Write Pattern (v2.2.1)**:
+**EXIF Write Policy (v2.2.3)**:
 
 **Critical Implementation Detail:**
-EXIF data must be written to BOTH source and archive files to ensure data persistence during reorganization.
+EXIF data is written ONLY to archive files. Source files are NEVER modified.
 
-**Why Both Files?**
-- **Source file**: User's original file, may be re-imported in the future
-- **Archive file**: This is what gets copied during reorganization
-- If EXIF only written to source, reorganized file will have OLD date in EXIF
-- Result: File in correct folder (1995/07/15/) but EXIF shows wrong date (2024/01/01)
+**Why Archive Files Only?**
+- **Source file protection**: Source files must never be modified to prevent corruption
+- **Archive file**: This is our managed copy - safe to modify for date corrections
+- The archive file is what gets reorganized during folder restructuring
+- Source files remain pristine for future reference or re-import
 
 **Implementation (date_correction_dialog.py):**
 ```python
-# Write to source file if it exists
-if os.path.exists(record['source_path']):
-    write_exif_date(record['source_path'], year_str, month_str, day_str)
-    logger.info("✓ EXIF written to source file successfully")
-
-# CRITICAL: Also write to archive file (this is what gets reorganized!)
+# IMPORTANT: We NEVER modify source files to prevent corruption
+# Only write EXIF to archive file (our managed copy)
 if record.get('archive_path') and os.path.exists(record['archive_path']):
     write_exif_date(record['archive_path'], year_str, month_str, day_str)
     logger.info("✓ EXIF written to archive file successfully")
 ```
 
 **Error Tracking:**
-- Separate failure lists for source and archive EXIF writes
+- Failure list for archive EXIF writes
 - Detailed error messages show which file failed
-- Summary reports show success counts for both targets
+- Summary reports show success counts
 
 **Zoom Functionality in Preview Panel (v2.2.1)**:
 
@@ -1024,10 +1102,10 @@ From main.py comments:
    - Dialog opens showing current detected date
    - User enters correct date using year/month/day spinboxes
    - User chooses options:
-     - Write EXIF to source file (recommended, checked by default)
+     - Write EXIF to archive file (recommended, checked by default)
      - Mark for reorganization (checked by default)
    - User clicks "Apply"
-   - System writes EXIF to source file (if enabled)
+   - System writes EXIF to archive file (if enabled) - source files are never modified
    - Database updated with corrected date
    - File marked for reorganization
 
@@ -1081,4 +1159,4 @@ Scenario: User scanned old family photos. Scanner assigned current date (2024) i
 6. After correcting all photos, user clicks "Reorganize All Marked"
 7. System moves all 150 photos from incorrect `2024/` folders to correct year folders
 8. Photos now organized correctly: `1995/07/01/`, `1998/12/25/`, etc.
-9. EXIF data in source files now has correct dates for future imports
+9. EXIF data in archive files now has correct dates (source files remain untouched)

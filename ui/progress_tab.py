@@ -149,40 +149,48 @@ class ProgressTab(QWidget):
             current_file = "..." + current_file[-57:]
         self.current_file_label.setText(f"Processing: {current_file}")
 
-        # Calculate processing rate and time estimates
+        # Always update elapsed time
+        elapsed_seconds = current_time - self.start_time
+        elapsed_str = self._format_time(elapsed_seconds)
+        self.elapsed_label.setText(f"Elapsed: {elapsed_str}")
+
+        # Calculate processing rate and time estimates (throttled to avoid UI lag)
         time_delta = current_time - self.last_update_time
         files_delta = processed - self.processed_count
 
-        if time_delta > 0.5:  # Update every 0.5 seconds
+        if time_delta >= 0.5 and files_delta > 0:
+            # Calculate instant rate based on files processed in this interval
             instant_rate = files_delta / time_delta
 
-            # Update EMA
+            # Update EMA (exponential moving average for smoother rate)
             if self.processing_rate_ema is None:
                 self.processing_rate_ema = instant_rate
             else:
                 self.processing_rate_ema = (self.ema_alpha * instant_rate +
                                            (1 - self.ema_alpha) * self.processing_rate_ema)
 
-            # Calculate time remaining
-            files_remaining = total - processed
-            if self.processing_rate_ema and self.processing_rate_ema > 0:
-                seconds_remaining = files_remaining / self.processing_rate_ema
-                time_remaining_str = self._format_time(seconds_remaining)
-            else:
-                time_remaining_str = "Calculating..."
-
-            # Calculate elapsed time
-            elapsed_seconds = current_time - self.start_time
-            elapsed_str = self._format_time(elapsed_seconds)
-
-            # Update UI
-            self.elapsed_label.setText(f"Elapsed: {elapsed_str}")
-            self.remaining_label.setText(f"Remaining: {time_remaining_str}")
-            self.rate_label.setText(f"Rate: {self.processing_rate_ema:.2f} files/sec")
-
-            # Update state
+            # Update state for next calculation
             self.last_update_time = current_time
             self.processed_count = processed
+
+        # Calculate time remaining using current rate
+        files_remaining = total - processed
+        if self.processing_rate_ema and self.processing_rate_ema > 0.01:
+            seconds_remaining = files_remaining / self.processing_rate_ema
+            time_remaining_str = self._format_time(seconds_remaining)
+            self.remaining_label.setText(f"Remaining: {time_remaining_str}")
+            self.rate_label.setText(f"Rate: {self.processing_rate_ema:.2f} files/sec")
+        elif elapsed_seconds > 2 and processed > 0:
+            # Fallback: calculate rate from total elapsed time
+            overall_rate = processed / elapsed_seconds
+            if overall_rate > 0.01:
+                seconds_remaining = files_remaining / overall_rate
+                time_remaining_str = self._format_time(seconds_remaining)
+                self.remaining_label.setText(f"Remaining: {time_remaining_str}")
+                self.rate_label.setText(f"Rate: {overall_rate:.2f} files/sec")
+                # Bootstrap the EMA with overall rate
+                if self.processing_rate_ema is None:
+                    self.processing_rate_ema = overall_rate
 
         # Update stats
         unique = stats.get('unique', 0)
@@ -193,6 +201,16 @@ class ProgressTab(QWidget):
 
     def update_organizing_progress(self, organized, total, current_file, bytes_copied, total_bytes):
         """Update organizing progress."""
+        current_time = time.time()
+
+        # Initialize on first update of organizing phase
+        if self.start_time is None:
+            self.start_time = current_time
+            self.last_update_time = current_time
+            self.processed_count = organized
+            self.total_count = total
+            self.processing_rate_ema = None
+
         if total > 0:
             progress = int(100 * organized / total)
             self.stage_progress.setValue(progress)
@@ -205,6 +223,38 @@ class ProgressTab(QWidget):
         if len(current_file) > 60:
             current_file = "..." + current_file[-57:]
         self.current_file_label.setText(f"Organizing: {current_file}")
+
+        # Always update elapsed time
+        elapsed_seconds = current_time - self.start_time
+        elapsed_str = self._format_time(elapsed_seconds)
+        self.elapsed_label.setText(f"Elapsed: {elapsed_str}")
+
+        # Calculate rate and remaining time
+        time_delta = current_time - self.last_update_time
+        files_delta = organized - self.processed_count
+
+        if time_delta >= 0.5 and files_delta > 0:
+            instant_rate = files_delta / time_delta
+            if self.processing_rate_ema is None:
+                self.processing_rate_ema = instant_rate
+            else:
+                self.processing_rate_ema = (self.ema_alpha * instant_rate +
+                                           (1 - self.ema_alpha) * self.processing_rate_ema)
+            self.last_update_time = current_time
+            self.processed_count = organized
+
+        # Update remaining time
+        files_remaining = total - organized
+        if self.processing_rate_ema and self.processing_rate_ema > 0.01:
+            seconds_remaining = files_remaining / self.processing_rate_ema
+            self.remaining_label.setText(f"Remaining: {self._format_time(seconds_remaining)}")
+            self.rate_label.setText(f"Rate: {self.processing_rate_ema:.2f} files/sec")
+        elif elapsed_seconds > 2 and organized > 0:
+            overall_rate = organized / elapsed_seconds
+            if overall_rate > 0.01:
+                seconds_remaining = files_remaining / overall_rate
+                self.remaining_label.setText(f"Remaining: {self._format_time(seconds_remaining)}")
+                self.rate_label.setText(f"Rate: {overall_rate:.2f} files/sec")
 
         # Format bytes
         bytes_str = self._format_bytes(bytes_copied)

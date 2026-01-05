@@ -406,10 +406,6 @@ class DateCorrectionsTab(QWidget):
         self.manage_paths_btn.clicked.connect(self.on_manage_paths)
         button_layout.addWidget(self.manage_paths_btn)
 
-        self.refresh_btn = QPushButton("Refresh")
-        self.refresh_btn.clicked.connect(self.refresh_data)
-        button_layout.addWidget(self.refresh_btn)
-
         self.reorganize_btn = QPushButton("Reorganize All Marked")
         self.reorganize_btn.clicked.connect(self.on_reorganize_all)
         button_layout.addWidget(self.reorganize_btn)
@@ -428,6 +424,18 @@ class DateCorrectionsTab(QWidget):
         """
         self.db_metadata = db_metadata
         self.refresh_data()
+
+    def showEvent(self, event):
+        """
+        Handle tab becoming visible - auto-refresh data.
+
+        This ensures the grid is always up-to-date when the user
+        switches to this tab, eliminating the need for a manual refresh button.
+        """
+        super().showEvent(event)
+        # Only refresh if we have a database connection
+        if self.db_metadata:
+            self.refresh_data()
 
     def refresh_data(self):
         """Reload data from database and refresh table."""

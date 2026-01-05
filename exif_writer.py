@@ -110,6 +110,8 @@ def read_exif_date(file_path):
     """
     Read EXIF DateTimeOriginal from file.
 
+    Supports JPEG, TIFF, and other formats with EXIF data.
+
     Args:
         file_path: Path to image file
 
@@ -122,39 +124,60 @@ def read_exif_date(file_path):
             logger.error(f"File does not exist: {file_path}")
             return None, None, None
 
-        # Open image
-        img = Image.open(file_path)
+        datetime_str = None
 
-        # Try to get EXIF data
-        exif_data = img._getexif()
+        # Method 1: Try using piexif (works for JPEG and TIFF)
+        try:
+            exif_dict = piexif.load(file_path)
+            if 'Exif' in exif_dict and piexif.ExifIFD.DateTimeOriginal in exif_dict['Exif']:
+                datetime_bytes = exif_dict['Exif'][piexif.ExifIFD.DateTimeOriginal]
+                if isinstance(datetime_bytes, bytes):
+                    datetime_str = datetime_bytes.decode('utf-8')
+                else:
+                    datetime_str = str(datetime_bytes)
+        except Exception as e:
+            logger.debug(f"piexif failed for {file_path}: {e}")
 
-        if exif_data is None:
-            logger.debug(f"No EXIF data found in {file_path}")
+        # Method 2: Fall back to PIL's getexif() (works for many formats)
+        if datetime_str is None:
+            try:
+                img = Image.open(file_path)
+                # Use getexif() which is more universal than _getexif()
+                exif_data = img.getexif()
+                if exif_data:
+                    # DateTimeOriginal tag ID is 36867
+                    datetime_str = exif_data.get(36867)
+                    if datetime_str is None:
+                        # Try DateTime tag (306) as fallback
+                        datetime_str = exif_data.get(306)
+                img.close()
+            except Exception as e:
+                logger.debug(f"PIL getexif() failed for {file_path}: {e}")
+
+        # Method 3: For JPEG, try _getexif() as last resort
+        if datetime_str is None:
+            try:
+                img = Image.open(file_path)
+                if hasattr(img, '_getexif') and callable(img._getexif):
+                    exif_data = img._getexif()
+                    if exif_data:
+                        datetime_str = exif_data.get(36867)  # DateTimeOriginal
+                img.close()
+            except Exception as e:
+                logger.debug(f"PIL _getexif() failed for {file_path}: {e}")
+
+        if datetime_str is None:
+            logger.debug(f"No EXIF date found in {file_path}")
             return None, None, None
 
-        # EXIF tag for DateTimeOriginal
-        from PIL.ExifTags import TAGS
-
-        # Build reverse tag dictionary
-        tags_reverse = {v: k for k, v in TAGS.items()}
-
-        # Get DateTimeOriginal tag
-        datetime_original_tag = tags_reverse.get('DateTimeOriginal')
-
-        if datetime_original_tag and datetime_original_tag in exif_data:
-            datetime_str = exif_data[datetime_original_tag]
-
-            # Parse EXIF datetime format: "YYYY:MM:DD HH:MM:SS"
-            try:
-                date_part = datetime_str.split(' ')[0]  # Get just the date part
-                year, month, day = date_part.split(':')
-                return year, month, day
-            except Exception as e:
-                logger.error(f"Failed to parse EXIF date '{datetime_str}': {e}")
-                return None, None, None
-
-        logger.debug(f"No DateTimeOriginal in EXIF for {file_path}")
-        return None, None, None
+        # Parse EXIF datetime format: "YYYY:MM:DD HH:MM:SS"
+        try:
+            date_part = datetime_str.split(' ')[0]  # Get just the date part
+            year, month, day = date_part.split(':')
+            return year, month, day
+        except Exception as e:
+            logger.error(f"Failed to parse EXIF date '{datetime_str}': {e}")
+            return None, None, None
 
     except Exception as e:
         logger.error(f"Failed to read EXIF from {file_path}: {str(e)}")
@@ -195,3 +218,85 @@ def verify_exif_write(file_path, expected_year, expected_month, expected_day):
     except Exception as e:
         logger.error(f"EXIF verification error for {file_path}: {e}")
         return False
+
+
+def update_file_hash_after_modification(database_path, old_hash, file_path, reason='exif_edit'):
+    """
+    Recalculate file hash after modification (e.g., EXIF write) and update database.
+
+    This function:
+    1. Calculates the new hash of the modified file
+    2. Adds the new hash to FileHashHistory
+    3. Updates UniquePhotos.file_hash to the new value
+    4. Updates related tables (UnreliableDates)
+
+    The old hash is preserved in FileHashHistory for duplicate detection.
+    A file processed before EXIF modification will still be detected as a duplicate
+    after modification because we check all historical hashes.
+
+    Args:
+        database_path: Path to the database file
+        old_hash: The current file_hash in UniquePhotos (before modification)
+        file_path: Path to the modified file (to recalculate hash)
+        reason: Reason for the modification ('exif_edit', 'date_correction', etc.)
+
+    Returns:
+        str or None: The new hash if successful, None if failed
+    """
+    try:
+        # Import here to avoid circular imports
+        from DuplicateFileDetection import hash_file, PhotoDatabase
+
+        # Verify file exists
+        if not os.path.exists(file_path):
+            logger.error(f"Cannot update hash - file does not exist: {file_path}")
+            return None
+
+        # Calculate new hash
+        new_hash = hash_file(file_path)
+
+        if new_hash == old_hash:
+            logger.info(f"Hash unchanged after modification: {file_path}")
+            return old_hash
+
+        # Update database
+        with PhotoDatabase(database_path) as db:
+            success = db.add_hash_to_history(old_hash, new_hash, reason)
+
+            if success:
+                logger.info(f"✓ Hash history updated: {old_hash[:16]}... -> {new_hash[:16]}... (reason: {reason})")
+                return new_hash
+            else:
+                logger.error(f"✗ Failed to update hash history for {file_path}")
+                return None
+
+    except Exception as e:
+        logger.error(f"Failed to update file hash after modification: {e}")
+        return None
+
+
+def get_current_hash_for_file(database_path, file_path):
+    """
+    Look up the current hash for a file in the database by its path.
+
+    Args:
+        database_path: Path to the database file
+        file_path: Path to the file (as stored in file_name column)
+
+    Returns:
+        str or None: The current file_hash if found, None otherwise
+    """
+    try:
+        from DuplicateFileDetection import PhotoDatabase
+
+        with PhotoDatabase(database_path) as db:
+            db.cursor.execute(
+                "SELECT file_hash FROM UniquePhotos WHERE file_name = ? LIMIT 1",
+                (file_path,)
+            )
+            result = db.cursor.fetchone()
+            return result[0] if result else None
+
+    except Exception as e:
+        logger.error(f"Failed to get hash for file {file_path}: {e}")
+        return None
