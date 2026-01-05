@@ -159,7 +159,14 @@ class MainWindow(QMainWindow):
 
             config['source_directory'] = source_folders
             config['destination_directory'] = destination_folder
+
+            logger.info(f"=" * 80)
+            logger.info(f"MAIN_WINDOW: Setting config database_path")
+            logger.info(f"  self.current_database_path = '{self.current_database_path}'")
             config['database_path'] = self.current_database_path
+            logger.info(f"  config['database_path'] = '{config['database_path']}'")
+            logger.info(f"=" * 80)
+
             config['copy_files'] = self.setup_tab.is_copy_mode()
             config['move_files'] = self.setup_tab.is_move_mode()
 

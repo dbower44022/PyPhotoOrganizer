@@ -288,7 +288,7 @@ class DatabaseMetadata:
                 cursor.execute("""
                     SELECT database_name, description, archive_location, video_archive_location,
                            separate_video_archive, created_date, last_used_date, schema_version, total_photos,
-                           organization_template, file_type_organization
+                           organization_template, file_type_organization, enable_file_rename, filename_template
                     FROM DatabaseMetadata WHERE id = 1
                 """)
 
@@ -305,7 +305,9 @@ class DatabaseMetadata:
                         'schema_version': row[7],
                         'total_photos': row[8],
                         'organization_template': row[9] if len(row) > 9 else '{YYYY}/{MM}/{DD}',
-                        'file_type_organization': row[10] if len(row) > 10 else 'combined'
+                        'file_type_organization': row[10] if len(row) > 10 else 'combined',
+                        'enable_file_rename': row[11] if len(row) > 11 else 0,
+                        'filename_template': row[12] if len(row) > 12 else '{original_name}'
                     }
                 return None
 
@@ -1200,7 +1202,7 @@ class DatabaseMetadata:
             Filename template string (default: '{original_name}')
         """
         try:
-            logger.debug(f"→ get_filename_template() called for database: {self.database_path}")
+            logger.info(f"→ DATABASE_METADATA.get_filename_template() called for database: {self.database_path}")
             metadata = self.get_metadata()
 
             if metadata is None:
@@ -1293,7 +1295,7 @@ class DatabaseMetadata:
             True if file renaming is enabled, False otherwise
         """
         try:
-            logger.debug(f"→ is_file_rename_enabled() called for database: {self.database_path}")
+            logger.info(f"→ DATABASE_METADATA.is_file_rename_enabled() called for database: {self.database_path}")
             metadata = self.get_metadata()
 
             if metadata is None:
@@ -1303,7 +1305,7 @@ class DatabaseMetadata:
 
             enable_value = metadata.get('enable_file_rename', 0)
             result = bool(enable_value)
-            logger.info(f"✓ File rename enabled: {result} (database value: {enable_value})")
+            logger.info(f"✓ File rename is {'ENABLED' if result else 'DISABLED'} (database value: {enable_value})")
             return result
 
         except Exception as e:
