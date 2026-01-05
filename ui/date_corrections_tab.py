@@ -375,6 +375,12 @@ class DateCorrectionsTab(QWidget):
         self.detail_status = QLabel("Status: -")
         details_layout.addWidget(self.detail_status)
 
+        self.detail_hash = QLabel("Hash: -")
+        self.detail_hash.setWordWrap(True)
+        self.detail_hash.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.detail_hash.setStyleSheet("font-family: monospace; font-size: 9pt;")
+        details_layout.addWidget(self.detail_hash)
+
         details_group.setLayout(details_layout)
         preview_layout.addWidget(details_group)
 
@@ -584,9 +590,30 @@ class DateCorrectionsTab(QWidget):
         return "..." + path[-(max_length-3):]
 
     def _get_exif_date_for_display(self, record):
-        """Get EXIF date for display in table."""
+        """Get EXIF date for display by reading from file."""
+        # First check if file has been corrected - read from archive if available
+        file_path = record.get('archive_path') or record.get('source_path')
+
+        if not file_path or not os.path.exists(file_path):
+            # Fallback to source path
+            file_path = record.get('source_path')
+            if not file_path or not os.path.exists(file_path):
+                return "None"
+
+        # Try to read EXIF date from the actual file
+        try:
+            from exif_writer import read_exif_date
+            year, month, day = read_exif_date(file_path)
+            if year and month and day:
+                return f"{year}-{month}-{day}"
+        except Exception as e:
+            logger.debug(f"Could not read EXIF from {file_path}: {e}")
+            pass
+
+        # Fallback to database record if EXIF read fails
         if record['date_source'] == 'exif' and record['original_date']:
             return record['original_date']
+
         return "None"
 
     def _get_file_date_for_display(self, record):
@@ -615,6 +642,7 @@ class DateCorrectionsTab(QWidget):
             self.detail_file_date.setText("File Date: -")
             self.detail_reason.setText("Reason: -")
             self.detail_status.setText("Status: -")
+            self.detail_hash.setText("Hash: -")
             self.correct_date_btn.setEnabled(False)
             return
 
@@ -649,6 +677,10 @@ class DateCorrectionsTab(QWidget):
         else:
             status_text = "Pending correction"
         self.detail_status.setText(f"Status: {status_text}")
+
+        # Display file hash (selectable for copying)
+        file_hash = record.get('file_hash', 'N/A')
+        self.detail_hash.setText(f"Hash: {file_hash}")
 
         self.correct_date_btn.setEnabled(True)
 

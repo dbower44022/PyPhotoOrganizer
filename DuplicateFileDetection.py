@@ -423,9 +423,9 @@ def get_creation_date(file_path, database_path=None):
             except Exception as e:
                 logger.exception(f"The getctime function failure {e} occurred for file {file_path}")
 
-            mod_time = os.path.getmtime(file_path)  # usually the modification date is a better indicator of the actual creation date.
+            mod_time = os.path.getmtime(file_path)
+            # Use creation_time as initial value (will be overridden by EXIF if available)
             creation_date = datetime.datetime.fromtimestamp(creation_time)
-            creation_date = datetime.datetime.fromtimestamp(mod_time)
             extension = os.path.splitext(file_path)[1]
             logger.info(f"-- create_time = {creation_time}, creation_date = {creation_date}, extension = {extension}")
             # Now try to get a more accurate date from EXIF data.
@@ -465,9 +465,11 @@ def get_creation_date(file_path, database_path=None):
                             # logger.info(_TAGS_r["DateTimeCreated"])
                             logger.info(f"________________________________________________________ ")
                             if exif_data_PIL is not None:
-                                if exif_data_PIL[_TAGS_r["DateTimeOriginal"]]:
+                                # Safely check if DateTimeOriginal exists in EXIF
+                                datetime_original_tag = _TAGS_r.get("DateTimeOriginal")
+                                if datetime_original_tag and datetime_original_tag in exif_data_PIL:
                                     # if a value for DateTimeOriginal is included in EXIF data, then use that as the fileDate.
-                                    fileDate = exif_data_PIL[_TAGS_r["DateTimeOriginal"]]
+                                    fileDate = exif_data_PIL[datetime_original_tag]
                                     logger.info(f"fileDate = {fileDate}")
                                     if fileDate != '' and len(fileDate) > 10 and fileDate != "0000:00:00 00:00:00":
                                         # we located a proper file date in the exif data, so use that instead of date from OS.
