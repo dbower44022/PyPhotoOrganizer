@@ -87,7 +87,17 @@ class Config:
         if settings_dict is not None:
             # Start with defaults, then overlay provided settings
             self._settings = self.DEFAULTS.copy()
+
+            # Log database_path before and after update
+            self.logger.info(f"=" * 80)
+            self.logger.info(f"CONFIG: Creating from settings_dict")
+            self.logger.info(f"  DEFAULTS database_path: '{self.DEFAULTS['database_path']}'")
+            self.logger.info(f"  settings_dict database_path: '{settings_dict.get('database_path', 'NOT SET')}'")
+
             self._settings.update(settings_dict)
+
+            self.logger.info(f"  FINAL _settings database_path: '{self._settings['database_path']}'")
+            self.logger.info(f"=" * 80)
             self.logger.info("Configuration loaded from dictionary")
         else:
             self.load()
@@ -324,7 +334,9 @@ class Config:
     @property
     def database_path(self) -> str:
         """Get database file path."""
-        return self._settings['database_path']
+        db_path = self._settings['database_path']
+        self.logger.info(f"CONFIG.database_path property accessed → returning: '{db_path}'")
+        return db_path
 
     @property
     def batch_size(self) -> int:

@@ -808,6 +808,17 @@ class SettingsTab(QWidget):
         Args:
             db_metadata: DatabaseMetadata instance
         """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        logger.info(f"=" * 80)
+        logger.info(f"SETTINGS TAB: set_database() called")
+        if db_metadata:
+            logger.info(f"  Database path: '{db_metadata.database_path}'")
+        else:
+            logger.info(f"  db_metadata is None!")
+        logger.info(f"=" * 80)
+
         self.db_metadata = db_metadata
 
         if db_metadata is None:
@@ -1092,8 +1103,13 @@ class SettingsTab(QWidget):
         logger = logging.getLogger(__name__)
 
         try:
-            enabled = (state == Qt.Checked)
-            logger.info(f"→ on_rename_enabled_changed({enabled}) - checkbox state changed")
+            logger.info(f"→ on_rename_enabled_changed called - RAW state value: {state} (type: {type(state)})")
+            logger.info(f"  Qt.Checked = {Qt.Checked}, Qt.Unchecked = {Qt.Unchecked}")
+
+            # Use isChecked() instead of comparing state - more reliable
+            enabled = self.enable_rename_check.isChecked()
+            logger.info(f"  Checkbox.isChecked() = {enabled}")
+            logger.info(f"  State comparison (state == Qt.Checked) = {state == Qt.Checked}")
 
             if not self.db_metadata:
                 logger.error("✗ db_metadata is None - cannot save rename enabled state!")

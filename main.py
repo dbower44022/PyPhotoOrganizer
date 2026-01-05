@@ -175,6 +175,9 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
         move_files = config.move_files
 
         # Initialize database metadata for filename template support
+        logger.info(f"=" * 80)
+        logger.info(f"MAIN.PY: Creating DatabaseMetadata with database_path: '{database_path}'")
+        logger.info(f"=" * 80)
         db_metadata = DatabaseMetadata(database_path)
 
         try:

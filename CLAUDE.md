@@ -98,6 +98,13 @@ python TestRoutines.py
     - `update_corrected_date()`: Update when user corrects a file's date
     - `get_files_needing_reorganization()`: Get files marked for reorganization
     - `mark_reorganized()`: Clear reorganization flag after completion
+  - **File Rename Management** (NEW in v2.2.2):
+    - `is_file_rename_enabled()`: Check if filename template is enabled
+    - `set_file_rename_enabled(enabled)`: Enable/disable file renaming
+    - `get_filename_template()`: Get the filename template pattern
+    - `set_filename_template(template)`: Save filename template with validation
+    - `insert_rename_history()`: Track original → renamed mappings for undo capability
+    - **IMPORTANT**: `get_metadata()` must SELECT `enable_file_rename` and `filename_template` columns
     - `update_photo_path()`: Update file paths after reorganization
     - `get_user_specified_paths()` / `set_user_specified_paths()`: Manage user-specified unreliable paths
   - `find_databases(path)`: Search for all PyPhotoOrganizer databases in directory
@@ -250,8 +257,15 @@ The `settings.json` file controls application behavior:
 
 ### Date Extraction Priority
 1. First attempts to read EXIF `DateTimeOriginal` from image metadata (most accurate)
-2. Falls back to Windows `getctime()` or `getmtime()` if EXIF unavailable
+2. Falls back to OS file metadata if EXIF unavailable:
+   - Windows: `getctime()` (creation time) or `getmtime()` (modification time)
+   - Linux/macOS: `st_birthtime` (creation time) or `st_mtime` (modification time)
 3. Returns dates as formatted strings: `(year, month, day)` where month/day are zero-padded
+
+**Important Implementation Notes (Fixed in v2.2.3):**
+- EXIF extraction is **platform-independent** - works on Windows, Linux, and macOS
+- Extension comparison is **case-insensitive** - handles `.JPG`, `.jpg`, `.Jpg`, etc.
+- **Critical Fix (2026-01-05)**: Previously EXIF was only extracted on Windows, causing all Linux/macOS files to be flagged as unreliable. This has been corrected in `DuplicateFileDetection.py:419-536`
 
 ### Hash-Based Deduplication with Two-Stage Optimization
 
@@ -324,6 +338,93 @@ The `settings.json` file controls application behavior:
 - `filter_statistics`: Detailed breakdown of filtering (by size, dimensions, pattern, etc.)
 
 **Disable filtering**: Set `"photo_filter_enabled": false` in settings.json
+
+### File Renaming System (NEW in v2.2.2)
+
+**Purpose**: Allow users to customize filenames during processing using template-based patterns with date/time, original filename, folder names, and sequential counters.
+
+**filename_template.py** - Template parsing and filename generation
+- `FilenameTemplate` class: Handles template parsing and validation
+  - `parse(template, file_date, original_filename, counter)`: Generate filename from template
+  - `validate(template)`: Security checks (path traversal prevention, dangerous characters)
+  - `get_example_output(template)`: Generate preview for user feedback
+
+**Template Variables**:
+- **Date/Time**: `{year}`, `{month}`, `{day}`, `{hour}`, `{minute}`, `{second}`
+- **Original Filename**: `{original_name}`, `{original_name_no_ext}`, `{ext}`
+- **Folder Names**: `{folder_name}` (immediate parent), `{parent_folder_name}` (parent's parent)
+- **Sequential Counter**: `{counter}` or `{counter:04d}` (zero-padded format specifier)
+
+**Example Templates**:
+```python
+# Date-based naming
+"{year}{month}{day}_{hour}{minute}{second}"
+# Original: IMG_1234.jpg → Result: 20260104_143015.jpg
+
+# Preserve original with date prefix
+"{year}-{month}-{day}_{original_name}"
+# Original: vacation_beach.jpg → Result: 2026-01-04_vacation_beach.jpg
+
+# Sequential numbering with padding
+"photo_{counter:04d}"
+# Original: IMG_001.jpg → Result: photo_0001.jpg
+
+# Folder-based naming
+"{folder_name}_{original_name_no_ext}"
+# Path: /photos/2024_vacation/IMG_1234.jpg → Result: 2024_vacation_IMG_1234.jpg
+```
+
+**Integration Points**:
+1. **Settings Tab** (`ui/settings_tab.py`):
+   - Checkbox to enable/disable feature
+   - Template input with live preview
+   - Validation feedback
+   - Saves to database via `DatabaseMetadata.set_filename_template()`
+
+2. **Main Processing** (`main.py` line 310-330):
+   - Checks `db_metadata.is_file_rename_enabled()`
+   - Gets template via `db_metadata.get_filename_template()`
+   - Parses template with `FilenameTemplate.parse()`
+   - Records rename in `FileRenameHistory` table
+
+3. **Collision Handling** (`utils.py` line ~400):
+   - `get_unique_filename()` automatically adds `_1`, `_2`, `_3` suffix if file exists
+   - No user intervention required
+
+**Database Schema**:
+```sql
+-- DatabaseMetadata table (columns added):
+enable_file_rename INTEGER DEFAULT 0
+filename_template TEXT DEFAULT '{original_name}'
+
+-- FileRenameHistory table (NEW):
+CREATE TABLE FileRenameHistory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash TEXT NOT NULL,
+    original_filename TEXT NOT NULL,
+    renamed_filename TEXT NOT NULL,
+    rename_timestamp TEXT NOT NULL,
+    FOREIGN KEY (file_hash) REFERENCES UniquePhotos(file_hash)
+);
+```
+
+**Security Features**:
+- Path traversal prevention (blocks `..`, `/`, `\`)
+- Dangerous character blocking (`<`, `>`, `:`, `"`, `|`, `?`, `*`)
+- Template validation before saving
+- Fallback to `{original_name}` on parse errors
+
+**CRITICAL BUG FIX** (v2.2.2):
+- `get_metadata()` MUST SELECT `enable_file_rename` and `filename_template` columns
+- Previously these columns were missing from SELECT, causing `is_file_rename_enabled()` to always return False
+- Fixed in `database_metadata.py` lines 289-310
+
+**Design Principles**:
+- Opt-in feature (disabled by default)
+- Per-database settings (each database has its own template)
+- Rename happens during initial processing (not retroactive)
+- Original filenames stored in `FileRenameHistory` for future undo capability
+- Template stored in database (not in settings.json)
 
 ### Date Correction System (NEW in v2.2)
 

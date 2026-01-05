@@ -413,113 +413,22 @@ def get_creation_date(file_path, database_path=None):
         supported_extensions = {ex for ex, f in exts.items() if f in Image.OPEN}
         # logger.info(f"The supported extensions = {supported_extensions}.")
 
-        # register the pillow heic opener.  Otherwise, pillow will throw an ioerror = cannot identify image file.
-        #pillow_heif.register_heif_opener()
+        # Get file extension (needed for EXIF check on all platforms)
+        extension = os.path.splitext(file_path)[1]
 
+        # STEP 1: Get OS-specific fallback timestamp
         if os.name == "nt":  # Windows
-            # get the creation date/time from Windows - This is stored as a ???
+            # get the creation date/time from Windows
             try:
                 creation_time = os.path.getctime(file_path)
             except Exception as e:
                 logger.exception(f"The getctime function failure {e} occurred for file {file_path}")
+                creation_time = os.path.getmtime(file_path)
 
             mod_time = os.path.getmtime(file_path)
             # Use creation_time as initial value (will be overridden by EXIF if available)
             creation_date = datetime.datetime.fromtimestamp(creation_time)
-            extension = os.path.splitext(file_path)[1]
             logger.info(f"-- create_time = {creation_time}, creation_date = {creation_date}, extension = {extension}")
-            # Now try to get a more accurate date from EXIF data.
-            try:
-                processed_photos = 0
-                not_photos = 0
-
-                # TAGS is defined in PIL as a list of items returned
-                _TAGS_r = dict(((v, k) for k, v in TAGS.items()))
-
-                # logger.info(f"TAGS.items() = {TAGS.items()}")
-                #logger.info(f"The extension for file is {extension}, and the supported_extensions = {supported_extensions}")
-                if extension in supported_extensions:
-                    # verifying extension is valid saves time necessary for pillow to attempt open and fail, which can be considerable.
-                    logger.info(f"We have a pillow supported file type - {extension}. So attempt to get exif data.")
-
-                    with Image.open(file_path) as im:
-                        try:
-                            exif_data_PIL = im._getexif()
-                            #logger.info(f"exif_data_PIL = {exif_data_PIL}")
-                            '''
-                            EXIF contains at least four dates:                    
-                            DateTime - 
-                            DateTimeDigitized - 
-                            PreviewDateTime - 
-                            DateTimeOriginal -
-
-                            GPS Date time can be retrieved from the  GPSTAGS object if necessary.
-                            GPSDateTime - 
-                            '''
-                            logger.info(f"____________________   List of Date Tags ____________________________________ ")
-                            logger.info(f"_TAGS_r  for DateTimeOriginal = ")
-                            logger.info(_TAGS_r["DateTimeOriginal"])
-                            logger.info(_TAGS_r["Model"])
-                            # logger.info(_TAGS_r["CreateDate"])
-                            # logger.info(_TAGS_r["GPSDateTime"])
-                            # logger.info(_TAGS_r["DateTimeCreated"])
-                            logger.info(f"________________________________________________________ ")
-                            if exif_data_PIL is not None:
-                                # Safely check if DateTimeOriginal exists in EXIF
-                                datetime_original_tag = _TAGS_r.get("DateTimeOriginal")
-                                if datetime_original_tag and datetime_original_tag in exif_data_PIL:
-                                    # if a value for DateTimeOriginal is included in EXIF data, then use that as the fileDate.
-                                    fileDate = exif_data_PIL[datetime_original_tag]
-                                    logger.info(f"fileDate = {fileDate}")
-                                    if fileDate != '' and len(fileDate) > 10 and fileDate != "0000:00:00 00:00:00":
-                                        # we located a proper file date in the exif data, so use that instead of date from OS.
-                                        has_exif = True  # Mark that we found EXIF data
-                                        date_source = 'exif'  # Date came from EXIF
-                                        logger.info("------------------  File Dates --------------------------")
-                                        logger.info(f"Date from os {datetime.datetime.fromtimestamp(creation_time)}, date from EXIF {fileDate}")
-                                        logger.info(f"Converted EXIF fileDate = {datetime.datetime.strptime(fileDate, '%Y:%m:%d %H:%M:%S')}")
-                                        logger.info("--------------------------------------------")
-
-                                        if creation_date != datetime.datetime.strptime(fileDate, '%Y:%m:%d %H:%M:%S'):
-                                            logger.info("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
-                                            logger.info("The OS and EXIF dates do NOT match, so using the EXIF date!")
-                                            logger.info("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
-                                            creation_date = datetime.datetime.strptime(fileDate, '%Y:%m:%d %H:%M:%S')
-                                        else:
-                                            logger.info("The OS and EXIF dates matched, so using them both :)")
-
-                                        im.close()
-                                        processed_photos += 1
-                                        logger.info(f"\r{processed_photos} photos processed, {not_photos} not processed")
-                                    else:
-                                        logger.info("fileDate does not exist in EXIF data.")
-                                else:
-                                    logger.info(f" exif_data_PIL[_TAGS_r[DateTimeOriginal]] does not exist.")
-                            else:
-                                not_photos += 1
-                                logger.info(f"No EXIF data was present.  \r{processed_photos} photos processed, {not_photos} not processed")
-                        except Exception as e:
-                            logger.exception(f"The failure {e} occurred for file {file_path}")
-                    im.close()
-                else:
-                    logger.info(f"The file {file_path}, with an extension of {extension} cannot be opened by pillow to determine date information, so return the OS date created. Supported Extensions = {supported_extensions}")
-
-            except IOError as io_err:
-                not_photos += 1
-                logger.error(f"IOError when processing file {file_path}- {io_err}.")
-                logger.info(f"\r{processed_photos} photos processed, {not_photos} not processed")
-                pass
-            except OSError as os_err:
-                not_photos += 1
-                logger.error(f"OSError when processing file {file_path}- {os_err}.")
-                logger.info(f"\r{processed_photos} photos processed, {not_photos} not processed")
-                pass
-            except KeyError as key_err:
-                logger.error(f"KeyError when processing file {file_path} - {key_err}.")
-                not_photos += 1
-                pass
-            except Exception as e:
-                logger.exception(f"When processing file {file_path} this error occurred:  {e}")
 
         else:  # macOS or Linux
             stat = os.stat(file_path)
@@ -530,6 +439,101 @@ def get_creation_date(file_path, database_path=None):
                 # Fallback to the last metadata change time (best approximation)
                 creation_time = stat.st_mtime
                 creation_date = datetime.datetime.fromtimestamp(creation_time)
+            logger.info(f"-- create_time = {creation_time}, creation_date = {creation_date}, extension = {extension}")
+
+        # STEP 2: Try to get EXIF data (PLATFORM-INDEPENDENT - runs on all OS)
+        # Now try to get a more accurate date from EXIF data.
+        try:
+            processed_photos = 0
+            not_photos = 0
+
+            # TAGS is defined in PIL as a list of items returned
+            _TAGS_r = dict(((v, k) for k, v in TAGS.items()))
+
+            # logger.info(f"TAGS.items() = {TAGS.items()}")
+            #logger.info(f"The extension for file is {extension}, and the supported_extensions = {supported_extensions}")
+            if extension.lower() in supported_extensions:
+                # verifying extension is valid saves time necessary for pillow to attempt open and fail, which can be considerable.
+                logger.info(f"We have a pillow supported file type - {extension}. So attempt to get exif data.")
+
+                with Image.open(file_path) as im:
+                    try:
+                        exif_data_PIL = im._getexif()
+                        #logger.info(f"exif_data_PIL = {exif_data_PIL}")
+                        '''
+                        EXIF contains at least four dates:
+                        DateTime -
+                        DateTimeDigitized -
+                        PreviewDateTime -
+                        DateTimeOriginal -
+
+                        GPS Date time can be retrieved from the  GPSTAGS object if necessary.
+                        GPSDateTime -
+                        '''
+                        logger.info(f"____________________   List of Date Tags ____________________________________ ")
+                        logger.info(f"_TAGS_r  for DateTimeOriginal = ")
+                        logger.info(_TAGS_r["DateTimeOriginal"])
+                        logger.info(_TAGS_r["Model"])
+                        # logger.info(_TAGS_r["CreateDate"])
+                        # logger.info(_TAGS_r["GPSDateTime"])
+                        # logger.info(_TAGS_r["DateTimeCreated"])
+                        logger.info(f"________________________________________________________ ")
+                        if exif_data_PIL is not None:
+                            # Safely check if DateTimeOriginal exists in EXIF
+                            datetime_original_tag = _TAGS_r.get("DateTimeOriginal")
+                            if datetime_original_tag and datetime_original_tag in exif_data_PIL:
+                                # if a value for DateTimeOriginal is included in EXIF data, then use that as the fileDate.
+                                fileDate = exif_data_PIL[datetime_original_tag]
+                                logger.info(f"fileDate = {fileDate}")
+                                if fileDate != '' and len(fileDate) > 10 and fileDate != "0000:00:00 00:00:00":
+                                    # we located a proper file date in the exif data, so use that instead of date from OS.
+                                    has_exif = True  # Mark that we found EXIF data
+                                    date_source = 'exif'  # Date came from EXIF
+                                    logger.info("------------------  File Dates --------------------------")
+                                    logger.info(f"Date from os {datetime.datetime.fromtimestamp(creation_time)}, date from EXIF {fileDate}")
+                                    logger.info(f"Converted EXIF fileDate = {datetime.datetime.strptime(fileDate, '%Y:%m:%d %H:%M:%S')}")
+                                    logger.info("--------------------------------------------")
+
+                                    if creation_date != datetime.datetime.strptime(fileDate, '%Y:%m:%d %H:%M:%S'):
+                                        logger.info("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
+                                        logger.info("The OS and EXIF dates do NOT match, so using the EXIF date!")
+                                        logger.info("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
+                                        creation_date = datetime.datetime.strptime(fileDate, '%Y:%m:%d %H:%M:%S')
+                                    else:
+                                        logger.info("The OS and EXIF dates matched, so using them both :)")
+
+                                    im.close()
+                                    processed_photos += 1
+                                    logger.info(f"\r{processed_photos} photos processed, {not_photos} not processed")
+                                else:
+                                    logger.info("fileDate does not exist in EXIF data.")
+                            else:
+                                logger.info(f" exif_data_PIL[_TAGS_r[DateTimeOriginal]] does not exist.")
+                        else:
+                            not_photos += 1
+                            logger.info(f"No EXIF data was present.  \r{processed_photos} photos processed, {not_photos} not processed")
+                    except Exception as e:
+                        logger.exception(f"The failure {e} occurred for file {file_path}")
+                im.close()
+            else:
+                logger.info(f"The file {file_path}, with an extension of {extension} cannot be opened by pillow to determine date information, so return the OS date created. Supported Extensions = {supported_extensions}")
+
+        except IOError as io_err:
+            not_photos += 1
+            logger.error(f"IOError when processing file {file_path}- {io_err}.")
+            logger.info(f"\r{processed_photos} photos processed, {not_photos} not processed")
+            pass
+        except OSError as os_err:
+            not_photos += 1
+            logger.error(f"OSError when processing file {file_path}- {os_err}.")
+            logger.info(f"\r{processed_photos} photos processed, {not_photos} not processed")
+            pass
+        except KeyError as key_err:
+            logger.error(f"KeyError when processing file {file_path} - {key_err}.")
+            not_photos += 1
+            pass
+        except Exception as e:
+            logger.exception(f"When processing file {file_path} this error occurred:  {e}")
 
         logger.info(f"Completed locating date for {file_path}, now convert it.... {creation_date}")
 

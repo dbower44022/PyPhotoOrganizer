@@ -4,7 +4,7 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.2-brightgreen.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.2.2-brightgreen.svg)](CHANGELOG.md)
 
 ## Overview
 
@@ -51,6 +51,16 @@ PyPhotoOrganizer helps you consolidate photos and videos from multiple devices a
 - ✅ **Safe Reorganization**: Copy-verify-delete pattern with empty directory cleanup
 - ✅ **Comprehensive Logging**: Visual indicators (✓✗⚠ℹ) for easy log navigation
 - ✅ **User-Specified Paths**: Auto-flag files from unreliable sources (e.g., scanned photos)
+
+**File Renaming Features (v2.2.1+):**
+- ✅ **Template-Based Renaming**: Customize filenames during processing with powerful template system
+- ✅ **Rich Template Variables**: Date/time ({year}, {month}, {day}, {hour}, {minute}, {second}), original filename ({original_name}, {original_name_no_ext}), file extension ({ext}), folder names ({folder_name}, {parent_folder_name}), sequential counter ({counter}, {counter:04d})
+- ✅ **Live Preview**: Real-time preview shows example output as you type
+- ✅ **Template Validation**: Security checks prevent path traversal and dangerous characters
+- ✅ **Collision Handling**: Automatic counter suffix (_1, _2, _3) for filename conflicts
+- ✅ **Per-Database Settings**: Each database stores its own filename template
+- ✅ **Opt-In Feature**: Disabled by default, preserves original filenames unless enabled
+- ✅ **Rename History**: Database tracks original filenames for future undo capability
 
 **Filtering Features:**
 - ✅ **Filename Pattern Filtering**: Customizable list of excluded patterns (favicon, icon, logo, etc.)
@@ -221,6 +231,10 @@ Organizing files: 100%|████████| 850/850 [02:15<00:00, 6.3file/s
 ### 6. Settings Tab
 - **File Processing**: Include subdirectories, batch size
 - **Organization**: Group by year, group by day, folder structure preview
+- **File Renaming**: Enable/disable file renaming, customizable filename template with live preview
+  - Template Variables: {year}, {month}, {day}, {hour}, {minute}, {second}, {original_name}, {original_name_no_ext}, {ext}, {folder_name}, {parent_folder_name}, {counter}, {counter:04d}
+  - Example: `{year}{month}{day}_{original_name_no_ext}` → `20260104_IMG_1234.jpg`
+  - Security validation prevents dangerous characters and path traversal
 - **Performance**: Partial hashing configuration
 - **Photo Filtering**: Size, dimensions, square detection, EXIF requirements
 - **Filename Patterns**: Customizable list of excluded patterns
@@ -434,7 +448,11 @@ CREATE TABLE DatabaseMetadata (
     created_date TEXT NOT NULL,
     last_used_date TEXT,
     schema_version INTEGER DEFAULT 1,
-    total_photos INTEGER DEFAULT 0
+    total_photos INTEGER DEFAULT 0,
+    organization_template TEXT DEFAULT '{YYYY}/{MM}/{DD}',
+    file_type_organization TEXT DEFAULT 'combined',
+    enable_file_rename INTEGER DEFAULT 0, -- Enable/disable filename template
+    filename_template TEXT DEFAULT '{original_name}'  -- Filename template pattern
 );
 ```
 
@@ -505,6 +523,25 @@ PyPhotoOrganizer/
 ```
 
 ## Recent Improvements
+
+### Version 2.2.2 (January 2026)
+
+**File Renaming System:**
+✅ Template-based filename customization during processing
+✅ Rich template variable system: date/time, original filename, folder names, sequential counter
+✅ Live preview with example output in Settings tab
+✅ Security validation (path traversal prevention, dangerous character blocking)
+✅ Automatic collision handling with counter suffix (_1, _2, _3)
+✅ Per-database template storage (each database has its own template)
+✅ Opt-in feature (disabled by default to preserve original filenames)
+✅ Format specifiers for counters ({counter:04d} → 0001, 0002, 0003)
+✅ Folder name extraction ({folder_name}, {parent_folder_name})
+✅ Rename history tracking in database for future undo capability
+
+**Bug Fixes:**
+✅ Fixed critical bug where get_metadata() didn't include enable_file_rename column
+✅ Changed logging from DEBUG to INFO for better visibility
+✅ Added comprehensive database path tracing throughout the system
 
 ### Version 2.2.1 (January 2026)
 
@@ -709,6 +746,21 @@ A: No, all grid cells are intentionally read-only to prevent accidental data mod
 **Q: Dialog boxes are appearing on the wrong monitor. How do I fix this?**
 A: This was fixed in v2.2.1. All dialogs now center on the main application window, even in multi-monitor setups. Make sure you're running the latest version.
 
+**Q: How do I rename files during processing?**
+A: Go to Settings tab → File Renaming section → Check "Enable file renaming" → Enter a filename template (e.g., `{year}{month}{day}_{original_name}`). The live preview shows an example. Files will be renamed automatically during processing.
+
+**Q: What template variables are available for file renaming?**
+A: Date/time: {year}, {month}, {day}, {hour}, {minute}, {second}. Filename: {original_name}, {original_name_no_ext}, {ext}. Folders: {folder_name}, {parent_folder_name}. Counter: {counter} or {counter:04d} (padded with zeros). See Settings tab for full list and examples.
+
+**Q: What happens if two files would have the same name after renaming?**
+A: The system automatically adds a counter suffix (_1, _2, _3, etc.) to prevent collisions. This is handled automatically - no user intervention required.
+
+**Q: Will file renaming affect my existing archive?**
+A: No. File renaming only applies to new files being processed. Existing files in your archive are never touched. Each database remembers its own template setting.
+
+**Q: Can I undo file renaming?**
+A: The database tracks original filenames in the FileRenameHistory table for future undo capability. Undo UI functionality is planned for a future release.
+
 ## License
 
 MIT License - See LICENSE file for details
@@ -775,4 +827,4 @@ MIT License - See LICENSE file for details
 **Made with ❤️ for photo enthusiasts everywhere**
 
 *Last updated: 2026-01-04*
-*Version: 2.2*
+*Version: 2.2.2*
