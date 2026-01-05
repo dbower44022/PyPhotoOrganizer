@@ -33,7 +33,9 @@ class DatabaseMetadata:
             total_photos INTEGER DEFAULT 0,
             organization_template TEXT DEFAULT '{YYYY}/{MM}/{DD}',
             file_type_organization TEXT DEFAULT 'combined',
-            user_specified_unreliable_paths TEXT DEFAULT '[]'
+            user_specified_unreliable_paths TEXT DEFAULT '[]',
+            filename_template TEXT DEFAULT '{original_name}',
+            enable_file_rename INTEGER DEFAULT 0
         );
     """
 
@@ -65,6 +67,17 @@ class DatabaseMetadata:
         );
     """
 
+    FILE_RENAME_HISTORY_TABLE_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS FileRenameHistory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_hash TEXT NOT NULL,
+            original_filename TEXT NOT NULL,
+            renamed_filename TEXT NOT NULL,
+            rename_timestamp TEXT NOT NULL,
+            FOREIGN KEY (file_hash) REFERENCES UniquePhotos(file_hash)
+        );
+    """
+
     def __init__(self, database_path: str):
         """
         Initialize database metadata manager.
@@ -76,6 +89,7 @@ class DatabaseMetadata:
         self._ensure_metadata_table()
         self._ensure_source_directories_table()
         self._ensure_unreliable_dates_table()
+        self._ensure_file_rename_history_table()
 
     def _ensure_metadata_table(self):
         """Ensure the metadata table exists in the database with all columns."""
@@ -114,6 +128,20 @@ class DatabaseMetadata:
                 if 'user_specified_unreliable_paths' not in columns:
                     logger.info("Upgrading database: adding user_specified_unreliable_paths column")
                     cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN user_specified_unreliable_paths TEXT DEFAULT '[]'")
+
+                # Add filename_template column if missing
+                if 'filename_template' not in columns:
+                    logger.info("Upgrading database: adding filename_template column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN filename_template TEXT DEFAULT '{original_name}'")
+                    # Set default value for existing rows
+                    cursor.execute("UPDATE DatabaseMetadata SET filename_template = '{original_name}' WHERE filename_template IS NULL")
+
+                # Add enable_file_rename column if missing
+                if 'enable_file_rename' not in columns:
+                    logger.info("Upgrading database: adding enable_file_rename column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN enable_file_rename INTEGER DEFAULT 0")
+                    # Set default value for existing rows
+                    cursor.execute("UPDATE DatabaseMetadata SET enable_file_rename = 0 WHERE enable_file_rename IS NULL")
 
                 conn.commit()
                 logger.debug(f"Metadata table ensured in {self.database_path}")
@@ -161,6 +189,22 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to create UnreliableDates table: {e}")
+            raise
+
+    def _ensure_file_rename_history_table(self):
+        """Ensure the FileRenameHistory table exists in the database."""
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                # Create table if it doesn't exist
+                cursor.execute(self.FILE_RENAME_HISTORY_TABLE_SCHEMA)
+
+                conn.commit()
+                logger.debug(f"FileRenameHistory table ensured in {self.database_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to create FileRenameHistory table: {e}")
             raise
 
     def ensure_all_tables(self):
@@ -1145,6 +1189,236 @@ class DatabaseMetadata:
         except Exception as e:
             logger.error(f"Failed to set user-specified paths: {e}")
             return False
+
+    # ========== Filename Template Methods ==========
+
+    def get_filename_template(self) -> str:
+        """
+        Get the filename template for this database.
+
+        Returns:
+            Filename template string (default: '{original_name}')
+        """
+        try:
+            logger.debug(f"→ get_filename_template() called for database: {self.database_path}")
+            metadata = self.get_metadata()
+
+            if metadata is None:
+                logger.warning("⚠ get_metadata() returned None - using default template")
+                return '{original_name}'
+
+            template = metadata.get('filename_template', '{original_name}')
+            logger.info(f"✓ Retrieved filename template: '{template}'")
+            return template
+
+        except Exception as e:
+            logger.error(f"✗ Error getting filename template: {e}", exc_info=True)
+            return '{original_name}'
+
+    def set_filename_template(self, template: str) -> bool:
+        """
+        Set the filename template.
+
+        Args:
+            template: Filename template string
+
+        Returns:
+            True if successful, False otherwise
+
+        Raises:
+            ValueError: If template validation fails
+        """
+        try:
+            logger.info(f"→ set_filename_template('{template}') called for database: {self.database_path}")
+
+            # Validate template first
+            from filename_template import FilenameTemplate
+            logger.debug(f"  Validating template...")
+            is_valid, error_msg = FilenameTemplate.validate(template)
+            if not is_valid:
+                logger.error(f"✗ Template validation FAILED: {error_msg}")
+                raise ValueError(f"Invalid filename template: {error_msg}")
+
+            logger.debug(f"  ✓ Template validation passed")
+
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                # Check if row exists
+                cursor.execute("SELECT COUNT(*) FROM DatabaseMetadata WHERE id = 1")
+                count = cursor.fetchone()[0]
+                if count == 0:
+                    logger.error("✗ Cannot set template: DatabaseMetadata row (id=1) does not exist!")
+                    logger.error("  Database must be initialized first")
+                    return False
+
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET filename_template = ?
+                    WHERE id = 1
+                """, (template,))
+
+                rows_affected = cursor.rowcount
+                conn.commit()
+
+                if rows_affected > 0:
+                    logger.info(f"✓ Filename template updated successfully: '{template}' (rows: {rows_affected})")
+
+                    # Verify the change
+                    cursor.execute("SELECT filename_template FROM DatabaseMetadata WHERE id = 1")
+                    result = cursor.fetchone()
+                    if result:
+                        actual_value = result[0]
+                        logger.debug(f"  Verification: filename_template = '{actual_value}'")
+                        if actual_value != template:
+                            logger.error(f"✗ Verification FAILED: Expected '{template}', got '{actual_value}'")
+                            return False
+                    return True
+                else:
+                    logger.warning(f"⚠ UPDATE returned 0 rows affected - row may not exist")
+                    return False
+
+        except ValueError as e:
+            logger.error(f"✗ Template validation failed: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"✗ Failed to update filename template: {e}", exc_info=True)
+            return False
+
+    def is_file_rename_enabled(self) -> bool:
+        """
+        Check if file renaming is enabled for this database.
+
+        Returns:
+            True if file renaming is enabled, False otherwise
+        """
+        try:
+            logger.debug(f"→ is_file_rename_enabled() called for database: {self.database_path}")
+            metadata = self.get_metadata()
+
+            if metadata is None:
+                logger.warning("⚠ get_metadata() returned None - database may not be initialized!")
+                logger.warning("  File renaming will be DISABLED")
+                return False
+
+            enable_value = metadata.get('enable_file_rename', 0)
+            result = bool(enable_value)
+            logger.info(f"✓ File rename enabled: {result} (database value: {enable_value})")
+            return result
+
+        except Exception as e:
+            logger.error(f"✗ Error checking file rename enabled status: {e}", exc_info=True)
+            return False
+
+    def set_file_rename_enabled(self, enabled: bool) -> bool:
+        """
+        Enable or disable file renaming.
+
+        Args:
+            enabled: True to enable, False to disable
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            logger.info(f"→ set_file_rename_enabled({enabled}) called for database: {self.database_path}")
+
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+
+                # Check if row exists
+                cursor.execute("SELECT COUNT(*) FROM DatabaseMetadata WHERE id = 1")
+                count = cursor.fetchone()[0]
+                if count == 0:
+                    logger.error("✗ Cannot set file rename: DatabaseMetadata row (id=1) does not exist!")
+                    logger.error("  Database must be initialized first")
+                    return False
+
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET enable_file_rename = ?
+                    WHERE id = 1
+                """, (1 if enabled else 0,))
+
+                rows_affected = cursor.rowcount
+                conn.commit()
+
+                if rows_affected > 0:
+                    logger.info(f"✓ File rename {'ENABLED' if enabled else 'DISABLED'} successfully (rows updated: {rows_affected})")
+
+                    # Verify the change
+                    cursor.execute("SELECT enable_file_rename FROM DatabaseMetadata WHERE id = 1")
+                    result = cursor.fetchone()
+                    if result:
+                        actual_value = result[0]
+                        logger.debug(f"  Verification: enable_file_rename = {actual_value}")
+                        if actual_value != (1 if enabled else 0):
+                            logger.error(f"✗ Verification FAILED: Expected {1 if enabled else 0}, got {actual_value}")
+                            return False
+                    return True
+                else:
+                    logger.warning(f"⚠ UPDATE returned 0 rows affected - row may not exist")
+                    return False
+
+        except Exception as e:
+            logger.error(f"✗ Failed to set file rename enabled state: {e}", exc_info=True)
+            return False
+
+    def insert_rename_history(self, file_hash: str, original_filename: str,
+                             renamed_filename: str) -> bool:
+        """
+        Record a file rename operation for undo capability and audit trail.
+
+        Args:
+            file_hash: SHA-256 hash of the file
+            original_filename: Original basename
+            renamed_filename: New basename
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO FileRenameHistory
+                    (file_hash, original_filename, renamed_filename, rename_timestamp)
+                    VALUES (?, ?, ?, datetime('now'))
+                """, (file_hash, original_filename, renamed_filename))
+                conn.commit()
+                logger.debug(f"Recorded rename: {original_filename} → {renamed_filename}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to insert rename history: {e}")
+            return False
+
+    def get_rename_history(self, file_hash: str) -> List[Dict[str, Any]]:
+        """
+        Get rename history for a specific file.
+
+        Args:
+            file_hash: SHA-256 hash of the file
+
+        Returns:
+            List of dict records with rename history, sorted by timestamp (newest first)
+        """
+        try:
+            with sqlite3.connect(self.database_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT original_filename, renamed_filename, rename_timestamp
+                    FROM FileRenameHistory
+                    WHERE file_hash = ?
+                    ORDER BY rename_timestamp DESC
+                """, (file_hash,))
+
+                columns = [desc[0] for desc in cursor.description]
+                return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        except Exception as e:
+            logger.error(f"Failed to get rename history: {e}")
+            return []
 
     # ========== Static Methods ==========
 

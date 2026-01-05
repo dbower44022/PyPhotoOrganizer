@@ -76,6 +76,8 @@ import utils
 from config import Config
 import constants
 from organization_template import OrganizationTemplate
+from filename_template import FilenameTemplate
+from database_metadata import DatabaseMetadata
 from datetime import datetime as dt_datetime
 
 # Configure logging using shared utility
@@ -163,6 +165,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
         total_files_processed = 0
         total_new_original_files = 0
         current_file_being_processed = 0
+        file_counter = 0  # Sequential counter for filename templates
 
         # Extract settings from config
         source_directory = config.source_directory
@@ -170,6 +173,9 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
         organization_template = config.get('organization_template', '{YYYY}/{MM}/{DD}')
         copy_files = config.copy_files
         move_files = config.move_files
+
+        # Initialize database metadata for filename template support
+        db_metadata = DatabaseMetadata(database_path)
 
         try:
             hashes = DuplicateFileDetection.load_photo_hashes(database_path)
@@ -270,11 +276,9 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
 
                     # Determine base destination directory (photo archive or video archive)
                     # Check if file is a video and if separate video archive is enabled
-                    from database_metadata import DatabaseMetadata
-                    db_meta = DatabaseMetadata(database_path)
                     is_video = utils.is_video_file(file_path)
-                    video_archive_enabled = db_meta.is_separate_video_archive_enabled()
-                    video_archive_location = db_meta.get_video_archive_location()
+                    video_archive_enabled = db_metadata.is_separate_video_archive_enabled()
+                    video_archive_location = db_metadata.get_video_archive_location()
 
                     if is_video and video_archive_enabled and video_archive_location:
                         # Route video to video archive
@@ -293,8 +297,39 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
 
                     # now verify if the destination folder exists, and if not, create it.
                     utils.ensure_directory_exists(destination_folder)
-                    # join the destination folder with the base file path.
-                    target_path = os.path.join(destination_folder, os.path.basename(file_path))
+
+                    # Increment file counter for each unique file
+                    file_counter += 1
+
+                    # Apply filename template if enabled, otherwise use original filename
+                    rename_enabled = db_metadata.is_file_rename_enabled()
+                    logger.info(f"File rename enabled: {rename_enabled}")
+                    if rename_enabled:
+                        try:
+                            filename_template = db_metadata.get_filename_template()
+                            logger.info(f"Filename template from database: '{filename_template}'")
+
+                            # Parse template to generate new filename
+                            # Pass full file_path so template can extract folder names
+                            new_filename = FilenameTemplate.parse(
+                                filename_template,
+                                file_date,
+                                file_path,  # Full path for folder name extraction
+                                counter=file_counter
+                            )
+
+                            original_filename = os.path.basename(file_path)
+
+                            logger.info(f"Filename template applied: {original_filename} → {new_filename}")
+                        except Exception as e:
+                            logger.error(f"Failed to parse filename template, falling back to original filename: {e}")
+                            new_filename = os.path.basename(file_path)
+                    else:
+                        # Use original filename (default behavior)
+                        new_filename = os.path.basename(file_path)
+
+                    # join the destination folder with the (possibly renamed) file
+                    target_path = os.path.join(destination_folder, new_filename)
 
                     # now determine if the new file already exists in directory, and if so, verify if it is identical.  There could be two files with same name but different images.
                     if os.path.exists(target_path):
@@ -345,6 +380,20 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                                         logger.debug(f"✓ Updated UniquePhotos.file_name: {file_hash[:16]}... -> {target_path}")
                                     else:
                                         logger.warning(f"File not found in UniquePhotos: {file_hash[:16]}...")
+
+                                    # Record rename history if file renaming is enabled
+                                    if db_metadata.is_file_rename_enabled():
+                                        original_filename = os.path.basename(file_path)
+                                        renamed_filename = os.path.basename(target_path)
+
+                                        # Only record if filename actually changed
+                                        if original_filename != renamed_filename:
+                                            db_metadata.insert_rename_history(
+                                                file_hash,
+                                                original_filename,
+                                                renamed_filename
+                                            )
+                                            logger.debug(f"✓ Recorded rename history: {original_filename} → {renamed_filename}")
 
                                     # Update archive_path in UnreliableDates (if this file has unreliable date)
                                     cursor.execute("""

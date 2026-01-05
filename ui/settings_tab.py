@@ -25,7 +25,8 @@ class SettingsTab(QWidget):
         super().__init__()
         self.settings_file = "settings.json"
         self.db_metadata = None  # Will be set when database is loaded
-        self.current_template = '{YYYY}/{MM}/{DD}'  # Default template
+        self.current_template = '{YYYY}/{MM}/{DD}'  # Default organization template
+        self.current_filename_template = '{original_name}'  # Default filename template
         self.init_ui()
         self.load_from_file(show_dialog=False)  # Suppress dialog during initialization
 
@@ -365,6 +366,119 @@ class SettingsTab(QWidget):
         pattern_group.setLayout(pattern_layout)
         layout.addWidget(pattern_group)
 
+        # File Renaming Settings
+        rename_group = QGroupBox("File Renaming")
+        rename_layout = QVBoxLayout()
+
+        # Enable/disable checkbox
+        self.enable_rename_check = QCheckBox("Enable file renaming during processing")
+        self.enable_rename_check.setToolTip("When enabled, files will be renamed according to the template below")
+        self.enable_rename_check.stateChanged.connect(self.on_rename_enabled_changed)
+        rename_layout.addWidget(self.enable_rename_check)
+
+        # Template input
+        template_label = QLabel("Filename Template:")
+        template_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        rename_layout.addWidget(template_label)
+
+        self.filename_template_edit = QLineEdit()
+        self.filename_template_edit.setPlaceholderText("{year}{month}{day}_{original_name_no_ext}")
+        self.filename_template_edit.textChanged.connect(self.on_filename_template_changed)
+        rename_layout.addWidget(self.filename_template_edit)
+
+        # Preview section
+        preview_layout = QHBoxLayout()
+        preview_layout.addWidget(QLabel("Preview:"))
+        self.rename_preview_label = QLabel("IMG_1234.jpg")
+        self.rename_preview_label.setStyleSheet("color: blue; font-weight: bold;")
+        preview_layout.addWidget(self.rename_preview_label)
+        preview_layout.addStretch()
+        rename_layout.addLayout(preview_layout)
+
+        # Example layout
+        example_layout = QHBoxLayout()
+        example_layout.addWidget(QLabel("Original:"))
+        example_orig_label = QLabel("IMG_1234.jpg")
+        example_orig_label.setStyleSheet("color: gray;")
+        example_layout.addWidget(example_orig_label)
+        example_layout.addWidget(QLabel(" → "))
+        example_layout.addWidget(QLabel("Renamed:"))
+        self.rename_example_label = QLabel("20250203_IMG_1234.jpg")
+        self.rename_example_label.setStyleSheet("color: green; font-weight: bold;")
+        example_layout.addWidget(self.rename_example_label)
+        example_layout.addStretch()
+        rename_layout.addLayout(example_layout)
+
+        # Validation message
+        self.rename_validation_label = QLabel()
+        self.rename_validation_label.setStyleSheet("color: red; font-style: italic;")
+        self.rename_validation_label.setWordWrap(True)
+        rename_layout.addWidget(self.rename_validation_label)
+
+        # Help text
+        help_label = QLabel("Available Variables:")
+        help_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        rename_layout.addWidget(help_label)
+
+        help_text = QTextEdit()
+        help_text.setReadOnly(True)
+        help_text.setMaximumHeight(120)
+        help_text.setHtml("""
+            <table style='font-size: 9pt;'>
+            <tr><td style='padding: 2px;'><b>{year}, {month}, {day}</b></td><td style='padding: 2px;'>- Date components (e.g., 2025, 02, 03)</td></tr>
+            <tr><td style='padding: 2px;'><b>{hour}, {minute}, {second}</b></td><td style='padding: 2px;'>- Time components (e.g., 14, 30, 15)</td></tr>
+            <tr><td style='padding: 2px;'><b>{original_name}</b></td><td style='padding: 2px;'>- Full original filename</td></tr>
+            <tr><td style='padding: 2px;'><b>{original_name_no_ext}</b></td><td style='padding: 2px;'>- Filename without extension</td></tr>
+            <tr><td style='padding: 2px;'><b>{ext}</b></td><td style='padding: 2px;'>- File extension (.jpg, .png, etc.)</td></tr>
+            <tr><td style='padding: 2px;'><b>{folder_name}</b></td><td style='padding: 2px;'>- Immediate parent folder name</td></tr>
+            <tr><td style='padding: 2px;'><b>{parent_folder_name}</b></td><td style='padding: 2px;'>- Grandparent folder name</td></tr>
+            <tr><td style='padding: 2px;'><b>{counter}</b> or <b>{counter:04d}</b></td><td style='padding: 2px;'>- Sequential number (1, 2, 3 or 0001, 0002, 0003)</td></tr>
+            </table>
+        """)
+        rename_layout.addWidget(help_text)
+
+        # Restore default button
+        restore_rename_btn = QPushButton("Restore Default: {original_name}")
+        restore_rename_btn.clicked.connect(self.restore_default_filename_template)
+        rename_layout.addWidget(restore_rename_btn)
+
+        # Warning label for rename template changes (similar to organization template)
+        self.rename_lock_warning = QLabel()
+        self.rename_lock_warning.setWordWrap(True)
+        self.rename_lock_warning.setStyleSheet("""
+            QLabel {
+                background-color: #fff3cd;
+                border: 1px solid #ffc107;
+                border-radius: 4px;
+                padding: 10px;
+                color: #856404;
+                margin-top: 10px;
+            }
+        """)
+        self.rename_lock_warning.hide()
+        rename_layout.addWidget(self.rename_lock_warning)
+
+        # Reorganize button for rename template
+        self.rename_reorganize_btn = QPushButton("Reorganize Files with New Template")
+        self.rename_reorganize_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ffc107;
+                color: #000;
+                font-weight: bold;
+                padding: 8px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #e0a800;
+            }
+        """)
+        self.rename_reorganize_btn.clicked.connect(self.on_rename_reorganize_clicked)
+        self.rename_reorganize_btn.hide()
+        rename_layout.addWidget(self.rename_reorganize_btn)
+
+        rename_group.setLayout(rename_layout)
+        layout.addWidget(rename_group)
+
         # Buttons
         button_layout = QHBoxLayout()
 
@@ -577,6 +691,38 @@ class SettingsTab(QWidget):
             self.org_lock_warning.hide()
             self.reorganize_btn.hide()
 
+    def check_filename_rename_lock(self):
+        """Check if filename rename template has changed and show warning."""
+        if self.db_metadata is None:
+            self.rename_lock_warning.hide()
+            self.rename_reorganize_btn.hide()
+            return
+
+        # Get metadata to check if database has files
+        metadata = self.db_metadata.get_metadata()
+        if not metadata:
+            self.rename_lock_warning.hide()
+            self.rename_reorganize_btn.hide()
+            return
+
+        total_photos = metadata.get('total_photos', 0)
+        current_db_filename_template = metadata.get('filename_template', '{original_name}')
+
+        # Check if filename template has changed
+        template_changed = (self.current_filename_template != current_db_filename_template)
+
+        if total_photos > 0 and template_changed:
+            self.rename_lock_warning.setText(
+                f"⚠ Warning: This archive contains {total_photos} files. "
+                f"Changing the filename template will require reorganizing all files to apply the new naming pattern. "
+                f"This may take a significant amount of time."
+            )
+            self.rename_lock_warning.show()
+            self.rename_reorganize_btn.show()
+        else:
+            self.rename_lock_warning.hide()
+            self.rename_reorganize_btn.hide()
+
     def on_file_type_changed(self):
         """Handle file type organization mode change."""
         # Show/hide video archive location widget
@@ -704,6 +850,17 @@ class SettingsTab(QWidget):
 
         # Check lock status
         self.check_organization_lock()
+
+        # Load filename rename settings
+        rename_enabled = db_metadata.is_file_rename_enabled()
+        self.enable_rename_check.setChecked(rename_enabled)
+
+        filename_template = db_metadata.get_filename_template()
+        self.current_filename_template = filename_template  # Store for comparison
+        self.filename_template_edit.setText(filename_template)
+
+        # Trigger preview update
+        self.on_filename_template_changed(filename_template)
 
     def get_config(self):
         """Get configuration as dictionary."""
@@ -904,15 +1061,153 @@ class SettingsTab(QWidget):
         """Validate current settings."""
         try:
             config = self.get_config()
+
+            # Debug: Check config types
+            import logging
+            logger = logging.getLogger(__name__)
+            for key, value in config.items():
+                logger.debug(f"Config[{key}] = {type(value)}: {value if not isinstance(value, (dict, list)) or len(str(value)) < 100 else str(value)[:100]+'...'}")
+
             # Add dummy source/dest for validation
             config['source_directory'] = ["/dummy/path"]
             config['destination_directory'] = "/dummy/path"
             config['copy_files'] = True
             config['move_files'] = False
 
-            Config(config)
+            Config(settings_dict=config)
             QMessageBox.information(self, "Validation Successful",
                                    "All settings are valid.")
         except Exception as e:
+            import traceback
+            full_error = traceback.format_exc()
+            logger.error(f"Validation failed:\n{full_error}")
             QMessageBox.critical(self, "Validation Failed",
                                f"Invalid settings:\n\n{str(e)}")
+
+    # ========== File Renaming Methods ==========
+
+    def on_rename_enabled_changed(self, state):
+        """Handle enable/disable file renaming checkbox change."""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        try:
+            enabled = (state == Qt.Checked)
+            logger.info(f"→ on_rename_enabled_changed({enabled}) - checkbox state changed")
+
+            if not self.db_metadata:
+                logger.error("✗ db_metadata is None - cannot save rename enabled state!")
+                QMessageBox.critical(self, "Error",
+                                   "Database connection not initialized.\nPlease load or create a database first.")
+                return
+
+            logger.debug(f"  Calling set_file_rename_enabled({enabled})...")
+            success = self.db_metadata.set_file_rename_enabled(enabled)
+
+            if success:
+                status = "enabled" if enabled else "disabled"
+                logger.info(f"✓ File renaming {status} successfully")
+                print(f"File renaming {status}")
+            else:
+                logger.error(f"✗ set_file_rename_enabled() returned False")
+                QMessageBox.warning(self, "Warning",
+                                  f"Failed to update rename setting.\nCheck the log file for details.")
+
+        except Exception as e:
+            logger.error(f"✗ Exception in on_rename_enabled_changed: {e}", exc_info=True)
+            QMessageBox.critical(self, "Error",
+                               f"Failed to update rename setting:\n\n{str(e)}")
+
+    def on_filename_template_changed(self, template):
+        """Handle filename template text change with validation and preview."""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        try:
+            logger.debug(f"→ on_filename_template_changed('{template}')")
+
+            # Import here to avoid circular dependency
+            from filename_template import FilenameTemplate
+
+            # Clear previous validation message
+            self.rename_validation_label.clear()
+
+            if not template:
+                # Empty template - show placeholder preview
+                logger.debug("  Empty template - showing placeholder")
+                self.rename_example_label.setText("IMG_1234.jpg")
+                self.rename_preview_label.setText("IMG_1234.jpg")
+                return
+
+            # Validate template
+            logger.debug(f"  Validating template...")
+            is_valid, error_msg = FilenameTemplate.validate(template)
+
+            if not is_valid:
+                # Show validation error
+                logger.warning(f"⚠ Template validation failed: {error_msg}")
+                self.rename_validation_label.setText(f"⚠ {error_msg}")
+                self.rename_example_label.setStyleSheet("color: red; font-weight: bold;")
+                self.rename_example_label.setText("Invalid template")
+                self.rename_preview_label.setStyleSheet("color: red; font-weight: bold;")
+                self.rename_preview_label.setText("Error")
+                return
+
+            logger.debug(f"  ✓ Template validation passed")
+
+            # Template is valid - generate preview
+            example_output = FilenameTemplate.get_example_output(template)
+            logger.debug(f"  Preview generated: '{example_output}'")
+
+            self.rename_example_label.setStyleSheet("color: green; font-weight: bold;")
+            self.rename_example_label.setText(example_output)
+            self.rename_preview_label.setStyleSheet("color: blue; font-weight: bold;")
+            self.rename_preview_label.setText(example_output)
+
+            # Store current template for comparison
+            self.current_filename_template = template
+            logger.debug(f"  Stored current_filename_template = '{template}'")
+
+            # Save to database if valid
+            if self.db_metadata:
+                logger.debug(f"  Saving template to database...")
+                success = self.db_metadata.set_filename_template(template)
+                if success:
+                    logger.info(f"✓ Template saved to database: '{template}'")
+                else:
+                    logger.error(f"✗ Failed to save template to database")
+                    self.rename_validation_label.setText(f"⚠ Failed to save template to database")
+            else:
+                logger.warning("⚠ db_metadata is None - template NOT saved to database")
+
+            # Check if reorganization is needed
+            logger.debug(f"  Checking if reorganization needed...")
+            self.check_filename_rename_lock()
+
+        except Exception as e:
+            logger.error(f"✗ Exception in on_filename_template_changed: {e}", exc_info=True)
+            self.rename_validation_label.setText(f"⚠ Error: {str(e)}")
+            self.rename_example_label.setText("Error")
+
+    def restore_default_filename_template(self):
+        """Restore default filename template."""
+        default_template = "{original_name}"
+        self.filename_template_edit.setText(default_template)
+
+        if self.db_metadata:
+            try:
+                self.db_metadata.set_filename_template(default_template)
+                QMessageBox.information(self, "Template Restored",
+                                       "Filename template restored to default:\n{original_name}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error",
+                                   f"Failed to restore default template:\n\n{str(e)}")
+
+    def on_rename_reorganize_clicked(self):
+        """Show reorganization dialog for filename template changes."""
+        QMessageBox.information(
+            self,
+            "Reorganization",
+            "Reorganization feature will be implemented in a future update.\n\n"
+            "This will allow you to rename all files in the archive using the new template."
+        )

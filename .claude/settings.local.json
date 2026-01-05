@@ -12,7 +12,8 @@
       "Bash(sudo apt-get install:*)",
       "Bash(timeout 5 .venv/bin/python:*)",
       "Bash(grep:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(sqlite3:*)"
     ]
   }
 }
