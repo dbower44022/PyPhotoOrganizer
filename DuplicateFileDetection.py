@@ -102,16 +102,22 @@ class PhotoDatabase:
 
     def initialize_database(self):
         """
-        Create the UniquePhotos table if it doesn't exist.
+        Create the UniquePhotos and FileHashHistory tables if they don't exist.
         This should be called after entering the context.
 
         Schema includes:
-        - file_hash: Full SHA-256 hash (PRIMARY KEY)
+        UniquePhotos:
+        - file_hash: Full SHA-256 hash (PRIMARY KEY) - current hash after any modifications
         - partial_hash: Hash of first N bytes (for quick lookup)
         - partial_hash_bytes: Number of bytes used for partial hash
         - file_size: File size in bytes
         - file_name: Full path to file
         - create_datetime, create_year, create_month, create_day: File metadata
+        - original_hash: Original hash when first imported (for reference)
+
+        FileHashHistory:
+        - Tracks all hash versions for a file (many-to-one relationship)
+        - Enables duplicate detection even after EXIF modifications
         """
         try:
             # Create table with partial hash support
@@ -153,8 +159,58 @@ class PhotoDatabase:
                 ON UniquePhotos(file_name)
             ''')
 
+            # Add original_hash column if it doesn't exist (for migration)
+            try:
+                self.cursor.execute('ALTER TABLE UniquePhotos ADD COLUMN original_hash TEXT')
+                logger.info("Added original_hash column to UniquePhotos")
+            except sqlite3.OperationalError:
+                # Column already exists
+                pass
+
+            # Create FileHashHistory table for tracking all hash versions
+            # This enables duplicate detection after EXIF modifications
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS FileHashHistory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    current_file_hash TEXT NOT NULL,
+                    historical_hash TEXT NOT NULL,
+                    created_date TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    FOREIGN KEY (current_file_hash) REFERENCES UniquePhotos(file_hash)
+                )
+            ''')
+
+            # Critical index for fast duplicate detection via historical hashes
+            self.cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_historical_hash
+                ON FileHashHistory(historical_hash)
+            ''')
+
+            # Index on current_file_hash for looking up history of a specific file
+            self.cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_current_file_hash
+                ON FileHashHistory(current_file_hash)
+            ''')
+
+            # Migration: Populate FileHashHistory from existing UniquePhotos records
+            # This ensures existing databases are upgraded with hash history
+            self.cursor.execute('SELECT COUNT(*) FROM FileHashHistory')
+            history_count = self.cursor.fetchone()[0]
+
+            self.cursor.execute('SELECT COUNT(*) FROM UniquePhotos')
+            photos_count = self.cursor.fetchone()[0]
+
+            if history_count == 0 and photos_count > 0:
+                logger.info(f"Migrating {photos_count} existing records to FileHashHistory...")
+                self.cursor.execute('''
+                    INSERT INTO FileHashHistory (current_file_hash, historical_hash, created_date, reason)
+                    SELECT file_hash, file_hash, datetime('now'), 'migration'
+                    FROM UniquePhotos
+                ''')
+                logger.info(f"✓ Migrated {photos_count} records to FileHashHistory")
+
             self.conn.commit()
-            logger.info("Database table and indexes initialized successfully")
+            logger.info("Database tables and indexes initialized successfully")
         except Exception as e:
             logger.exception(f"Failed to initialize database tables: {e}")
             raise
@@ -178,7 +234,7 @@ class PhotoDatabase:
     def insert_unique_photo(self, file_hash, file_path, create_datetime, create_year, create_month, create_day,
                            partial_hash=None, partial_hash_bytes=None, file_size=None):
         """
-        Insert a new unique photo record into the database.
+        Insert a new unique photo record into the database and create initial hash history entry.
 
         Parameters:
             file_hash (str): SHA-256 hash of the full file
@@ -192,15 +248,25 @@ class PhotoDatabase:
             file_size (int, optional): File size in bytes
         """
         try:
+            # Insert into UniquePhotos with original_hash set to file_hash
             self.cursor.execute(
                 """INSERT INTO UniquePhotos
                    (file_hash, partial_hash, partial_hash_bytes, file_size, file_name,
-                    create_datetime, create_year, create_month, create_day)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    create_datetime, create_year, create_month, create_day, original_hash)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (file_hash, partial_hash, partial_hash_bytes, file_size, file_path,
-                 create_datetime, create_year, create_month, create_day)
+                 create_datetime, create_year, create_month, create_day, file_hash)
             )
-            logger.debug(f"Inserted unique photo: {file_path} (partial_hash: {partial_hash is not None})")
+
+            # Create initial entry in FileHashHistory for duplicate detection after EXIF modifications
+            self.cursor.execute(
+                """INSERT INTO FileHashHistory
+                   (current_file_hash, historical_hash, created_date, reason)
+                   VALUES (?, ?, ?, 'original')""",
+                (file_hash, file_hash, datetime.datetime.now().isoformat())
+            )
+
+            logger.debug(f"Inserted unique photo: {file_path} (partial_hash: {partial_hash is not None}, hash_history: created)")
         except sqlite3.IntegrityError:
             # Hash already exists (PRIMARY KEY constraint)
             logger.warning(f"Attempted to insert duplicate hash: {file_hash}")
@@ -248,6 +314,142 @@ class PhotoDatabase:
             return [row[0] for row in results]
         except Exception as e:
             logger.exception(f"Failed to check partial hash: {e}")
+            raise
+
+    def is_duplicate_hash_in_history(self, file_hash):
+        """
+        Check if a hash exists in FileHashHistory (any version of any file).
+        This enables duplicate detection even after EXIF modifications.
+
+        Parameters:
+            file_hash (str): SHA-256 hash to check
+
+        Returns:
+            str or None: The current_file_hash if found (to identify the photo), None otherwise
+        """
+        try:
+            self.cursor.execute(
+                """SELECT current_file_hash FROM FileHashHistory
+                   WHERE historical_hash = ?
+                   LIMIT 1""",
+                (file_hash,)
+            )
+            result = self.cursor.fetchone()
+            return result[0] if result else None
+        except Exception as e:
+            logger.exception(f"Failed to check hash history: {e}")
+            raise
+
+    def get_all_historical_hashes(self):
+        """
+        Get all historical hashes for in-memory duplicate checking.
+        This includes all versions of all files.
+
+        Returns:
+            set: Set of all historical hash strings
+        """
+        try:
+            self.cursor.execute("SELECT historical_hash FROM FileHashHistory")
+            return {row[0] for row in self.cursor.fetchall()}
+        except Exception as e:
+            logger.exception(f"Failed to retrieve historical hashes: {e}")
+            raise
+
+    def add_hash_to_history(self, current_file_hash, new_hash, reason='exif_edit'):
+        """
+        Add a new hash entry to FileHashHistory after file modification.
+        Also updates the current file_hash in UniquePhotos.
+
+        Parameters:
+            current_file_hash (str): The current file_hash in UniquePhotos (before modification)
+            new_hash (str): The new hash after modification
+            reason (str): Reason for the hash change ('exif_edit', 'reorganization', etc.)
+
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Add new entry to hash history
+            self.cursor.execute(
+                """INSERT INTO FileHashHistory
+                   (current_file_hash, historical_hash, created_date, reason)
+                   VALUES (?, ?, ?, ?)""",
+                (new_hash, new_hash, datetime.datetime.now().isoformat(), reason)
+            )
+
+            # Update all existing history entries to point to new current hash
+            self.cursor.execute(
+                """UPDATE FileHashHistory
+                   SET current_file_hash = ?
+                   WHERE current_file_hash = ?""",
+                (new_hash, current_file_hash)
+            )
+
+            # Update UniquePhotos with new current hash
+            # Note: This changes the PRIMARY KEY, which SQLite handles via UPDATE
+            self.cursor.execute(
+                """UPDATE UniquePhotos
+                   SET file_hash = ?
+                   WHERE file_hash = ?""",
+                (new_hash, current_file_hash)
+            )
+
+            # Also update UnreliableDates table if it exists
+            # This ensures date correction status tracking continues to work
+            try:
+                self.cursor.execute(
+                    """UPDATE UnreliableDates
+                       SET file_hash = ?
+                       WHERE file_hash = ?""",
+                    (new_hash, current_file_hash)
+                )
+                rows_updated = self.cursor.rowcount
+                if rows_updated > 0:
+                    logger.info(f"Updated {rows_updated} UnreliableDates record(s) with new hash")
+            except Exception as e:
+                # Table may not exist in all databases
+                logger.debug(f"Could not update UnreliableDates (may not exist): {e}")
+
+            logger.info(f"Added hash to history: {current_file_hash} -> {new_hash} (reason: {reason})")
+            return True
+        except Exception as e:
+            logger.exception(f"Failed to add hash to history: {e}")
+            return False
+
+    def get_photo_by_historical_hash(self, historical_hash):
+        """
+        Get photo info by looking up any historical hash version.
+
+        Parameters:
+            historical_hash (str): Any historical hash of the file
+
+        Returns:
+            dict or None: Photo info dict if found, None otherwise
+        """
+        try:
+            self.cursor.execute(
+                """SELECT up.file_hash, up.file_name, up.original_hash,
+                          up.create_datetime, up.create_year, up.create_month, up.create_day
+                   FROM UniquePhotos up
+                   JOIN FileHashHistory fhh ON up.file_hash = fhh.current_file_hash
+                   WHERE fhh.historical_hash = ?
+                   LIMIT 1""",
+                (historical_hash,)
+            )
+            result = self.cursor.fetchone()
+            if result:
+                return {
+                    'file_hash': result[0],
+                    'file_name': result[1],
+                    'original_hash': result[2],
+                    'create_datetime': result[3],
+                    'create_year': result[4],
+                    'create_month': result[5],
+                    'create_day': result[6]
+                }
+            return None
+        except Exception as e:
+            logger.exception(f"Failed to get photo by historical hash: {e}")
             raise
 
     def commit(self):
@@ -679,6 +881,15 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
             logger.info(f"hashes was successfully loaded with {len(hashes)} existing unique photos")
         else:
             logger.info("hashes was not provided")
+
+        # Load historical hashes for duplicate detection after EXIF modifications
+        historical_hashes = set()
+        try:
+            with PhotoDatabase(database_path) as temp_db:
+                historical_hashes = temp_db.get_all_historical_hashes()
+                logger.info(f"Loaded {len(historical_hashes)} historical hashes for duplicate detection")
+        except Exception as e:
+            logger.warning(f"Could not load historical hashes (table may not exist yet): {e}")
             hashes = []
 
         duplicate_files = []
@@ -825,9 +1036,9 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                     pbar.update(1)
                                     continue
 
-                                # Check if full hash matches any of the candidates
-                                if file_hash in matching_full_hashes:
-                                    logger.info(f"DUPLICATE CONFIRMED: Full hash matches for {filename}")
+                                # Check if full hash matches any of the candidates or historical hashes
+                                if file_hash in matching_full_hashes or file_hash in historical_hashes:
+                                    logger.info(f"DUPLICATE CONFIRMED: Full hash matches (current or historical) for {filename}")
                                     # This is a true duplicate
                                     files_skipped += 1
                                     duplicate_file = {
@@ -864,9 +1075,9 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                 pbar.update(1)
                                 continue
 
-                            # Check if hash already exists in database
-                            if db.has_hash(file_hash):
-                                logger.info(f"File hash already in database: {filename}")
+                            # Check if hash already exists in database (current or historical)
+                            if db.has_hash(file_hash) or file_hash in historical_hashes:
+                                logger.info(f"File hash already in database (current or historical): {filename}")
                                 files_skipped += 1
                                 duplicate_file = {
                                     "file_hash": file_hash,
@@ -878,9 +1089,9 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                 pbar.update(1)
                                 continue
 
-                        # Check against in-memory hash list (current batch)
-                        if file_hash in hashes:
-                            logger.info(f"Duplicate in current batch: {filename}")
+                        # Check against in-memory hash list (current batch) and historical hashes
+                        if file_hash in hashes or file_hash in historical_hashes:
+                            logger.info(f"Duplicate found (in batch or historical): {filename}")
                             duplicate_file = {
                                 "file_hash": file_hash,
                                 "file_path": filename,
