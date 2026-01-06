@@ -502,6 +502,62 @@ class SettingsTab(QWidget):
 
         layout.addLayout(button_layout)
 
+        # Audit Retention Settings
+        retention_group = QGroupBox("Import History Retention")
+        retention_layout = QVBoxLayout()
+
+        # Description
+        retention_desc = QLabel(
+            "Configure how long import history records are kept. "
+            "Older sessions and their file logs will be automatically cleaned up."
+        )
+        retention_desc.setWordWrap(True)
+        retention_desc.setStyleSheet("font-style: italic; color: gray; padding: 5px;")
+        retention_layout.addWidget(retention_desc)
+
+        # Retention mode
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("Retention Mode:"))
+        self.retention_mode_combo = QComboBox()
+        self.retention_mode_combo.addItems(["Keep All", "Keep Last N Sessions", "Keep Last N Days"])
+        self.retention_mode_combo.currentIndexChanged.connect(self.on_retention_mode_changed)
+        mode_layout.addWidget(self.retention_mode_combo)
+        mode_layout.addStretch()
+        retention_layout.addLayout(mode_layout)
+
+        # Session count/days input
+        count_layout = QHBoxLayout()
+        self.retention_count_label = QLabel("Sessions to keep:")
+        count_layout.addWidget(self.retention_count_label)
+        self.retention_count_spin = QSpinBox()
+        self.retention_count_spin.setRange(1, 1000)
+        self.retention_count_spin.setValue(50)
+        count_layout.addWidget(self.retention_count_spin)
+        count_layout.addStretch()
+        retention_layout.addLayout(count_layout)
+
+        # Auto-cleanup checkbox
+        self.auto_cleanup_check = QCheckBox("Enable automatic cleanup on startup")
+        self.auto_cleanup_check.setToolTip("When enabled, old sessions will be deleted automatically when the application starts")
+        retention_layout.addWidget(self.auto_cleanup_check)
+
+        # Manual cleanup button
+        cleanup_btn_layout = QHBoxLayout()
+        self.cleanup_now_btn = QPushButton("Clean Up Now")
+        self.cleanup_now_btn.clicked.connect(self.run_retention_cleanup)
+        self.cleanup_now_btn.setToolTip("Delete old sessions according to retention settings")
+        cleanup_btn_layout.addWidget(self.cleanup_now_btn)
+
+        self.save_retention_btn = QPushButton("Save Retention Settings")
+        self.save_retention_btn.clicked.connect(self.save_retention_settings)
+        cleanup_btn_layout.addWidget(self.save_retention_btn)
+
+        cleanup_btn_layout.addStretch()
+        retention_layout.addLayout(cleanup_btn_layout)
+
+        retention_group.setLayout(retention_layout)
+        layout.addWidget(retention_group)
+
         layout.addStretch()
         main_widget.setLayout(layout)
         scroll.setWidget(main_widget)
@@ -873,6 +929,9 @@ class SettingsTab(QWidget):
         # Trigger preview update
         self.on_filename_template_changed(filename_template)
 
+        # Load retention settings
+        self.load_retention_settings()
+
     def get_config(self):
         """Get configuration as dictionary."""
         # Get excluded patterns from list widget
@@ -1227,3 +1286,121 @@ class SettingsTab(QWidget):
             "Reorganization feature will be implemented in a future update.\n\n"
             "This will allow you to rename all files in the archive using the new template."
         )
+
+    # ==================== Retention Settings Methods ====================
+
+    def on_retention_mode_changed(self, index):
+        """Handle retention mode dropdown change."""
+        mode_labels = ["", "Sessions to keep:", "Days to keep:"]
+        if index == 0:  # Keep All
+            self.retention_count_label.hide()
+            self.retention_count_spin.hide()
+        else:
+            self.retention_count_label.setText(mode_labels[index])
+            self.retention_count_label.show()
+            self.retention_count_spin.show()
+
+    def load_retention_settings(self):
+        """Load retention settings from database."""
+        if not self.db_metadata:
+            return
+
+        try:
+            from audit_manager import AuditManager
+            audit_manager = AuditManager(self.db_metadata.database_path)
+            settings = audit_manager.get_retention_settings()
+
+            if settings:
+                mode = settings.get('retention_mode', 'none')
+                if mode == 'none':
+                    self.retention_mode_combo.setCurrentIndex(0)
+                elif mode == 'sessions':
+                    self.retention_mode_combo.setCurrentIndex(1)
+                    self.retention_count_spin.setValue(settings.get('retain_session_count', 50))
+                elif mode == 'days':
+                    self.retention_mode_combo.setCurrentIndex(2)
+                    self.retention_count_spin.setValue(settings.get('retain_days', 365))
+
+                self.auto_cleanup_check.setChecked(settings.get('auto_cleanup_enabled', False))
+
+            # Trigger visibility update
+            self.on_retention_mode_changed(self.retention_mode_combo.currentIndex())
+
+        except Exception as e:
+            # Silently fail - retention settings are optional
+            pass
+
+    def save_retention_settings(self):
+        """Save retention settings to database."""
+        if not self.db_metadata:
+            QMessageBox.warning(self, "No Database", "Please select a database first.")
+            return
+
+        try:
+            from audit_manager import AuditManager
+            audit_manager = AuditManager(self.db_metadata.database_path)
+
+            index = self.retention_mode_combo.currentIndex()
+            if index == 0:
+                mode = 'none'
+            elif index == 1:
+                mode = 'sessions'
+            else:
+                mode = 'days'
+
+            count = self.retention_count_spin.value()
+            auto_cleanup = self.auto_cleanup_check.isChecked()
+
+            audit_manager.set_retention_settings(
+                mode=mode,
+                count=count if mode == 'sessions' else 50,
+                days=count if mode == 'days' else 365,
+                auto_cleanup=auto_cleanup
+            )
+
+            QMessageBox.information(self, "Settings Saved",
+                                   "Retention settings saved successfully.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error",
+                               f"Failed to save retention settings:\n\n{str(e)}")
+
+    def run_retention_cleanup(self):
+        """Run retention policy cleanup manually."""
+        if not self.db_metadata:
+            QMessageBox.warning(self, "No Database", "Please select a database first.")
+            return
+
+        reply = QMessageBox.question(
+            self, "Confirm Cleanup",
+            "This will delete old import sessions according to your retention settings.\n\n"
+            "This action cannot be undone. Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            from audit_manager import AuditManager
+            audit_manager = AuditManager(self.db_metadata.database_path)
+
+            sessions_deleted, logs_deleted = audit_manager.apply_retention_policy()
+
+            if sessions_deleted > 0 or logs_deleted > 0:
+                QMessageBox.information(
+                    self, "Cleanup Complete",
+                    f"Cleanup complete:\n\n"
+                    f"Sessions deleted: {sessions_deleted}\n"
+                    f"File logs deleted: {logs_deleted}"
+                )
+            else:
+                QMessageBox.information(
+                    self, "Cleanup Complete",
+                    "No sessions needed to be cleaned up based on current retention settings."
+                )
+
+        except Exception as e:
+            QMessageBox.critical(self, "Cleanup Failed",
+                               f"Failed to run cleanup:\n\n{str(e)}")

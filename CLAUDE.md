@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**For end-user documentation, see [USER_GUIDE.md](USER_GUIDE.md).**
+
 ## Project Overview
 
 PhotoOrganizer is a Python-based photo and video duplicate detection and organization system. It scans multiple source directories for media files, detects duplicates using SHA-256 hashing, and organizes unique files into a structured vault organized by creation date (year/month/day).
@@ -1026,8 +1028,50 @@ All modules use Python's logging framework with detailed formatting:
   - `main_app_error.log` (main.py)
   - `DuplicateFileDetection_app_error.log` (DuplicateFileDetection.py)
   - `app_error.log` (FunctionParameters.py)
+  - `photo_filter.log` (photo_filter.py)
 
 Format: `timestamp - module - level - function - line --- message`
+
+### Log Rotation (NEW in v2.3.1)
+
+**Purpose**: Prevent log files from growing unbounded and affecting application performance.
+
+**Implementation** (`utils.py`):
+```python
+from logging.handlers import RotatingFileHandler
+
+LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB per log file
+LOG_BACKUP_COUNT = 3  # Keep 3 backup files
+
+def setup_logger(name, log_file, level=logging.DEBUG, max_bytes=None, backup_count=None):
+    # Uses RotatingFileHandler instead of FileHandler
+    file_handler = RotatingFileHandler(
+        log_file,
+        mode="a",
+        maxBytes=max_bytes or LOG_MAX_BYTES,
+        backupCount=backup_count or LOG_BACKUP_COUNT,
+        encoding="utf-8"
+    )
+```
+
+**Configuration:**
+- **Max file size**: 5 MB per log file (configurable via `max_bytes` parameter)
+- **Backup count**: 3 files (configurable via `backup_count` parameter)
+- **Total max storage per module**: ~20 MB (5MB × 4 files)
+
+**Rotation Behavior:**
+When a log file reaches 5MB:
+1. `app_error.log` → `app_error.log.1`
+2. `app_error.log.1` → `app_error.log.2`
+3. `app_error.log.2` → `app_error.log.3`
+4. `app_error.log.3` is deleted
+5. New empty `app_error.log` is created
+
+**Benefits:**
+- Prevents disk space exhaustion during long-running operations
+- Maintains recent log history for debugging
+- Automatic cleanup - no manual intervention needed
+- Existing large log files can be manually deleted to start fresh
 
 ## Progress Bars
 
@@ -1160,3 +1204,124 @@ Scenario: User scanned old family photos. Scanner assigned current date (2024) i
 7. System moves all 150 photos from incorrect `2024/` folders to correct year folders
 8. Photos now organized correctly: `1995/07/01/`, `1998/12/25/`, etc.
 9. EXIF data in archive files now has correct dates (source files remain untouched)
+
+### Import Audit System (NEW in v2.3)
+
+**Purpose**: Provide complete traceability for all file operations during import, allowing users to audit what happened, track duplicate relationships, and export reports.
+
+**audit_manager.py** - Core audit infrastructure module
+- `AuditManager` class: Manages import session tracking and reporting
+  - Session lifecycle: `start_session()`, `end_session()`, `get_session()`
+  - File operation logging: `log_file_operation()`, `update_verification_status()`
+  - Duplicate tracking: `record_duplicate()`, `get_duplicates_of()`
+  - Retention management: `get_retention_settings()`, `set_retention_settings()`, `apply_retention_policy()`
+  - Report generation: `generate_session_report()`, `generate_duplicate_report()`, `generate_error_report()`
+  - Export: `export_session_to_json()`, `export_session_to_csv()`, `export_duplicates_to_csv()`
+
+**Database Schema** (new tables in audit_manager.py):
+```sql
+-- Track each import session
+CREATE TABLE ImportSession (
+    session_id TEXT PRIMARY KEY,  -- Format: YYYYMMDD_HHMMSS_XXXXXX
+    start_timestamp TEXT NOT NULL,
+    end_timestamp TEXT,
+    status TEXT DEFAULT 'running',  -- running, completed, failed, cancelled
+    source_directories TEXT,  -- JSON array
+    destination_directory TEXT,
+    operation_mode TEXT,  -- 'copy' or 'move'
+    total_files_scanned INTEGER DEFAULT 0,
+    total_files_processed INTEGER DEFAULT 0,
+    total_unique_files INTEGER DEFAULT 0,
+    total_duplicates INTEGER DEFAULT 0,
+    total_filtered INTEGER DEFAULT 0,
+    total_errors INTEGER DEFAULT 0,
+    error_summary TEXT  -- JSON
+);
+
+-- Per-file operation log
+CREATE TABLE FileProcessingLog (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    destination_path TEXT,
+    file_hash TEXT,
+    operation TEXT NOT NULL,  -- 'copy', 'move', 'skip_duplicate', 'skip_filtered', 'error'
+    status TEXT NOT NULL,  -- 'success', 'failed', 'skipped'
+    file_size INTEGER,
+    creation_date TEXT,
+    date_source TEXT,
+    hash_verification_status TEXT,
+    process_timestamp TEXT NOT NULL,
+    duration_ms INTEGER,
+    error_code TEXT,
+    error_message TEXT,
+    duplicate_of_hash TEXT,
+    filter_reason TEXT,
+    FOREIGN KEY (session_id) REFERENCES ImportSession(session_id) ON DELETE CASCADE
+);
+
+-- Track duplicate relationships
+CREATE TABLE DuplicateMapping (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    original_hash TEXT NOT NULL,
+    original_path TEXT NOT NULL,
+    duplicate_source_path TEXT NOT NULL,
+    first_seen_session TEXT NOT NULL,
+    first_seen_timestamp TEXT NOT NULL,
+    times_seen INTEGER DEFAULT 1,
+    UNIQUE(original_hash, duplicate_source_path)
+);
+
+-- Retention settings
+CREATE TABLE AuditRetentionSettings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    retention_mode TEXT DEFAULT 'none',  -- 'sessions', 'days', 'none'
+    retain_session_count INTEGER DEFAULT 50,
+    retain_days INTEGER DEFAULT 365,
+    auto_cleanup_enabled INTEGER DEFAULT 0
+);
+```
+
+**GUI Integration:**
+
+**Import History Tab** (`ui/import_history_tab.py`):
+- Session list panel (left) with status filter dropdown
+- Session details panel showing statistics and timing
+- File logs tabs: All Files, Duplicates, Errors
+- Export buttons: JSON, CSV, Duplicates CSV
+- Auto-refresh on tab display
+
+**Settings Tab** (retention settings):
+- Retention mode: Keep All, Keep Last N Sessions, Keep Last N Days
+- Session/days count spinner
+- Auto-cleanup on startup checkbox
+- "Clean Up Now" button for manual retention
+
+**Integration Points:**
+
+1. **worker.py**: Session lifecycle management
+   - `start_session()` called at processing start
+   - `end_session()` called on completion/failure/cancellation
+   - Session stats updated throughout processing
+
+2. **DuplicateFileDetection.py**: Logs duplicates and filtered files
+   - `log_file_operation()` with operation='skip_duplicate' or 'skip_filtered'
+   - `record_duplicate()` to track original-duplicate relationships
+
+3. **main.py**: Logs copy/move operations
+   - `log_file_operation()` with operation='copy' or 'move'
+   - Error logging with tracebacks
+
+**Usage Example:**
+
+1. User runs import process
+2. System automatically creates audit session
+3. All file operations logged with timing and results
+4. User clicks "Import History" tab after processing
+5. Session list shows recent imports with status
+6. User selects session to view details:
+   - Statistics (files processed, duplicates, errors)
+   - File-level operation log
+   - Duplicate relationships
+7. User can export reports to JSON/CSV for external analysis
+8. Retention settings automatically clean up old sessions

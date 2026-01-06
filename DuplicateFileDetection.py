@@ -294,6 +294,24 @@ class PhotoDatabase:
             logger.exception(f"Failed to check if hash exists: {e}")
             raise
 
+    def get_file_path_for_hash(self, file_hash):
+        """
+        Get the file path for a given hash.
+
+        Parameters:
+            file_hash (str): SHA-256 hash to look up
+
+        Returns:
+            str or None: File path if found, None otherwise
+        """
+        try:
+            self.cursor.execute("SELECT file_name FROM UniquePhotos WHERE file_hash = ? LIMIT 1", (file_hash,))
+            result = self.cursor.fetchone()
+            return result[0] if result else None
+        except Exception as e:
+            logger.debug(f"Failed to get file path for hash: {e}")
+            return None
+
     def has_partial_hash(self, partial_hash):
         """
         Check if a partial hash exists in the database.
@@ -824,7 +842,7 @@ def hash_file_partial(filename, num_bytes=constants.PARTIAL_HASH_BYTES):
 def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME, batch_size=constants.DEFAULT_BATCH_SIZE,
                    partial_hash_enabled=True, partial_hash_bytes=constants.PARTIAL_HASH_BYTES,
                    partial_hash_min_file_size=constants.PARTIAL_HASH_MIN_FILE_SIZE,
-                   config=None, progress_callback=None):
+                   config=None, progress_callback=None, audit_manager=None, session_id=None):
     """ Looks through a list of files and returns a list of duplicate and original files using two-stage hashing.
 
         Two-Stage Hashing Strategy:
@@ -957,7 +975,8 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                 # Get file size
                                 try:
                                     filtered_file["file_size"] = os.path.getsize(filename)
-                                except:
+                                except Exception as e:
+                                    logger.warning(f"Failed to get file size for {filename}: {e}")
                                     filtered_file["file_size"] = 0
 
                                 # Get image properties
@@ -973,7 +992,8 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                         try:
                                             exif_data = img._getexif()
                                             filtered_file["has_exif"] = exif_data is not None and len(exif_data) > 0
-                                        except:
+                                        except Exception as exif_e:
+                                            logger.debug(f"Failed to read EXIF from {filename}: {exif_e}")
                                             filtered_file["has_exif"] = False
                                 except Exception as e:
                                     # If we can't open the image, set defaults
@@ -989,13 +1009,30 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                     with Image.open(filename) as img:
                                         filtered_file["passes_dimensions"] = photo_filter._check_dimensions(img, filename)
                                         filtered_file["passes_square_check"] = photo_filter._check_square_icon(img, filename)
-                                except:
+                                except Exception as img_e:
+                                    logger.debug(f"Failed to check dimensions for {filename}: {img_e}")
                                     filtered_file["passes_dimensions"] = False
                                     filtered_file["passes_square_check"] = False
 
                                 filtered_file["passes_filename"] = photo_filter._check_filename(filename)
 
                                 filtered_files.append(filtered_file)
+
+                                # Log filtered file to audit
+                                if audit_manager and session_id:
+                                    try:
+                                        audit_manager.log_file_operation(
+                                            session_id=session_id,
+                                            source_path=filename,
+                                            operation='skip_filtered',
+                                            status='skipped',
+                                            file_size=filtered_file.get("file_size", 0),
+                                            filter_reason=filter_reason,
+                                            filter_details=f"W:{filtered_file.get('width', 0)}xH:{filtered_file.get('height', 0)}"
+                                        )
+                                    except Exception as audit_err:
+                                        logger.debug(f"Failed to log audit for filtered file: {audit_err}")
+
                                 pbar.update(1)
                                 continue
 
@@ -1048,6 +1085,30 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                     }
                                     duplicate_files.append(duplicate_file)
                                     files_processed += 1
+
+                                    # Log duplicate to audit and record relationship
+                                    if audit_manager and session_id:
+                                        try:
+                                            # Get original file path for this hash
+                                            original_path = db.get_file_path_for_hash(file_hash)
+                                            audit_manager.log_file_operation(
+                                                session_id=session_id,
+                                                source_path=filename,
+                                                operation='skip_duplicate',
+                                                status='skipped',
+                                                file_hash=file_hash,
+                                                file_size=file_size,
+                                                duplicate_of_hash=file_hash
+                                            )
+                                            audit_manager.record_duplicate(
+                                                session_id=session_id,
+                                                original_hash=file_hash,
+                                                original_path=original_path or 'unknown',
+                                                duplicate_path=filename
+                                            )
+                                        except Exception as audit_err:
+                                            logger.debug(f"Failed to log audit for duplicate: {audit_err}")
+
                                     pbar.update(1)
                                     continue
                                 else:
@@ -1086,6 +1147,29 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                 }
                                 duplicate_files.append(duplicate_file)
                                 files_processed += 1
+
+                                # Log duplicate to audit and record relationship
+                                if audit_manager and session_id:
+                                    try:
+                                        original_path = db.get_file_path_for_hash(file_hash)
+                                        audit_manager.log_file_operation(
+                                            session_id=session_id,
+                                            source_path=filename,
+                                            operation='skip_duplicate',
+                                            status='skipped',
+                                            file_hash=file_hash,
+                                            file_size=file_size,
+                                            duplicate_of_hash=file_hash
+                                        )
+                                        audit_manager.record_duplicate(
+                                            session_id=session_id,
+                                            original_hash=file_hash,
+                                            original_path=original_path or 'unknown',
+                                            duplicate_path=filename
+                                        )
+                                    except Exception as audit_err:
+                                        logger.debug(f"Failed to log audit for duplicate: {audit_err}")
+
                                 pbar.update(1)
                                 continue
 
@@ -1099,6 +1183,29 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                             }
                             duplicate_files.append(duplicate_file)
                             files_processed += 1
+
+                            # Log duplicate to audit and record relationship
+                            if audit_manager and session_id:
+                                try:
+                                    original_path = db.get_file_path_for_hash(file_hash)
+                                    audit_manager.log_file_operation(
+                                        session_id=session_id,
+                                        source_path=filename,
+                                        operation='skip_duplicate',
+                                        status='skipped',
+                                        file_hash=file_hash,
+                                        file_size=file_size,
+                                        duplicate_of_hash=file_hash
+                                    )
+                                    audit_manager.record_duplicate(
+                                        session_id=session_id,
+                                        original_hash=file_hash,
+                                        original_path=original_path or 'unknown',
+                                        duplicate_path=filename
+                                    )
+                                except Exception as audit_err:
+                                    logger.debug(f"Failed to log audit for duplicate: {audit_err}")
+
                             pbar.update(1)
                         else:
                             # NEW UNIQUE FILE - Save to database

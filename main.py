@@ -141,7 +141,7 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME, batch_size=constants.DEFAULT_BATCH_SIZE, progress_callback=None):
+def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME, batch_size=constants.DEFAULT_BATCH_SIZE, progress_callback=None, audit_manager=None, session_id=None):
     """
     Organize files by moving or copying them to the Destination directory.
 
@@ -151,6 +151,8 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
     database_path (str): Path to the SQLite database file
     batch_size (int): Number of files to process before committing to database
     progress_callback (callable): Optional callback function(organized, total, current_file, bytes_copied, total_bytes) for progress updates
+    audit_manager (AuditManager): Optional audit manager for logging file operations
+    session_id (str): Optional session ID for audit logging
 
     Returns:
     dict: Dictionary containing:
@@ -164,6 +166,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
         # Get settings from config object (already validated with defaults)
         total_files_processed = 0
         total_new_original_files = 0
+        total_errors = 0  # Track errors for audit
         current_file_being_processed = 0
         file_counter = 0  # Sequential counter for filename templates
 
@@ -191,7 +194,9 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                 partial_hash_enabled=config.partial_hash_enabled,
                 partial_hash_bytes=config.partial_hash_bytes,
                 partial_hash_min_file_size=config.partial_hash_min_file_size,
-                config=config  # Pass config for photo filtering
+                config=config,  # Pass config for photo filtering
+                audit_manager=audit_manager,
+                session_id=session_id
             )
             logger.info(f"The DuplicateFileDetection.find_duplicates returned = {results}")
 
@@ -241,7 +246,8 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                         fp = f["file_path"]
                         if os.path.exists(fp):
                             total_bytes += os.path.getsize(fp)
-                except:
+                except Exception as e:
+                    logger.warning(f"Failed to calculate total bytes: {e}")
                     total_bytes = 0  # If calculation fails, just use 0
 
             # Progress bar for copying/moving files
@@ -262,8 +268,8 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                     if progress_callback and os.path.exists(file_path):
                         try:
                             bytes_copied += os.path.getsize(file_path)
-                        except:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"Failed to get file size for progress tracking: {e}")
 
                     logger.info(f"file_path = {file_path}")
                     year, month, day, date_source, is_reliable = DuplicateFileDetection.get_creation_date(file_path)
@@ -353,15 +359,45 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                         logger.info("The original file has an original name that is not in the Stored files.  So write the file and continue.")
 
                     try:
+                        import time as time_module
+                        operation_start = time_module.time()
+                        operation_type = 'copy' if copy_files else 'move'
+                        operation_success = False
+
                         if copy_files and not move_files:
                             # use the copyfile not copy or copy2 in order to maintain the existing hash code of the original file!
                             shutil.copyfile(file_path, target_path)
                             logger.info(f"Copied {file_path} to {target_path}")
+                            operation_success = True
                         elif move_files and not copy_files:
                             shutil.move(file_path, target_path)
                             logger.info(f"Moved {file_path} to {target_path}")
+                            operation_success = True
                         else:
                             logger.info("ERROR - Move and Copy files are not supported simultaneously")
+
+                        # Log successful operation to audit
+                        if operation_success and audit_manager and session_id:
+                            try:
+                                operation_duration = int((time_module.time() - operation_start) * 1000)
+                                file_size = os.path.getsize(target_path) if os.path.exists(target_path) else 0
+                                file_hash = original_file.get("file_hash")
+
+                                audit_manager.log_file_operation(
+                                    session_id=session_id,
+                                    source_path=file_path,
+                                    operation=operation_type,
+                                    status='success',
+                                    destination_path=target_path,
+                                    file_hash=file_hash,
+                                    file_size=file_size,
+                                    creation_date=f"{year}-{month}-{day}",
+                                    date_source=date_source if 'date_source' in dir() else None,
+                                    date_reliable=is_reliable if 'is_reliable' in dir() else None,
+                                    duration_ms=operation_duration
+                                )
+                            except Exception as audit_err:
+                                logger.debug(f"Failed to log audit: {audit_err}")
 
                         # Update database with archive path after successful organization
                         try:
@@ -385,17 +421,19 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                                         logger.warning(f"File not found in UniquePhotos: {file_hash[:16]}...")
 
                                     # Record rename history if file renaming is enabled
+                                    # NOTE: Using existing cursor to avoid "database is locked" error
+                                    # (db_metadata.insert_rename_history opens a new connection)
                                     if db_metadata.is_file_rename_enabled():
                                         original_filename = os.path.basename(file_path)
                                         renamed_filename = os.path.basename(target_path)
 
                                         # Only record if filename actually changed
                                         if original_filename != renamed_filename:
-                                            db_metadata.insert_rename_history(
-                                                file_hash,
-                                                original_filename,
-                                                renamed_filename
-                                            )
+                                            cursor.execute("""
+                                                INSERT INTO FileRenameHistory
+                                                (file_hash, original_filename, renamed_filename, rename_timestamp)
+                                                VALUES (?, ?, ?, datetime('now'))
+                                            """, (file_hash, original_filename, renamed_filename))
                                             logger.debug(f"✓ Recorded rename history: {original_filename} → {renamed_filename}")
 
                                     # Update archive_path in UnreliableDates (if this file has unreliable date)
@@ -450,7 +488,26 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                         # image.save("./picture_name.png", format("png"))
 
                     except Exception as e:
+                        total_errors += 1
                         logger.exception(f"Failed to {'copy' if copy_files else 'move'} '{file_path}' to '{target_path}': {e}")
+
+                        # Log error to audit
+                        if audit_manager and session_id:
+                            try:
+                                import traceback as tb_module
+                                audit_manager.log_file_operation(
+                                    session_id=session_id,
+                                    source_path=file_path,
+                                    operation=operation_type if 'operation_type' in dir() else ('copy' if copy_files else 'move'),
+                                    status='failed',
+                                    destination_path=target_path,
+                                    file_hash=original_file.get("file_hash"),
+                                    error_code=type(e).__name__,
+                                    error_message=str(e),
+                                    error_traceback=tb_module.format_exc()
+                                )
+                            except Exception as audit_err:
+                                logger.debug(f"Failed to log audit error: {audit_err}")
                     finally:
                         # Update progress bar after each file (success or failure)
                         pbar.update(1)
@@ -471,6 +528,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             "total_duplicates": len(duplicate_files),
             "total_filtered": len(filtered_files),
             "total_unreliable_dates": unreliable_dates_count,
+            "total_errors": total_errors,
             "filter_statistics": filter_stats or {},
             "filtered_files": filtered_files
         }
@@ -481,11 +539,12 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
         organize_files_return = {
             "total_files_processed": total_files_processed,
             "total_new_original_files": total_new_original_files,
-            "total_duplicates": len(duplicate_files),
-            "total_filtered": len(filtered_files),
-            "total_unreliable_dates": unreliable_dates_count,
-            "filter_statistics": filter_stats or {},
-            "filtered_files": filtered_files
+            "total_duplicates": len(duplicate_files) if 'duplicate_files' in dir() else 0,
+            "total_filtered": len(filtered_files) if 'filtered_files' in dir() else 0,
+            "total_unreliable_dates": unreliable_dates_count if 'unreliable_dates_count' in dir() else 0,
+            "total_errors": total_errors,
+            "filter_statistics": filter_stats if 'filter_stats' in dir() else {},
+            "filtered_files": filtered_files if 'filtered_files' in dir() else []
         }
         return organize_files_return
 

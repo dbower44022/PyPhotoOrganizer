@@ -13,7 +13,10 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor, QFont
 import os
 import glob
+import logging
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 
 class ClickableLabel(QLabel):
@@ -398,9 +401,9 @@ class LogsTab(QWidget):
 
                     if entry_time < time_threshold:
                         show_entry = False
-                except:
-                    # If timestamp parsing fails, show the entry
-                    pass
+                except Exception as e:
+                    # If timestamp parsing fails, show the entry and log warning
+                    logger.warning(f"Failed to parse log timestamp '{entry.get('timestamp', '')}': {e}")
 
             if show_entry:
                 self._add_entry_to_table(entry)
