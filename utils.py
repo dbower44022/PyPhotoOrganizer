@@ -6,22 +6,43 @@ code duplication and maintain consistency.
 """
 
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import sys
 
+# Log rotation settings - each log file will be at most 5MB, keeping 3 backups
+# Total max log storage per module: 20MB (5MB x 4 files)
+LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB per log file
+LOG_BACKUP_COUNT = 3  # Keep 3 backup files (.log.1, .log.2, .log.3)
 
-def setup_logger(name, log_file, level=logging.DEBUG):
+
+def setup_logger(name, log_file, level=logging.DEBUG, max_bytes=None, backup_count=None):
     """
-    Configure and return a logger with both console and file handlers.
+    Configure and return a logger with both console and rotating file handlers.
+
+    Uses RotatingFileHandler to automatically rotate log files when they reach
+    a certain size, preventing unbounded log growth.
 
     Parameters:
         name (str): Name of the logger (typically __name__ from calling module)
         log_file (str): Path to the log file
         level (int): Logging level (default: logging.DEBUG)
+        max_bytes (int): Max size per log file in bytes (default: 5MB)
+        backup_count (int): Number of backup files to keep (default: 3)
 
     Returns:
         logging.Logger: Configured logger instance
+
+    Log Rotation:
+        When the log file reaches max_bytes, it's renamed to log_file.1,
+        and a new empty log_file is created. Old backups are shifted
+        (log_file.1 -> log_file.2, etc.) and the oldest is deleted.
     """
+    if max_bytes is None:
+        max_bytes = LOG_MAX_BYTES
+    if backup_count is None:
+        backup_count = LOG_BACKUP_COUNT
+
     # Create logger
     logger = logging.getLogger(name)
     logger.setLevel(level)
@@ -41,8 +62,14 @@ def setup_logger(name, log_file, level=logging.DEBUG):
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
-    # Create file handler
-    file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+    # Create rotating file handler (automatically rotates when file reaches max_bytes)
+    file_handler = RotatingFileHandler(
+        log_file,
+        mode="a",
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8"
+    )
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 

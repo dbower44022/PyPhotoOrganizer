@@ -19,6 +19,7 @@ from ui.settings_tab import SettingsTab
 from ui.database_tab import DatabaseTab
 from ui.filtered_files_tab import FilteredFilesTab
 from ui.date_corrections_tab import DateCorrectionsTab
+from ui.import_history_tab import ImportHistoryTab
 from ui.database_selector_dialog import DatabaseSelectorDialog
 from ui.worker import ProcessingWorker
 from database_metadata import DatabaseMetadata
@@ -80,6 +81,7 @@ class MainWindow(QMainWindow):
         self.settings_tab = SettingsTab()
         self.database_tab = DatabaseTab()
         self.date_corrections_tab = DateCorrectionsTab()
+        self.import_history_tab = ImportHistoryTab()
 
         # Add tabs
         self.tabs.addTab(self.setup_tab, "Setup")
@@ -90,6 +92,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.settings_tab, "Settings")
         self.tabs.addTab(self.database_tab, "Database")
         self.tabs.addTab(self.date_corrections_tab, "Date Corrections")
+        self.tabs.addTab(self.import_history_tab, "Import History")
 
         # Connect signals
         self.setup_tab.start_clicked.connect(self.start_processing)
@@ -336,6 +339,9 @@ class MainWindow(QMainWindow):
 
         # Update date corrections tab with database
         self.date_corrections_tab.set_database(self.database_metadata)
+
+        # Update import history tab with database
+        self.import_history_tab.set_database(database_path)
 
         # Update window title
         metadata = self.database_metadata.get_metadata()

@@ -632,8 +632,8 @@ class DateCorrectionsTab(QWidget):
                 mtime = os.path.getmtime(record['source_path'])
                 date = datetime.datetime.fromtimestamp(mtime)
                 return date.strftime('%Y-%m-%d')
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to get file date for {record.get('source_path', 'unknown')}: {e}")
         return "-"
 
     def on_selection_changed(self):

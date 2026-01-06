@@ -11,8 +11,11 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QIcon, QColor
 import os
+import logging
 from datetime import datetime
 from database_metadata import DatabaseMetadata
+
+logger = logging.getLogger(__name__)
 
 
 class SetupTab(QWidget):
@@ -323,7 +326,8 @@ class SetupTab(QWidget):
                 # Parse ISO format and display user-friendly
                 dt = datetime.fromisoformat(last_scanned)
                 scanned_text = dt.strftime("%Y-%m-%d %H:%M")
-            except:
+            except Exception as e:
+                logger.warning(f"Failed to parse last_scanned timestamp '{last_scanned}': {e}")
                 scanned_text = "Unknown"
         else:
             scanned_text = "Never"

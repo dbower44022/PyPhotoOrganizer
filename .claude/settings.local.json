@@ -13,7 +13,9 @@
       "Bash(timeout 5 .venv/bin/python:*)",
       "Bash(grep:*)",
       "Bash(cat:*)",
-      "Bash(sqlite3:*)"
+      "Bash(sqlite3:*)",
+      "Bash(timeout 10 python3:*)",
+      "Bash(ls:*)"
     ]
   }
 }
