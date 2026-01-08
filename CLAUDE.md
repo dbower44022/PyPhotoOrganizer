@@ -170,6 +170,14 @@ python TestRoutines.py
   - Copy-verify-delete pattern
   - Empty directory cleanup
   - Database path updates
+- **`reprocess_worker.py`** (NEW in v2.3): Background file reprocessing from import history
+  - Rehashes and reprocesses files that were previously skipped, filtered, or errored
+  - Automatic duplicate detection (checks both current and historical hashes)
+  - Uses current organization template and filename template settings
+  - Creates audit session with operation mode 'reprocess_copy' or 'reprocess_move'
+  - Per-file operation logging with timing and status
+  - Progress signals for UI updates
+  - Cancellation support
 
 **Database**: SQLite database (configurable via `settings.json`, defaults to `PhotoDB.db`)
 - **Table `DatabaseMetadata`**: Stores database metadata and configuration
@@ -508,11 +516,13 @@ Existing databases are automatically migrated when opened:
   - `validate(template)`: Security checks (path traversal prevention, dangerous characters)
   - `get_example_output(template)`: Generate preview for user feedback
 
-**Template Variables**:
-- **Date/Time**: `{year}`, `{month}`, `{day}`, `{hour}`, `{minute}`, `{second}`
+**Template Variables** (case-insensitive):
+- **Date/Time**: `{year}`, `{month}`, `{day}`, `{month_name}`, `{month_sname}`, `{day_name}`, `{day_sname}`, `{hour}`, `{minute}`, `{second}`
 - **Original Filename**: `{original_name}`, `{original_name_no_ext}`, `{ext}`
 - **Folder Names**: `{folder_name}` (immediate parent), `{parent_folder_name}` (parent's parent)
 - **Sequential Counter**: `{counter}` or `{counter:04d}` (zero-padded format specifier)
+
+**Note**: All placeholders are case-insensitive. `{year}`, `{YEAR}`, `{Year}`, and `{YeAr}` all produce identical results.
 
 **Example Templates**:
 ```python
@@ -523,6 +533,14 @@ Existing databases are automatically migrated when opened:
 # Preserve original with date prefix
 "{year}-{month}-{day}_{original_name}"
 # Original: vacation_beach.jpg → Result: 2026-01-04_vacation_beach.jpg
+
+# Month and day full names
+"{year}_{month_name}_{day_name}_{counter:03d}"
+# Original: IMG_001.jpg → Result: 2026_January_Wednesday_001.jpg
+
+# Month and day short names (3-letter abbreviations)
+"{year}_{month_sname}_{day_sname}_{counter:03d}"
+# Original: IMG_001.jpg → Result: 2026_Jan_Wed_001.jpg
 
 # Sequential numbering with padding
 "photo_{counter:04d}"
@@ -585,6 +603,96 @@ CREATE TABLE FileRenameHistory (
 - Original filenames stored in `FileRenameHistory` for future undo capability
 - Template stored in database (not in settings.json)
 
+### Folder Organization Template System (v2.3+)
+
+**Purpose**: Provide flexible, template-based folder structure organization for photos and videos with consistent naming that matches the filename template system.
+
+**organization_template.py** - Template parsing and folder path generation
+- `OrganizationTemplate` class: Handles template parsing and validation
+  - `parse(template, date)`: Generate folder path from template
+  - `validate(template)`: Security checks (path traversal prevention, invalid characters)
+  - `generate_examples(template)`: Generate preview paths for user feedback
+  - `get_preset_by_name()`: Retrieve predefined organization presets
+
+**Template Variables** (matches filename template for consistency, case-insensitive):
+- **Date**: `{year}`, `{month}`, `{day}`, `{month_name}`, `{month_sname}`, `{day_name}`, `{day_sname}`
+- **Combined formats**: `{month}-{month_sname}` (e.g., "02-Feb"), `{day}-{day_sname}` (e.g., "03-Mon")
+- **Legacy compatibility**: `{YYYY}`, `{MM}`, `{DD}`, `{MM-Month_Short}`, `{DD-Day_Short}` still supported
+
+**Note**: All placeholders are case-insensitive. `{year}`, `{YEAR}`, `{Year}` all work identically.
+
+**Predefined Presets**:
+```python
+# By Day (with month/day names)
+"{year}/{month}-{month_sname}/{day}-{day_sname}"
+# Result: 2025/02-Feb/03-Mon/
+
+# By Month (with month name)
+"{year}/{month}-{month_sname}"
+# Result: 2025/02-Feb/
+
+# By Year
+"{year}"
+# Result: 2025/
+
+# By Day (numeric)
+"{year}/{month}/{day}"
+# Result: 2025/02/03/
+```
+
+**Example Custom Templates**:
+```python
+# Month name folder organization
+"{year}/{month_name}"
+# Result: 2025/February/
+
+# Short month names for compact folders
+"{year}/{month_sname}"
+# Result: 2025/Feb/
+
+# Day name organization (unusual but supported)
+"{year}/{day_name}"
+# Result: 2025/Monday/
+
+# Combined readable format
+"{year}/{month_name}/{day}-{day_sname}"
+# Result: 2025/February/03-Mon/
+```
+
+**Integration Points**:
+1. **Settings Tab** (`ui/settings_tab.py`):
+   - Preset dropdown with common templates
+   - Custom template editor with quick-insert buttons
+   - Live preview showing example folder paths
+   - Template validation with error messages
+   - Help text showing all available variables
+
+2. **Main Processing** (`main.py`):
+   - Parses organization template to determine destination folder
+   - Creates folder structure based on file creation date
+   - Combines organization path with filename template
+
+3. **Date Correction** (`ui/reorganize_worker.py`):
+   - Recalculates folder path when dates are corrected
+   - Moves files to new organization structure
+
+**Security Features**:
+- Path traversal prevention (blocks `..`)
+- Absolute path blocking
+- Invalid character filtering
+- Placeholder validation
+
+**Backward Compatibility**:
+- Legacy placeholders (`{YYYY}`, `{MM}`, `{DD}`, etc.) fully supported
+- Existing archives continue to work without changes
+- New templates use consistent lowercase naming (`{year}`, `{month}`, `{day}`)
+
+**Consistency with Filename Template**:
+Both systems now use identical variable naming:
+- Organization: `{year}/{month_sname}/{day_sname}` → `2025/Feb/Mon/`
+- Filename: `{year}_{month_sname}_{day_sname}_{counter:03d}` → `2025_Feb_Mon_001.jpg`
+- Full path: `2025/Feb/Mon/2025_Feb_Mon_001.jpg`
+
 ### Date Correction System (NEW in v2.2)
 
 **Purpose**: Identify files with unreliable date information and provide tools to correct them, ensuring files are organized in the correct date-based folders.
@@ -612,11 +720,21 @@ During file processing, the system automatically flags files with unreliable dat
 
 Flagged files are automatically inserted into the `UnreliableDates` table during processing.
 
-**Date Corrections Tab (GUI)**:
+**Date Corrections Tab (GUI)** (v2.2+):
+- **Shows ALL Sessions**: Displays files with unreliable dates from all import sessions (persistent across sessions)
+- **Search Box** (v2.3):
+  - Text search across all grid columns (filename, paths, dates, reasons)
+  - 300ms debounce for smooth typing
+  - Updates count: "Showing X of Y files with unreliable dates"
 - **Grid View**: Sortable table displaying all flagged files
   - Columns: Checkbox, Filename, Source Location, Archive Location, Detected Date, EXIF Date, File Date, Flag Reason, Status
-  - Filter by flag reason (checkboxes for no_exif, year_1000, suspicious, user_specified)
-  - Multi-select for batch operations
+  - **Filter by flag reason** (checkboxes: no_exif, year_1000, suspicious, user_specified)
+    - Multiple checked = OR logic (shows files matching ANY checked reason)
+    - None checked = shows ALL flag reasons
+  - **Filter by status** (checkboxes: Pending, Corrected, Reorganized)
+    - Multiple checked = OR logic (shows files matching ANY checked status)
+    - None checked = shows ALL statuses
+  - Multi-select for batch operations (Shift/Ctrl selection)
 - **Preview Panel**: Shows image preview and detailed metadata for selected file
 - **Single File Correction**: Opens dialog to correct individual file date
 - **Batch Correction**: Two modes:
@@ -1293,6 +1411,8 @@ Scenario: User scanned old family photos. Scanner assigned current date (2024) i
   - Retention management: `get_retention_settings()`, `set_retention_settings()`, `apply_retention_policy()`
   - Report generation: `generate_session_report()`, `generate_duplicate_report()`, `generate_error_report()`
   - Export: `export_session_to_json()`, `export_session_to_csv()`, `export_duplicates_to_csv()`
+  - **NEW in v2.3**: `get_aggregate_statistics()` - Returns aggregate stats across all sessions
+  - **NEW in v2.3**: `get_all_file_logs()` - Retrieves file operations from all sessions (up to 10,000 records)
 
 **Database Schema** (new tables in audit_manager.py):
 ```sql
@@ -1362,14 +1482,14 @@ CREATE TABLE AuditRetentionSettings (
 
 **Import History Tab** (`ui/import_history_tab.py`):
 - **Layout** (top to bottom):
-  - Row 1: Session dropdown, Status filter, Refresh button, Result/Started/Duration display
+  - Row 1: Session dropdown (includes "All Sessions" option), Status filter, Refresh button, Result/Started/Duration display
   - Row 2: Statistics (Scanned, Processed, New, Duplicates, Filtered, Errors)
   - Vertical splitter separating grid from preview
   - File operations grid with 8 columns (sortable, resizable)
   - Horizontal splitter separating preview from details
   - Image preview panel with rubber band zoom (drag to zoom, double-click reset)
   - File details panel with EXIF metadata
-  - Export buttons: JSON, CSV, Duplicates CSV, Delete Session
+  - Action buttons: Export JSON/CSV/Duplicates, Open File, Open Folder, Copy Path, Process File(s), Delete Session
 
 - **Grid Features** (optimized for 100k+ records):
   - Columns: Source Folder, Source Filename, Dest Folder, Dest Filename, Operation, Status, Hash, Details
@@ -1394,6 +1514,30 @@ CREATE TABLE AuditRetentionSettings (
   - File information (size, modified date)
   - Image properties (dimensions, format, color mode)
   - EXIF data (date taken, camera, exposure, aperture, ISO, focal length, GPS)
+
+- **"All Sessions" Feature** (v2.3):
+  - First option in session dropdown
+  - Shows aggregate statistics across all import sessions
+  - Displays up to 10,000 most recent file operations from all sessions
+  - Export and Delete Session buttons disabled (per-session actions only)
+  - Useful for viewing complete import history
+
+- **File Action Buttons** (v2.3):
+  - **Open File**: Opens selected file with default application (platform-independent)
+  - **Open Folder**: Opens folder containing the file in file manager
+  - **Copy Path**: Copies file path to clipboard
+  - Buttons automatically enable/disable based on file selection
+  - Works with both source and destination paths (prefers destination)
+
+- **File Reprocessing** (v2.3):
+  - Select files from import history and click "Process File(s)"
+  - Reprocesses files that were previously skipped, filtered, or errored
+  - Creates new audit session with operation mode 'reprocess_copy'
+  - Automatic duplicate detection (skips files already in archive)
+  - Uses current organization template and filename template settings
+  - Shows progress dialog with per-file status
+  - Results summary with session ID for audit trail
+  - Disabled when "All Sessions" is selected (requires specific session context)
 
 - Auto-refresh on tab display
 

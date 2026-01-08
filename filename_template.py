@@ -2,10 +2,11 @@
 Filename Template Module
 
 Provides template-based filename generation with support for:
-- Date/time variables ({year}, {month}, {day}, {hour}, {minute}, {second})
+- Date/time variables ({year}, {month}, {day}, {month_name}, {month_sname}, {day_name}, {day_sname}, {hour}, {minute}, {second})
 - Original filename preservation ({original_name}, {original_name_no_ext}, {ext})
 - Sequential counters ({counter}, {counter:04d})
 - Format specifiers for zero-padding
+- Case-insensitive placeholders ({year}, {YEAR}, {Year} all work the same)
 
 This module integrates with the file organization system to allow users to
 customize how files are renamed when copied to the archive.
@@ -13,6 +14,8 @@ customize how files are renamed when copied to the archive.
 Example Templates:
     {year}{month}{day}_{hour}{minute}{second}              → 20250203_143015.jpg
     {year}-{month}-{day}_{original_name}                   → 2025-02-03_vacation_beach.jpg
+    {year}_{month_name}_{day_name}_{counter:03d}           → 2025_February_Monday_001.jpg
+    {YEAR}_{MONTH_SNAME}_{DAY_SNAME}_{counter:03d}         → 2025_Feb_Mon_001.jpg (case-insensitive)
     photo_{counter:04d}                                     → photo_0001.jpg
     {year}{month}{day}_{counter:03d}                       → 20250203_001.jpg
     {original_name}                                         → My Photo.jpg (default)
@@ -39,7 +42,7 @@ class FilenameTemplate:
 
     # Supported placeholders (for documentation and validation)
     VALID_PLACEHOLDERS = [
-        'year', 'month', 'day',
+        'year', 'month', 'day', 'month_name', 'month_sname', 'day_name', 'day_sname',
         'hour', 'minute', 'second',
         'original_name', 'original_name_no_ext', 'ext',
         'folder_name', 'parent_folder_name',
@@ -96,24 +99,28 @@ class FilenameTemplate:
 
             result = template
 
-            # Replace date/time placeholders
-            result = result.replace('{year}', str(file_date.year))
-            result = result.replace('{month}', f"{file_date.month:02d}")
-            result = result.replace('{day}', f"{file_date.day:02d}")
-            result = result.replace('{hour}', f"{file_date.hour:02d}")
-            result = result.replace('{minute}', f"{file_date.minute:02d}")
-            result = result.replace('{second}', f"{file_date.second:02d}")
+            # Replace date/time placeholders (case-insensitive)
+            result = re.sub(r'\{year\}', str(file_date.year), result, flags=re.IGNORECASE)
+            result = re.sub(r'\{month\}', f"{file_date.month:02d}", result, flags=re.IGNORECASE)
+            result = re.sub(r'\{day\}', f"{file_date.day:02d}", result, flags=re.IGNORECASE)
+            result = re.sub(r'\{month_name\}', file_date.strftime('%B'), result, flags=re.IGNORECASE)   # Full month name (e.g., "January")
+            result = re.sub(r'\{month_sname\}', file_date.strftime('%b'), result, flags=re.IGNORECASE)  # Short month name (e.g., "Jan")
+            result = re.sub(r'\{day_name\}', file_date.strftime('%A'), result, flags=re.IGNORECASE)     # Full day name (e.g., "Monday")
+            result = re.sub(r'\{day_sname\}', file_date.strftime('%a'), result, flags=re.IGNORECASE)    # Short day name (e.g., "Mon")
+            result = re.sub(r'\{hour\}', f"{file_date.hour:02d}", result, flags=re.IGNORECASE)
+            result = re.sub(r'\{minute\}', f"{file_date.minute:02d}", result, flags=re.IGNORECASE)
+            result = re.sub(r'\{second\}', f"{file_date.second:02d}", result, flags=re.IGNORECASE)
 
-            # Replace filename placeholders
-            result = result.replace('{original_name}', original_name)
-            result = result.replace('{original_name_no_ext}', name_no_ext)
-            result = result.replace('{ext}', ext)
+            # Replace filename placeholders (case-insensitive)
+            result = re.sub(r'\{original_name\}', original_name, result, flags=re.IGNORECASE)
+            result = re.sub(r'\{original_name_no_ext\}', name_no_ext, result, flags=re.IGNORECASE)
+            result = re.sub(r'\{ext\}', ext, result, flags=re.IGNORECASE)
 
-            # Replace folder name placeholders
-            result = result.replace('{folder_name}', folder_name)
-            result = result.replace('{parent_folder_name}', parent_folder_name)
+            # Replace folder name placeholders (case-insensitive)
+            result = re.sub(r'\{folder_name\}', folder_name, result, flags=re.IGNORECASE)
+            result = re.sub(r'\{parent_folder_name\}', parent_folder_name, result, flags=re.IGNORECASE)
 
-            # Handle counter with format specifier
+            # Handle counter with format specifier (case-insensitive)
             # Pattern: {counter:04d} → 0001, {counter:03d} → 001, {counter} → 1
             counter_pattern = r'\{counter(?::(\d+)d)?\}'
 
@@ -125,7 +132,7 @@ class FilenameTemplate:
                 else:
                     return str(counter)
 
-            result = re.sub(counter_pattern, replace_counter, result)
+            result = re.sub(counter_pattern, replace_counter, result, flags=re.IGNORECASE)
 
             # If template doesn't include extension, append original extension
             if not os.path.splitext(result)[1]:
@@ -167,28 +174,35 @@ class FilenameTemplate:
         if '..' in template or '/' in template or '\\' in template:
             return False, "Template cannot contain path separators or '..' sequences"
 
-        # Check for dangerous characters (Windows/Linux filename restrictions)
+        # Extract placeholders first (we'll check them separately)
+        placeholder_pattern = r'\{([^}]+)\}'
+        placeholders = re.findall(placeholder_pattern, template)
+
+        # Remove all placeholders from template to check for dangerous chars outside of them
+        template_without_placeholders = re.sub(r'\{[^}]+\}', '', template)
+
+        # Check for dangerous characters outside placeholders (Windows/Linux filename restrictions)
+        # Note: ':' is allowed inside {counter:04d} format specifiers
         dangerous_chars = ['<', '>', ':', '"', '|', '?', '*']
         for char in dangerous_chars:
-            if char in template:
+            if char in template_without_placeholders:
                 return False, f"Template cannot contain '{char}' character"
 
-        # Check for valid placeholders
-        pattern = r'\{([^}]+)\}'
-        placeholders = re.findall(pattern, template)
-
         for placeholder in placeholders:
-            # Handle counter with format specifier
-            if placeholder.startswith('counter'):
-                if placeholder == 'counter':
+            # Normalize to lowercase for case-insensitive comparison
+            placeholder_lower = placeholder.lower()
+
+            # Handle counter with format specifier (case-insensitive)
+            if placeholder_lower.startswith('counter'):
+                if placeholder_lower == 'counter':
                     continue
                 # Validate format specifier: counter:04d
-                if not re.match(r'^counter:\d+d$', placeholder):
+                if not re.match(r'^counter:\d+d$', placeholder_lower):
                     return False, f"Invalid counter format: {{{placeholder}}} (use {{counter}} or {{counter:04d}})"
                 continue
 
-            # Check if placeholder is valid
-            if placeholder not in FilenameTemplate.VALID_PLACEHOLDERS:
+            # Check if placeholder is valid (case-insensitive)
+            if placeholder_lower not in FilenameTemplate.VALID_PLACEHOLDERS:
                 return False, f"Unknown placeholder: {{{placeholder}}}"
 
         logger.debug(f"Template validation passed: {template}")

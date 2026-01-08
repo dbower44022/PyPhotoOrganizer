@@ -2,6 +2,14 @@
 Organization Template System
 
 Provides flexible folder structure templates for organizing photos and videos.
+
+Template variables match the filename template system for consistency:
+- {year}, {month}, {day} - Numeric date components
+- {month_name}, {day_name} - Full names (January, Monday)
+- {month_sname}, {day_sname} - Short names (Jan, Mon)
+- Case-insensitive: {year}, {YEAR}, {Year} all work identically
+
+Legacy placeholders ({YYYY}, {MM}, {DD}, etc.) are still supported for backward compatibility.
 """
 
 import re
@@ -14,35 +22,55 @@ class OrganizationTemplate:
     """
     Parse and apply organization templates for file organization.
 
-    Supports placeholders like {YYYY}, {MM}, {DD}, {Month_Short}, etc.
+    Supports both new consistent placeholders ({year}, {month}, {day}, {month_name}, etc.)
+    and legacy placeholders ({YYYY}, {MM}, {DD}, etc.) for backward compatibility.
     """
 
-    # Predefined organization presets
+    # Predefined organization presets (updated to use new naming convention)
     PRESETS = {
         'day_with_names': {
             'name': 'By Day (with month/day names)',
-            'template': '{YYYY}/{MM-Month_Short}/{DD-Day_Short}',
+            'template': '{year}/{month}-{month_sname}/{day}-{day_sname}',
             'description': 'Photos organized by day with readable month and day names. Easy to browse chronologically and find photos from a specific date.',
         },
         'month_with_name': {
             'name': 'By Month (with month name)',
-            'template': '{YYYY}/{MM-Month_Short}',
+            'template': '{year}/{month}-{month_sname}',
             'description': 'Photos organized by month with readable month names. Fewer folders, good for finding photos from a specific month.',
         },
         'year_only': {
             'name': 'By Year',
-            'template': '{YYYY}',
+            'template': '{year}',
             'description': 'Photos organized only by year. Minimal folder structure, all photos from each year in one folder.',
         },
         'legacy_default': {
-            'name': 'By Day (legacy)',
-            'template': '{YYYY}/{MM}/{DD}',
+            'name': 'By Day (numeric)',
+            'template': '{year}/{month}/{day}',
             'description': 'Classic date-based organization with numeric month and day. Compatible with existing archives.',
         },
     }
 
-    # Valid placeholders and their functions
+    # Valid placeholders and their functions (new naming convention)
     PLACEHOLDERS = {
+        # Year
+        '{year}': lambda dt: dt.strftime('%Y'),        # 2025
+        '{year_short}': lambda dt: dt.strftime('%y'),  # 25
+
+        # Month
+        '{month}': lambda dt: dt.strftime('%m'),       # 02 (zero-padded)
+        '{month_name}': lambda dt: dt.strftime('%B'),  # February
+        '{month_sname}': lambda dt: dt.strftime('%b'), # Feb
+
+        # Day
+        '{day}': lambda dt: dt.strftime('%d'),         # 03 (zero-padded)
+        '{day_name}': lambda dt: dt.strftime('%A'),    # Monday
+        '{day_sname}': lambda dt: dt.strftime('%a'),   # Mon
+
+        # Combined formats (for convenience)
+        '{month}-{month_sname}': lambda dt: f"{dt.strftime('%m')}-{dt.strftime('%b')}",  # 02-Feb
+        '{day}-{day_sname}': lambda dt: f"{dt.strftime('%d')}-{dt.strftime('%a')}",      # 03-Mon
+
+        # Legacy placeholders (for backward compatibility)
         '{YYYY}': lambda dt: dt.strftime('%Y'),
         '{YY}': lambda dt: dt.strftime('%y'),
         '{MM}': lambda dt: dt.strftime('%m'),
@@ -63,20 +91,61 @@ class OrganizationTemplate:
         Convert template + date to actual folder path.
 
         Args:
-            template: Template string with placeholders
+            template: Template string with placeholders (case-insensitive)
             date: Date to use for placeholders
 
         Returns:
             Resolved path string
 
-        Example:
-            >>> parse('{YYYY}/{MM-Month_Short}/{DD}', datetime(2025, 2, 3))
+        Examples:
+            >>> parse('{year}/{month}-{month_sname}/{day}', datetime(2025, 2, 3))
             '2025/02-Feb/03'
+            >>> parse('{Year}/{Month_Name}', datetime(2025, 2, 3))  # Case-insensitive
+            '2025/February'
+            >>> parse('{YYYY}/{MM}/{DD}', datetime(2025, 2, 3))  # Legacy format
+            '2025/02/03'
         """
         path = template
-        for placeholder, func in cls.PLACEHOLDERS.items():
-            if placeholder in path:
-                path = path.replace(placeholder, func(date))
+
+        # Process combined placeholders first (to avoid partial replacements)
+        # e.g., '{month}-{month_sname}' should be processed before '{month}'
+        # Using regex with IGNORECASE for case-insensitive matching
+        combined_placeholders = [
+            (r'\{month\}-\{month_sname\}', lambda dt: f"{dt.strftime('%m')}-{dt.strftime('%b')}"),
+            (r'\{day\}-\{day_sname\}', lambda dt: f"{dt.strftime('%d')}-{dt.strftime('%a')}"),
+            (r'\{MM-Month_Short\}', lambda dt: f"{dt.strftime('%m')}-{dt.strftime('%b')}"),  # Legacy
+            (r'\{DD-Day_Short\}', lambda dt: f"{dt.strftime('%d')}-{dt.strftime('%a')}"),    # Legacy
+        ]
+
+        for pattern, func in combined_placeholders:
+            path = re.sub(pattern, func(date), path, flags=re.IGNORECASE)
+
+        # Then process individual placeholders (case-insensitive)
+        individual_placeholders = {
+            r'\{year\}': lambda dt: dt.strftime('%Y'),
+            r'\{year_short\}': lambda dt: dt.strftime('%y'),
+            r'\{month\}': lambda dt: dt.strftime('%m'),
+            r'\{month_name\}': lambda dt: dt.strftime('%B'),
+            r'\{month_sname\}': lambda dt: dt.strftime('%b'),
+            r'\{day\}': lambda dt: dt.strftime('%d'),
+            r'\{day_name\}': lambda dt: dt.strftime('%A'),
+            r'\{day_sname\}': lambda dt: dt.strftime('%a'),
+            # Legacy placeholders
+            r'\{YYYY\}': lambda dt: dt.strftime('%Y'),
+            r'\{YY\}': lambda dt: dt.strftime('%y'),
+            r'\{MM\}': lambda dt: dt.strftime('%m'),
+            r'\{M\}': lambda dt: str(int(dt.strftime('%m'))),
+            r'\{Month_Name\}': lambda dt: dt.strftime('%B'),
+            r'\{Month_Short\}': lambda dt: dt.strftime('%b'),
+            r'\{DD\}': lambda dt: dt.strftime('%d'),
+            r'\{D\}': lambda dt: str(int(dt.strftime('%d'))),
+            r'\{Day_Name\}': lambda dt: dt.strftime('%A'),
+            r'\{Day_Short\}': lambda dt: dt.strftime('%a'),
+        }
+
+        for pattern, func in individual_placeholders.items():
+            path = re.sub(pattern, func(date), path, flags=re.IGNORECASE)
+
         return path
 
     @classmethod
@@ -111,15 +180,21 @@ class OrganizationTemplate:
         placeholder_pattern = r'\{[^}]+\}'
         found_placeholders = re.findall(placeholder_pattern, template)
 
-        # Check if all placeholders are valid
+        # Check if all placeholders are valid (case-insensitive)
         for placeholder in found_placeholders:
-            if placeholder not in cls.PLACEHOLDERS:
+            # Normalize to lowercase for comparison
+            placeholder_lower = placeholder.lower()
+            # Get all valid placeholders in lowercase
+            valid_placeholders_lower = [p.lower() for p in cls.PLACEHOLDERS.keys()]
+
+            if placeholder_lower not in valid_placeholders_lower:
                 return False, f"Invalid placeholder: {placeholder}. Valid placeholders: {', '.join(cls.PLACEHOLDERS.keys())}"
 
-        # Check for invalid characters (after removing placeholders)
+        # Check for invalid characters (after removing placeholders - case insensitive)
         temp_without_placeholders = template
         for placeholder in cls.PLACEHOLDERS.keys():
-            temp_without_placeholders = temp_without_placeholders.replace(placeholder, 'X')
+            # Use case-insensitive replacement
+            temp_without_placeholders = re.sub(re.escape(placeholder), 'X', temp_without_placeholders, flags=re.IGNORECASE)
 
         # Valid characters: alphanumeric, space, dash, underscore, forward slash
         invalid_chars = re.findall(r'[^a-zA-Z0-9 \-_/]', temp_without_placeholders)
