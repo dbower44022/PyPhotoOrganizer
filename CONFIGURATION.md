@@ -2,7 +2,8 @@
 
 > Complete reference for all PyPhotoOrganizer settings
 
-**Last Updated:** 2026-01-02
+**Last Updated:** 2026-01-06
+**Version:** 2.3.1
 
 ---
 
@@ -754,7 +755,38 @@ custom = config.get('custom_setting', default='fallback')
 
 ## Migration Guide
 
-### Upgrading from Version 1.x
+### Upgrading from Version 2.2 to 2.3
+
+**Changes in Version 2.3:**
+
+1. **New Features:**
+   - Import Audit System (automatic - no settings required)
+   - Import History tab in GUI
+   - Retention settings for audit data (GUI Settings tab)
+
+2. **Database Changes:**
+   - New tables: `ImportSession`, `FileProcessingLog`, `DuplicateMapping`, `AuditRetentionSettings`
+   - Tables created automatically on first run
+
+3. **No configuration changes required** - fully backward compatible
+
+### Upgrading from Version 2.0 to 2.2
+
+**Changes in Version 2.2:**
+
+1. **New Features:**
+   - Date Correction System (no settings - database-only)
+   - File Renaming (configured in GUI Settings tab per-database)
+   - Hash History System (automatic)
+
+2. **Database Changes:**
+   - New tables: `UnreliableDates`, `FileHashHistory`, `FileRenameHistory`
+   - New columns in `DatabaseMetadata`: `enable_file_rename`, `filename_template`
+   - Tables/columns created automatically
+
+3. **No configuration changes required** - fully backward compatible
+
+### Upgrading from Version 1.x to 2.0
 
 **Changes in Version 2.0:**
 
@@ -900,4 +932,4 @@ cp settings.example.json settings.json
 
 ---
 
-*Last updated: 2026-01-02*
+*Last updated: 2026-01-06*

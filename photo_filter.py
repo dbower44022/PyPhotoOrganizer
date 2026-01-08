@@ -3,6 +3,9 @@ Photo filtering module to identify and exclude non-photographs.
 
 This module provides functionality to filter out icons, web graphics, thumbnails,
 and other small images that are not actual photographs.
+
+Note: Video files are automatically passed through (not filtered) since they
+cannot be analyzed with PIL image methods.
 """
 
 import logging
@@ -12,6 +15,12 @@ from PIL import Image
 
 import utils
 import constants
+
+
+def _is_video_file(file_path: str) -> bool:
+    """Check if file is a video based on extension."""
+    file_ext = os.path.splitext(file_path)[1].lower()
+    return file_ext in [ext.lower() for ext in constants.VIDEO_EXTENSIONS]
 
 # Configure logging using shared utility
 logger = utils.setup_logger(__name__, "photo_filter.log")
@@ -74,9 +83,18 @@ class PhotoFilter:
 
         Returns:
             bool: True if file appears to be a photo, False if it should be filtered
+
+        Note:
+            Video files are automatically passed through (return True) since
+            they cannot be analyzed with PIL and have different metadata structures.
         """
         if not self.enabled:
             return True  # Filter disabled, accept all files
+
+        # Video files pass through - they're handled separately
+        if _is_video_file(file_path):
+            logger.debug(f"Video file detected, passing through: {file_path}")
+            return True
 
         self.total_checked += 1
 
@@ -188,6 +206,10 @@ class PhotoFilter:
             str or None: Reason for filtering, or None if file is a photo
         """
         if not self.enabled:
+            return None
+
+        # Video files are never filtered
+        if _is_video_file(file_path):
             return None
 
         if not self._check_filename(file_path):

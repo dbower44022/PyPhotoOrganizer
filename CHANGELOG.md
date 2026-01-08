@@ -5,7 +5,323 @@ All notable changes to PyPhotoOrganizer will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1] - 2026-01-06
+
+### Added - Database Reliability Improvements
+
+**WAL Mode and Timeout Handling:**
+- All database connections now use WAL (Write-Ahead Logging) mode
+- 30-second connection timeouts prevent "database is locked" errors
+- Retry logic with exponential backoff for audit logging
+- Better concurrent access support for main processing + audit logging
+
+**Log Rotation:**
+- Automatic log rotation at 5MB file size
+- Keeps 3 backup files (total ~20MB max per module)
+- Prevents unbounded log growth during long-running operations
+- Uses Python's RotatingFileHandler
+
+**Files Modified:**
+- `DuplicateFileDetection.py` - WAL mode in PhotoDatabase class
+- `database_metadata.py` - WAL mode in _get_connection()
+- `audit_manager.py` - WAL mode + retry logic for log_file_operation()
+- `utils.py` - RotatingFileHandler in setup_logger()
+
+---
+
+## [2.3.0] - 2026-01-05
+
+### Added - Import Audit System
+
+**Complete Audit Trail:**
+- New `ImportSession` table tracks each processing run
+- New `FileProcessingLog` table logs every file operation
+- New `DuplicateMapping` table tracks original-duplicate relationships
+- New `AuditRetentionSettings` table for cleanup configuration
+
+**Import History Tab (New):**
+- Session dropdown with status filtering (completed, failed, cancelled)
+- Statistics dashboard (scanned, processed, new, duplicates, filtered, errors)
+- File operations grid with 8 columns (sortable, resizable)
+- Custom QAbstractTableModel for 100k+ record performance
+- Image preview panel with rubber band zoom
+- File details panel with EXIF metadata display
+- Export buttons: JSON, CSV, Duplicates CSV
+- Delete session functionality
+
+**audit_manager.py (New Module):**
+- `AuditManager` class for session lifecycle management
+- `start_session()`, `end_session()`, `get_session()` methods
+- `log_file_operation()` with retry logic for concurrent access
+- `record_duplicate()` for tracking duplicate relationships
+- `generate_session_report()`, `generate_duplicate_report()`, `generate_error_report()`
+- `export_session_to_json()`, `export_session_to_csv()`, `export_duplicates_to_csv()`
+- Retention management: `get_retention_settings()`, `set_retention_settings()`, `apply_retention_policy()`
+
+**Integration Points:**
+- worker.py: Session lifecycle management
+- DuplicateFileDetection.py: Logs duplicates and filtered files
+- main.py: Logs copy/move operations with error tracking
+
+**Files Added:**
+- `audit_manager.py` - Core audit infrastructure
+- `ui/import_history_tab.py` - Import History tab UI
+
+**Files Modified:**
+- `ui/main_window.py` - Added Import History tab
+- `ui/worker.py` - Session start/end integration
+- `DuplicateFileDetection.py` - Duplicate and filter logging
+- `main.py` - Copy/move operation logging
+
+---
+
+## [2.2.3] - 2026-01-05
+
+### Added - Hash History System
+
+**Purpose:** Preserve duplicate detection capability after EXIF modifications.
+
+**Problem Solved:**
+- When date corrections are written to image EXIF data, the file hash changes
+- Without hash history, the same original file would be copied again as "new"
+- Hash history maintains all historical hashes for each photo
+
+**Database Schema:**
+- New `FileHashHistory` table with current_file_hash, historical_hash, created_date, reason
+- Index on historical_hash for fast duplicate detection lookups
+- Reasons: 'original', 'migration', 'exif_edit', 'date_correction'
+
+**Key Methods (DuplicateFileDetection.py):**
+- `is_duplicate_hash_in_history(hash)` - Check historical records
+- `get_all_historical_hashes()` - Load all for batch checking
+- `add_hash_to_history(old_hash, new_hash, reason)` - Record changes
+- `get_photo_by_historical_hash(hash)` - Find photo by any historical hash
+
+**Key Methods (exif_writer.py):**
+- `update_file_hash_after_modification()` - Recalculate and update after EXIF write
+
+**Integration:**
+- date_correction_dialog.py calls hash update after EXIF write
+- find_duplicates() checks both current and historical hashes
+- Automatic migration adds existing records with reason='migration'
+
+### Fixed
+
+**EXIF Extraction Platform Bug:**
+- Fixed: EXIF was only extracted on Windows, causing all Linux/macOS files to be flagged as unreliable
+- Now platform-independent EXIF extraction works on all operating systems
+- Location: DuplicateFileDetection.py lines 419-536
+
+**Case-Insensitive Extensions:**
+- File extension comparison now case-insensitive
+- Handles .JPG, .jpg, .Jpg identically
+
+---
+
+## [2.2.2] - 2026-01-04
+
+### Added - File Renaming System
+
+**Template-Based Renaming:**
+- New `filename_template.py` module for template parsing and validation
+- Template variables: {year}, {month}, {day}, {hour}, {minute}, {second}
+- Original filename: {original_name}, {original_name_no_ext}, {ext}
+- Folder names: {folder_name}, {parent_folder_name}
+- Sequential counter: {counter} or {counter:04d} (zero-padded)
+
+**Settings Tab Integration:**
+- Enable/disable checkbox for file renaming
+- Template input with live preview
+- Validation feedback for invalid templates
+- Per-database template storage
+
+**Database Schema:**
+- Added `enable_file_rename` column to DatabaseMetadata
+- Added `filename_template` column to DatabaseMetadata
+- New `FileRenameHistory` table tracks original → renamed mappings
+
+**Security Features:**
+- Path traversal prevention (blocks .., /, \)
+- Dangerous character blocking (<, >, :, ", |, ?, *)
+- Template validation before saving
+- Fallback to {original_name} on parse errors
+
+**Collision Handling:**
+- Automatic counter suffix (_1, _2, _3) for filename conflicts
+- No user intervention required
+
+### Fixed
+
+**Critical Bug:**
+- Fixed `get_metadata()` not including `enable_file_rename` and `filename_template` columns
+- This caused `is_file_rename_enabled()` to always return False
+
+**Logging:**
+- Changed logging from DEBUG to INFO for better visibility
+
+**Files Modified:**
+- `database_metadata.py` - Added file rename columns and methods
+- `ui/settings_tab.py` - Added file renaming UI section
+- `main.py` - Integrated file renaming during processing
+- `utils.py` - Enhanced get_unique_filename() for collision handling
+
+**Files Added:**
+- `filename_template.py` - Template parsing and validation
+
+---
+
+## [2.2.1] - 2026-01-04
+
+### Added - Grid Interaction Improvements
+
+**Read-Only Table Cells:**
+- All table cells (except checkboxes) are read-only
+- Prevents accidental data editing in grids
+
+**Extended Selection Mode:**
+- Shift+Click: Select range of rows
+- Ctrl+Click: Toggle individual row selection
+- Checkboxes auto-sync with row selection
+- Double-click row to toggle checkbox
+
+**Checkbox Column Support:**
+- Shift/Ctrl clicks work on checkbox column same as other columns
+- Consistent behavior across all grids (Date Corrections, Setup, Filtered Files, Logs)
+
+### Added - Dialog and Workflow Improvements
+
+**Multi-Monitor Support:**
+- All dialogs center on main application window
+- Uses `parent.window().frameGeometry()` for correct positioning
+- Works correctly in multi-monitor setups
+
+**Batch Operations:**
+- Success confirmations suppressed for batch operations
+- Only error dialogs shown (allows uninterrupted workflow)
+- Detailed logging still captures all operations
+
+### Added - Enhanced Logging
+
+**Visual Indicators:**
+- ✓ - Successful operations
+- ✗ - Failed operations
+- ⚠ - Warnings (e.g., file collisions)
+- ℹ - Informational messages
+
+**Section Markers:**
+- 80-char `=` lines for process start/end
+- 60-char `-` lines for individual file processing
+
+**Date Correction Dialog:**
+- Per-file EXIF write tracking
+- Separate error lists: exif_failures, db_failures
+- Detailed summary reports
+
+**Reorganization Worker:**
+- Per-file detailed logging with hash, dates, paths
+- Directory creation and collision handling tracking
+- Final summary with success rate percentage
+
+### Added - Audit Trail
+
+**original_archive_path Column:**
+- Stores file location BEFORE reorganization
+- Enables verification of file movements
+- Displayed in Date Corrections tab details panel
+
+**Status Tracking:**
+- Pending (Gray): No correction applied
+- Corrected (Green): Date corrected, waiting for reorganization
+- Reorganized (Blue): File moved to correct date folder
+
+### Fixed
+
+**Remove Selected Button:**
+- Now works with checkbox-based selection in Setup tab
+
+**Files Modified:**
+- `ui/date_corrections_tab.py` - Grid interactions, logging, audit trail
+- `ui/setup_tab.py` - Grid interactions, Remove Selected fix
+- `ui/date_correction_dialog.py` - Dialog centering, enhanced logging
+- `ui/reorganize_worker.py` - Detailed logging, audit trail
+- `database_metadata.py` - original_archive_path column
+
+---
+
+## [2.2.0] - 2026-01-03
+
+### Added - Date Correction System
+
+**Automatic Detection:**
+- System flags files with unreliable dates during processing
+- Detection criteria: no EXIF, year 1000 fallback, suspicious dates, user-specified paths
+
+**Date Corrections Tab (New):**
+- Sortable grid with filter by flag reason and status
+- Image preview panel with rubber band zoom (click-drag to zoom, double-click to reset)
+- Single file correction dialog with date picker
+- Batch correction with same date or sequential dates
+- Reorganize All Marked button for batch file moves
+
+**UnreliableDates Table (New):**
+- file_hash, source_path, archive_path, original_archive_path
+- original_date, date_source, flag_reason
+- corrected_date, correction_timestamp, needs_reorganization
+
+**EXIF Writing:**
+- New `exif_writer.py` module
+- `write_exif_date()` - Writes to DateTimeOriginal, DateTime, DateTimeDigitized
+- `read_exif_date()` - Reads DateTimeOriginal
+- `verify_exif_write()` - Verifies write succeeded
+- **IMPORTANT**: Only writes to archive files, never to source files
+
+**Safe Reorganization:**
+- Copy-verify-delete pattern prevents data loss
+- Empty directory cleanup after moves
+- Database path updates for both UniquePhotos and UnreliableDates
+
+**User-Specified Paths:**
+- Manage Unreliable Paths dialog
+- Auto-flag files from configured paths (e.g., scanned photos folder)
+
+**Files Added:**
+- `exif_writer.py` - EXIF date writing
+- `ui/date_corrections_tab.py` - Date Corrections tab
+- `ui/date_correction_dialog.py` - Date input dialog
+- `ui/manage_unreliable_paths_dialog.py` - Unreliable paths management
+- `ui/reorganize_worker.py` - File reorganization logic
+
+**Files Modified:**
+- `database_metadata.py` - UnreliableDates table, unreliable date methods
+- `DuplicateFileDetection.py` - Date reliability detection during processing
+- `ui/main_window.py` - Added Date Corrections tab
+
+---
+
 ## [2.1.0] - 2026-01-02
+
+### Added - Persistent Source Directories
+
+**Database-Backed Source Management:**
+- New `SourceDirectories` table stores all source folder configurations
+- Source directories persist across application sessions
+- Each source tracks: path, enabled status, added date, last scanned timestamp
+- Automatic loading when database is selected
+- Auto-save when sources are added or removed
+
+**Enhanced Source Selection UI:**
+- Rich table widget with Enable Checkbox, Status Icon, Source Path, Last Scanned, Status
+- Mouse-over tooltips show detailed status information
+- "Refresh Status" button to re-validate all paths
+
+**Intelligent Path Validation:**
+- Real-time validation for path existence, directory type, and readability
+- Special handling for network paths (GVFS mounts)
+- Helpful error messages for unmounted network shares
+
+**Database Methods:**
+- `add_source_directory()`, `remove_source_directory()`, `get_all_source_directories()`
+- `update_source_last_scanned()`, `update_source_enabled()`, `clear_all_source_directories()`
 
 ### Added - Window Positioning Management
 
@@ -401,79 +717,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-**Persistent Source Directories with Status Tracking (2026-01-03):**
-
-**Database-Backed Source Management:**
-- New `SourceDirectories` table in database stores all source folder configurations
-- Source directories persist across application sessions
-- Each source tracks: path, enabled status, added date, last scanned timestamp
-- Automatic loading when database is selected
-- Auto-save when sources are added or removed
-
-**Enhanced Source Selection UI:**
-- Replaced simple list with rich table widget showing:
-  - **Enable Checkbox**: Select which sources to scan in current run
-  - **Status Icon**: ✓ (green) for available, ⚠ (red) for unavailable
-  - **Source Path**: Full directory path
-  - **Last Scanned**: Timestamp of last successful scan (YYYY-MM-DD HH:MM)
-  - **Status**: Text description (Available, Not Mounted, Not Found, Permission Denied)
-- Mouse-over tooltips show detailed status information for each source
-- "Refresh Status" button to re-validate all paths
-
-**Intelligent Path Validation:**
-- Real-time validation checks if path exists, is a directory, and is readable
-- Special handling for network paths (GVFS mounts at `/run/user/*/gvfs/`)
-- Helpful error messages: "Network share not mounted. Open the share in your file manager first."
-- Status updates automatically when paths become available/unavailable
-
-**Smart Processing:**
-- Only processes sources with checkboxes enabled
-- Skips disabled sources even if they're in the list
-- Updates `last_scanned` timestamp for each source after successful processing
-- Maintains separate lists for different database archives
-
-**Benefits:**
-- No need to re-add source folders every time app starts
-- Easily enable/disable sources for different processing runs
-- Track when each source was last processed
-- Visual feedback for network drive connectivity issues
-- Perfect for users with multiple photo sources (phones, cameras, NAS, cloud drives)
-
-**Database Methods Added:**
-- `add_source_directory(path, enabled)` - Add source with auto-save
-- `remove_source_directory(path)` - Remove and reorder remaining
-- `get_all_source_directories()` - Retrieve all sources with metadata
-- `update_source_last_scanned(path, timestamp)` - Update after scan
-- `update_source_enabled(path, enabled)` - Toggle enabled status
-- `clear_all_source_directories()` - Remove all sources
-- `reorder_source_directories(paths)` - Change display order
-
-**Files Modified:**
-- `database_metadata.py` - Added SourceDirectories table and management methods
-- `ui/setup_tab.py` - Complete redesign with table widget and status tracking
-- `ui/main_window.py` - Integration with database loading and processing completion
-
-### Removed
-
-**All Network-Specific Browsing Features (2026-01-03):**
-- Removed "Browse Network..." button from Setup tab
-- Removed "Add Network Path..." button and supporting code
-- Deleted `ui/network_browser_dialog.py`
-- Deleted `ui/simple_network_browser.py`
-- Deleted `ui/gio_network_browser.py`
-- Deleted NETWORK_BROWSING.md documentation
-- Removed `add_network_path()` method from SetupTab
-- Simplified source folder selection to basic "Add Folder..." functionality only
-
-**Reason for Removal:**
-Multiple implementation attempts (command-line tools, GVFS integration, GIO library) were unable to achieve seamless file manager-like functionality within Flatpak sandbox environment. All network-specific code was removed to maintain simplicity. Users can still access network locations by mounting them in their file manager first, then using the standard "Add Folder..." button.
-
-### In Progress
-
-- None currently
-
 ### Planned
 
 **Short Term:**
@@ -509,4 +752,4 @@ Multiple implementation attempts (command-line tools, GVFS integration, GIO libr
 
 ---
 
-*Last updated: 2026-01-02*
+*Last updated: 2026-01-06*

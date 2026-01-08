@@ -7,11 +7,13 @@ import os
 import pillow_heif  # https://github.com/bigcat88/pillow_heif
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 
 from PIL import Image, UnidentifiedImageError
 from PIL.ExifTags import TAGS
+from PIL import IptcImagePlugin
 from tqdm import tqdm
 
 import utils
@@ -54,7 +56,11 @@ class PhotoDatabase:
             PhotoDatabase: Self, allowing access to connection and cursor
         """
         try:
-            self.conn = sqlite3.connect(self.database_path)
+            # Use 30 second timeout to wait for locks
+            self.conn = sqlite3.connect(self.database_path, timeout=30)
+            # Enable WAL mode for better concurrency with audit logging
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA busy_timeout=30000")
             self.cursor = self.conn.cursor()
             logger.debug(f"Database connection opened to {self.database_path}")
             return self
@@ -608,10 +614,362 @@ def _check_date_reliability(year, month, day, has_exif):
         return False  # Assume unreliable on error
 
 
+def _is_video_file(file_path):
+    """Check if file is a video based on extension."""
+    file_ext = os.path.splitext(file_path)[1].lower()
+    return file_ext in [ext.lower() for ext in constants.VIDEO_EXTENSIONS]
+
+
+def _try_video_date(file_path, logger):
+    """
+    Try to extract recording date from video file metadata.
+
+    Uses ffprobe (from FFmpeg) as primary method, with mutagen as fallback.
+
+    Parameters:
+        file_path (str): Path to the video file
+        logger: Logger instance
+
+    Returns:
+        tuple: (datetime_obj, date_source) if successful, (None, None) if failed
+               date_source will be 'video_metadata' or 'video_quicktime'
+    """
+    creation_date = None
+    date_source = None
+
+    # Method 1: Try ffprobe (most reliable, works with most video formats)
+    try:
+        # Run ffprobe to get creation_time from format tags
+        cmd = [
+            'ffprobe',
+            '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_format',
+            '-show_streams',
+            file_path
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+        if result.returncode == 0:
+            import json as json_module
+            probe_data = json_module.loads(result.stdout)
+
+            # Check format tags first (most common location)
+            format_tags = probe_data.get('format', {}).get('tags', {})
+
+            # Try various date tag names (different formats use different names)
+            date_tags = [
+                'creation_time',      # MP4, MOV (ISO format: 2024-01-15T10:30:00.000000Z)
+                'date',               # Some formats
+                'date_recorded',      # Some formats
+                'com.apple.quicktime.creationdate',  # Apple QuickTime
+            ]
+
+            for tag_name in date_tags:
+                # Check case-insensitively
+                for key, value in format_tags.items():
+                    if key.lower() == tag_name.lower() and value:
+                        creation_date = _parse_video_date(value, logger)
+                        if creation_date:
+                            date_source = 'video_metadata'
+                            logger.info(f"Found video date via ffprobe format tag '{key}': {creation_date}")
+                            return creation_date, date_source
+
+            # Also check stream tags (some videos store date in stream metadata)
+            for stream in probe_data.get('streams', []):
+                stream_tags = stream.get('tags', {})
+                for tag_name in date_tags:
+                    for key, value in stream_tags.items():
+                        if key.lower() == tag_name.lower() and value:
+                            creation_date = _parse_video_date(value, logger)
+                            if creation_date:
+                                date_source = 'video_metadata'
+                                logger.info(f"Found video date via ffprobe stream tag '{key}': {creation_date}")
+                                return creation_date, date_source
+
+            logger.info("ffprobe found no creation date tags in video")
+
+    except FileNotFoundError:
+        logger.info("ffprobe not found - FFmpeg may not be installed")
+    except subprocess.TimeoutExpired:
+        logger.warning(f"ffprobe timed out for {file_path}")
+    except Exception as e:
+        logger.warning(f"ffprobe failed for {file_path}: {e}")
+
+    # Method 2: Try mutagen library (fallback for MP4/M4V files)
+    try:
+        from mutagen.mp4 import MP4
+
+        file_ext = os.path.splitext(file_path)[1].lower()
+        if file_ext in ['.mp4', '.m4v', '.m4a', '.mov']:
+            mp4_file = MP4(file_path)
+
+            # Check for creation date in MP4 tags
+            # The '©day' tag contains the date
+            if '©day' in mp4_file.tags:
+                date_value = mp4_file.tags['©day'][0]
+                creation_date = _parse_video_date(date_value, logger)
+                if creation_date:
+                    date_source = 'video_quicktime'
+                    logger.info(f"Found video date via mutagen ©day tag: {creation_date}")
+                    return creation_date, date_source
+
+            logger.info("mutagen found no creation date in MP4 file")
+
+    except ImportError:
+        logger.debug("mutagen library not installed - skipping MP4 tag check")
+    except Exception as e:
+        logger.debug(f"mutagen failed for {file_path}: {e}")
+
+    # Method 3: Try reading QuickTime/MP4 atoms directly (last resort)
+    try:
+        creation_date = _try_quicktime_atom_date(file_path, logger)
+        if creation_date:
+            date_source = 'video_quicktime'
+            return creation_date, date_source
+    except Exception as e:
+        logger.debug(f"QuickTime atom parsing failed: {e}")
+
+    return None, None
+
+
+def _parse_video_date(date_string, logger):
+    """
+    Parse various video date formats into a datetime object.
+
+    Parameters:
+        date_string (str): Date string from video metadata
+        logger: Logger instance
+
+    Returns:
+        datetime or None: Parsed datetime object, or None if parsing failed
+    """
+    if not date_string:
+        return None
+
+    date_string = str(date_string).strip()
+
+    # Common video date formats
+    formats = [
+        '%Y-%m-%dT%H:%M:%S.%fZ',      # ISO with microseconds and Z: 2024-01-15T10:30:00.000000Z
+        '%Y-%m-%dT%H:%M:%SZ',          # ISO with Z: 2024-01-15T10:30:00Z
+        '%Y-%m-%dT%H:%M:%S.%f%z',      # ISO with microseconds and timezone
+        '%Y-%m-%dT%H:%M:%S%z',         # ISO with timezone: 2024-01-15T10:30:00+00:00
+        '%Y-%m-%dT%H:%M:%S',           # ISO basic: 2024-01-15T10:30:00
+        '%Y-%m-%d %H:%M:%S',           # Standard: 2024-01-15 10:30:00
+        '%Y:%m:%d %H:%M:%S',           # EXIF-style: 2024:01:15 10:30:00
+        '%Y-%m-%d',                     # Date only: 2024-01-15
+        '%Y%m%d',                       # Compact: 20240115
+        '%Y',                           # Year only: 2024
+    ]
+
+    for fmt in formats:
+        try:
+            # Handle timezone offset formats like +00:00 (Python < 3.11 needs colon removed)
+            test_string = date_string
+            if '+' in date_string or (date_string.count('-') > 2):
+                # Try to normalize timezone format
+                test_string = date_string.replace('Z', '+00:00')
+
+            parsed = datetime.datetime.strptime(test_string, fmt)
+            logger.debug(f"Parsed video date '{date_string}' with format '{fmt}'")
+            return parsed
+        except ValueError:
+            continue
+
+    # Try a more flexible approach for unusual formats
+    try:
+        # Extract just the date portion if present
+        import re
+        date_match = re.search(r'(\d{4})[:\-/](\d{1,2})[:\-/](\d{1,2})', date_string)
+        if date_match:
+            year, month, day = int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3))
+            if 1900 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31:
+                return datetime.datetime(year, month, day)
+    except Exception:
+        pass
+
+    logger.debug(f"Could not parse video date: {date_string}")
+    return None
+
+
+def _try_quicktime_atom_date(file_path, logger):
+    """
+    Try to read creation date from QuickTime/MP4 mvhd atom directly.
+
+    This is a fallback method that reads the raw file structure.
+
+    Parameters:
+        file_path (str): Path to video file
+        logger: Logger instance
+
+    Returns:
+        datetime or None: Creation date if found
+    """
+    import struct
+
+    try:
+        with open(file_path, 'rb') as f:
+            # QuickTime files have atoms (boxes) with size and type
+            # We're looking for moov -> mvhd which contains creation_time
+
+            def read_atom_header():
+                data = f.read(8)
+                if len(data) < 8:
+                    return None, None, 0
+                size, atom_type = struct.unpack('>I4s', data)
+                atom_type = atom_type.decode('latin-1', errors='ignore')
+                if size == 1:  # Extended size
+                    size = struct.unpack('>Q', f.read(8))[0]
+                    return size - 16, atom_type, 16
+                return size - 8, atom_type, 8
+
+            # Search for moov atom (may be at beginning or end of file)
+            f.seek(0, 2)  # End of file
+            file_size = f.tell()
+            f.seek(0)
+
+            while f.tell() < file_size:
+                data_size, atom_type, header_size = read_atom_header()
+                if atom_type is None:
+                    break
+
+                if atom_type == 'moov':
+                    # Found moov, now search for mvhd inside it
+                    moov_end = f.tell() + data_size
+                    while f.tell() < moov_end:
+                        inner_size, inner_type, inner_header = read_atom_header()
+                        if inner_type is None:
+                            break
+
+                        if inner_type == 'mvhd':
+                            # Read mvhd atom
+                            version = struct.unpack('>B', f.read(1))[0]
+                            f.read(3)  # flags
+
+                            if version == 0:
+                                creation_time = struct.unpack('>I', f.read(4))[0]
+                            else:
+                                creation_time = struct.unpack('>Q', f.read(8))[0]
+
+                            # QuickTime epoch is 1904-01-01
+                            if creation_time > 0:
+                                qt_epoch = datetime.datetime(1904, 1, 1)
+                                creation_date = qt_epoch + datetime.timedelta(seconds=creation_time)
+                                # Sanity check
+                                if 1990 <= creation_date.year <= datetime.datetime.now().year + 1:
+                                    logger.info(f"Found date in QuickTime mvhd atom: {creation_date}")
+                                    return creation_date
+                            return None
+
+                        # Skip to next atom
+                        f.seek(f.tell() + inner_size - (inner_header - 8) if inner_size > 0 else 0, 0)
+                        if inner_size <= 0:
+                            break
+                    break
+
+                # Skip to next atom
+                if data_size > 0:
+                    f.seek(f.tell() + data_size, 0)
+                else:
+                    break
+
+    except Exception as e:
+        logger.debug(f"QuickTime atom parsing error: {e}")
+
+    return None
+
+
+def _try_iptc_date(im, current_creation_date, current_date_source, current_has_exif, logger):
+    """
+    Try to extract date from IPTC metadata as fallback when EXIF is unavailable.
+
+    Parameters:
+        im: PIL Image object (must be open)
+        current_creation_date: Current datetime value to use if IPTC fails
+        current_date_source: Current date source string
+        current_has_exif: Current has_exif boolean
+        logger: Logger instance
+
+    Returns:
+        tuple: (creation_date, date_source, has_exif) - updated values if IPTC found
+    """
+    import datetime
+
+    try:
+        iptc_data = IptcImagePlugin.getiptcinfo(im)
+        if iptc_data:
+            # IPTC Date Created is tag (2, 55), format: YYYYMMDD
+            # IPTC Time Created is tag (2, 60), format: HHMMSS or HHMMSS±HHMM
+            iptc_date = iptc_data.get((2, 55))
+            iptc_time = iptc_data.get((2, 60))
+
+            if iptc_date:
+                # Decode if bytes
+                if isinstance(iptc_date, bytes):
+                    iptc_date = iptc_date.decode('utf-8', errors='ignore')
+
+                logger.info(f"Found IPTC Date Created: {iptc_date}")
+
+                # Parse IPTC date (YYYYMMDD format)
+                if len(iptc_date) >= 8 and iptc_date[:8].isdigit():
+                    iptc_year = iptc_date[0:4]
+                    iptc_month = iptc_date[4:6]
+                    iptc_day = iptc_date[6:8]
+
+                    # Build time component if available
+                    hour, minute, second = 0, 0, 0
+                    if iptc_time:
+                        if isinstance(iptc_time, bytes):
+                            iptc_time = iptc_time.decode('utf-8', errors='ignore')
+                        if len(iptc_time) >= 6:
+                            try:
+                                hour = int(iptc_time[0:2])
+                                minute = int(iptc_time[2:4])
+                                second = int(iptc_time[4:6])
+                            except ValueError:
+                                pass
+
+                    try:
+                        creation_date = datetime.datetime(
+                            int(iptc_year), int(iptc_month), int(iptc_day),
+                            hour, minute, second
+                        )
+                        logger.info(f"Using IPTC date: {creation_date}")
+                        return creation_date, 'iptc', True  # IPTC found, treat as reliable
+                    except ValueError as ve:
+                        logger.warning(f"Invalid IPTC date values: {iptc_date} - {ve}")
+                else:
+                    logger.info(f"IPTC date format not recognized: {iptc_date}")
+            else:
+                logger.info("No IPTC Date Created field found")
+        else:
+            logger.info("No IPTC data present in image")
+    except Exception as iptc_err:
+        logger.warning(f"Error reading IPTC data: {iptc_err}")
+
+    # Return original values if IPTC extraction failed
+    return current_creation_date, current_date_source, current_has_exif
+
+
 def get_creation_date(file_path, database_path=None):
     """
     Get the creation date of a file and extract year, month, and day.
     Also tracks the date source and reliability.
+
+    Date extraction priority for IMAGES:
+    1. EXIF DateTimeOriginal (most accurate for camera photos)
+    2. IPTC Date Created (fallback for images without EXIF)
+    3. OS file metadata (creation time or modification time)
+    4. Fallback to year 1000 on complete failure
+
+    Date extraction priority for VIDEOS:
+    1. Video metadata via ffprobe (creation_time tag)
+    2. mutagen library for MP4/MOV files
+    3. QuickTime atom parsing (mvhd creation_time)
+    4. OS file metadata
+    5. Fallback to year 1000 on complete failure
 
     Parameters:
     file_path (str): The full file name with path.
@@ -620,7 +978,7 @@ def get_creation_date(file_path, database_path=None):
     Returns:
     tuple: A tuple containing (year, month, day, date_source, is_reliable).
            - year, month, day: Date components as zero-padded strings
-           - date_source: 'exif', 'os_metadata', or 'fallback'
+           - date_source: 'exif', 'iptc', 'video_metadata', 'video_quicktime', 'os_metadata', or 'fallback'
            - is_reliable: Boolean indicating if date is considered reliable
     """
     try:
@@ -660,6 +1018,26 @@ def get_creation_date(file_path, database_path=None):
                 creation_time = stat.st_mtime
                 creation_date = datetime.datetime.fromtimestamp(creation_time)
             logger.info(f"-- create_time = {creation_time}, creation_date = {creation_date}, extension = {extension}")
+
+        # STEP 1b: Handle VIDEO files separately (they don't have EXIF/IPTC)
+        if _is_video_file(file_path):
+            logger.info(f"Processing VIDEO file: {file_path}")
+            video_date, video_source = _try_video_date(file_path, logger)
+            if video_date:
+                creation_date = video_date
+                date_source = video_source
+                has_exif = True  # Treat video metadata as equivalent to EXIF for reliability
+                logger.info(f"Using video metadata date: {creation_date} (source: {date_source})")
+            else:
+                logger.info(f"No video metadata date found, using OS date: {creation_date}")
+
+            # Convert and return for video files
+            year = f"{creation_date:%Y}"
+            month = f"{creation_date:%m}"
+            day = f"{creation_date:%d}"
+            is_reliable = _check_date_reliability(year, month, day, has_exif)
+            logger.debug(f"Video file {file_path} creation date: {year}-{month}-{day}, source: {date_source}, reliable: {is_reliable}")
+            return year, month, day, date_source, is_reliable
 
         # STEP 2: Try to get EXIF data (PLATFORM-INDEPENDENT - runs on all OS)
         # Now try to get a more accurate date from EXIF data.
@@ -726,12 +1104,19 @@ def get_creation_date(file_path, database_path=None):
                                     processed_photos += 1
                                     logger.info(f"\r{processed_photos} photos processed, {not_photos} not processed")
                                 else:
-                                    logger.info("fileDate does not exist in EXIF data.")
+                                    logger.info("fileDate does not exist in EXIF data. Trying IPTC...")
+                                    # Try IPTC as fallback
+                                    creation_date, date_source, has_exif = _try_iptc_date(im, creation_date, date_source, has_exif, logger)
                             else:
-                                logger.info(f" exif_data_PIL[_TAGS_r[DateTimeOriginal]] does not exist.")
+                                logger.info(f"exif_data_PIL[_TAGS_r[DateTimeOriginal]] does not exist. Trying IPTC...")
+                                # Try IPTC as fallback
+                                creation_date, date_source, has_exif = _try_iptc_date(im, creation_date, date_source, has_exif, logger)
                         else:
                             not_photos += 1
-                            logger.info(f"No EXIF data was present.  \r{processed_photos} photos processed, {not_photos} not processed")
+                            logger.info(f"No EXIF data was present. Checking for IPTC data...")
+                            # Try IPTC as fallback
+                            creation_date, date_source, has_exif = _try_iptc_date(im, creation_date, date_source, has_exif, logger)
+                            logger.info(f"\r{processed_photos} photos processed, {not_photos} not processed")
                     except Exception as e:
                         logger.exception(f"The failure {e} occurred for file {file_path}")
                 im.close()
@@ -1021,6 +1406,8 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                 # Log filtered file to audit
                                 if audit_manager and session_id:
                                     try:
+                                        # Commit to release any pending locks before audit write
+                                        db.commit()
                                         audit_manager.log_file_operation(
                                             session_id=session_id,
                                             source_path=filename,
@@ -1091,11 +1478,13 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                         try:
                                             # Get original file path for this hash
                                             original_path = db.get_file_path_for_hash(file_hash)
+                                            # Commit to release any pending locks before audit write
+                                            db.commit()
                                             audit_manager.log_file_operation(
                                                 session_id=session_id,
                                                 source_path=filename,
-                                                operation='skip_duplicate',
-                                                status='skipped',
+                                                operation='duplicate detected',
+                                                status='duplicate',
                                                 file_hash=file_hash,
                                                 file_size=file_size,
                                                 duplicate_of_hash=file_hash
@@ -1152,11 +1541,13 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                 if audit_manager and session_id:
                                     try:
                                         original_path = db.get_file_path_for_hash(file_hash)
+                                        # Commit to release any pending locks before audit write
+                                        db.commit()
                                         audit_manager.log_file_operation(
                                             session_id=session_id,
                                             source_path=filename,
-                                            operation='skip_duplicate',
-                                            status='skipped',
+                                            operation='duplicate detected',
+                                            status='duplicate',
                                             file_hash=file_hash,
                                             file_size=file_size,
                                             duplicate_of_hash=file_hash
@@ -1188,11 +1579,13 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                             if audit_manager and session_id:
                                 try:
                                     original_path = db.get_file_path_for_hash(file_hash)
+                                    # Commit to release any pending locks before audit write
+                                    db.commit()
                                     audit_manager.log_file_operation(
                                         session_id=session_id,
                                         source_path=filename,
-                                        operation='skip_duplicate',
-                                        status='skipped',
+                                        operation='duplicate detected',
+                                        status='duplicate',
                                         file_hash=file_hash,
                                         file_size=file_size,
                                         duplicate_of_hash=file_hash
@@ -1386,10 +1779,19 @@ def VerifyFileType(filename):
     """ This routine takes a filename, and then verifies that the file extension matches the file type.
     This is specifically used to assign a file extension to files that do not have an extension!
 
-    This routine will return the passed 'filename' if it is a valid photo, or the 'newfilename' if the file had to be processed.
+    This routine will return the passed 'filename' if it is a valid photo/video, or the 'newfilename' if the file had to be processed.
+
+    Note: Video files are passed through without verification since PIL cannot open them.
+    Video format verification would require ffprobe or similar tools.
     """
     try:
         logger.info(f"About to process file '{filename}'!")
+
+        # VIDEO FILES: Pass through without PIL verification
+        # PIL cannot open video files, so we trust the extension
+        if _is_video_file(filename):
+            logger.info(f"Video file detected, passing through without PIL verification: {filename}")
+            return filename
 
         valid_extensions = constants.VALID_IMAGE_EXTENSIONS
         EXTENSIONS_MAP = {

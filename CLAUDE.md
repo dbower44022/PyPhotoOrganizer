@@ -86,6 +86,7 @@ python TestRoutines.py
 **photo_filter.py** - Photo validation and filtering
 - `PhotoFilter` class: Identifies real photographs vs icons/thumbnails/web graphics
   - Multi-criteria validation (size, dimensions, aspect ratio, filename patterns, EXIF)
+  - **Video files automatically pass through** (not filtered, handled separately)
   - Tracks detailed statistics by filter reason
   - Integrates with main processing pipeline before hashing
   - See "Photo Filtering" section below for details
@@ -97,6 +98,7 @@ python TestRoutines.py
   - Use with `with PhotoDatabase(path) as db:` pattern
 - `get_file_list()`: Recursively walks source directories and returns list of media files
 - `VerifyFileType()`: Uses PIL/Pillow to verify file extensions match actual file format, corrects mismatches
+  - **Video files pass through without PIL verification** (PIL cannot open videos)
 - `hash_file()`: Calculates SHA-256 hash of files for duplicate detection
 - `hash_file_partial()`: Calculates SHA-256 hash of first N bytes for two-stage hashing optimization
 - `find_duplicates()`: Compares files against SQLite database of known hashes, returns original vs. duplicate lists
@@ -199,6 +201,47 @@ python TestRoutines.py
   - `needs_reorganization`: Flag indicating file needs to be moved to correct date folder
   - Automatically populated during processing when unreliable dates detected
 
+### Database Connection Management (v2.3.1)
+
+**Problem**: SQLite "database is locked" errors occur when multiple components (main processing, audit logging, UI) access the database concurrently.
+
+**Solution**: All database-accessing modules now use WAL mode and proper timeouts:
+
+**Implementation in each module:**
+
+1. **DuplicateFileDetection.py** (`PhotoDatabase` class):
+   ```python
+   self.conn = sqlite3.connect(self.database_path, timeout=30)
+   self.conn.execute("PRAGMA journal_mode=WAL")
+   self.conn.execute("PRAGMA busy_timeout=30000")
+   ```
+
+2. **database_metadata.py** (`DatabaseMetadata._get_connection()`):
+   ```python
+   conn = sqlite3.connect(self.database_path, timeout=30)
+   conn.execute("PRAGMA journal_mode=WAL")
+   conn.execute("PRAGMA busy_timeout=30000")
+   return conn
+   ```
+
+3. **audit_manager.py** (`AuditManager._get_connection()`):
+   - Same WAL mode and timeout settings
+   - Additional retry logic for `log_file_operation()`:
+     - 3 retries with exponential backoff (0.1s, 0.2s, 0.3s delays)
+     - Only retries on "database is locked" errors
+     - Logs warnings for retries, errors for failures
+
+**Key Settings:**
+- `timeout=30`: Wait up to 30 seconds for database locks
+- `PRAGMA journal_mode=WAL`: Write-Ahead Logging enables concurrent reads/writes
+- `PRAGMA busy_timeout=30000`: SQLite-level 30 second busy wait
+
+**WAL Mode Benefits:**
+- Readers don't block writers
+- Writers don't block readers
+- Better performance for concurrent access
+- Creates additional files: `*.db-wal` and `*.db-shm` (normal, don't delete)
+
 ### Data Flow
 
 1. **GUI Mode**: Source directories loaded from database `SourceDirectories` table (persistent across sessions)
@@ -207,8 +250,10 @@ python TestRoutines.py
    **CLI Mode**: Source directories configured in `settings.json`
 2. `get_file_list()` scans source directories for files matching configured extensions
 3. Each file is verified (`VerifyFileType()`) to ensure extension matches actual format
+   - **Video files pass through without PIL verification** (trusted by extension)
 4. **Photo filtering** (if enabled): File is checked to determine if it's a real photograph
    - Filtered files (icons, thumbnails, web graphics) are tracked separately and skipped
+   - **Video files bypass filtering entirely** (pass through automatically)
 5. Each remaining file is hashed using two-stage hashing:
    - Small files (< 1MB): Direct full hash
    - Large files (≥ 1MB): Partial hash first, full hash only if potential duplicate
@@ -281,16 +326,43 @@ The `settings.json` file controls application behavior:
 - Re-running will skip files 1-5,400 and resume from 5,401
 
 ### Date Extraction Priority
-1. First attempts to read EXIF `DateTimeOriginal` from image metadata (most accurate)
-2. Falls back to OS file metadata if EXIF unavailable:
+
+**For IMAGE files:**
+1. First attempts to read EXIF `DateTimeOriginal` from image metadata (most accurate for camera photos)
+2. Falls back to IPTC `Date Created` (tag 2,55) if EXIF unavailable (useful for edited/processed images)
+3. Falls back to OS file metadata if neither EXIF nor IPTC available:
    - Windows: `getctime()` (creation time) or `getmtime()` (modification time)
    - Linux/macOS: `st_birthtime` (creation time) or `st_mtime` (modification time)
-3. Returns dates as formatted strings: `(year, month, day)` where month/day are zero-padded
+4. Returns dates as formatted strings: `(year, month, day)` where month/day are zero-padded
+
+**For VIDEO files:**
+1. `ffprobe` from FFmpeg - reads `creation_time` tag from container metadata (most reliable)
+2. `mutagen` library - reads MP4/MOV atom tags like `©day`
+3. QuickTime atom parsing - reads `mvhd` creation_time directly from file structure
+4. OS file metadata as fallback
+5. Year 1000 default when all methods fail
+
+**Date Source Values:**
+- `'exif'` - Date from EXIF DateTimeOriginal
+- `'iptc'` - Date from IPTC Date Created (tag 2,55)
+- `'video_metadata'` - Date from video container metadata via ffprobe
+- `'video_quicktime'` - Date from QuickTime/MP4 atoms (mutagen or direct parsing)
+- `'os_metadata'` - Date from file system
+- `'fallback'` - Year 1000 default when all extraction methods fail
+
+**Video Processing Notes:**
+- Video files (`.mp4`, `.mov`, `.avi`, `.mkv`, etc.) are detected by extension using `constants.VIDEO_EXTENSIONS`
+- Video files skip the `PhotoFilter` (always pass through) since PIL cannot open videos
+- The `_try_video_date()` function handles all video date extraction methods
+- FFmpeg's `ffprobe` is the most reliable method - install FFmpeg for best results
+- Fallback methods work without external dependencies but may be less reliable
 
 **Important Implementation Notes (Fixed in v2.2.3):**
 - EXIF extraction is **platform-independent** - works on Windows, Linux, and macOS
 - Extension comparison is **case-insensitive** - handles `.JPG`, `.jpg`, `.Jpg`, etc.
-- **Critical Fix (2026-01-05)**: Previously EXIF was only extracted on Windows, causing all Linux/macOS files to be flagged as unreliable. This has been corrected in `DuplicateFileDetection.py:419-536`
+- **Critical Fix (2026-01-05)**: Previously EXIF was only extracted on Windows, causing all Linux/macOS files to be flagged as unreliable. This has been corrected in `DuplicateFileDetection.py`
+- **IPTC Support (2026-01-06)**: Added IPTC Date Created as fallback when EXIF is unavailable
+- **Video Support (2026-01-07)**: Added video date extraction via ffprobe, mutagen, and QuickTime atom parsing
 
 ### Hash-Based Deduplication with Two-Stage Optimization
 
@@ -393,13 +465,15 @@ Existing databases are automatically migrated when opened:
   - Small square detection (excludes perfect squares < 400x400, likely icons)
   - Filename pattern exclusion (favicon, icon, logo, thumb, button, etc.)
   - EXIF data requirement (optional - ensures photos have camera metadata)
+  - **Video files automatically pass through** (detected by extension, not opened with PIL)
   - Tracks detailed statistics by filter reason
 
 **Integration with Processing Pipeline**:
 1. Photo filtering happens BEFORE hashing (saves processing time)
-2. Filtered files are tracked separately in results
-3. Statistics show breakdown by filter reason
-4. Files can optionally be moved to a separate filtered folder
+2. Video files bypass filtering entirely (pass through automatically)
+3. Filtered files are tracked separately in results
+4. Statistics show breakdown by filter reason
+5. Files can optionally be moved to a separate filtered folder
 
 **Configuration:**
 ```json
@@ -1014,6 +1088,7 @@ self.on_selection_changed()
 - Automatically corrects mismatched extensions (e.g., `.png` file with `.jpg` extension)
 - Handles files without extensions by testing against known image formats
 - Uses `safe_rename_or_copy()` to handle locked files
+- **Video files pass through without verification** - PIL cannot open videos, so extensions are trusted
 
 ### HEIC Conversion
 - Uses `pillow_heif` library to convert Apple HEIC/HEIF images to JPEG
@@ -1211,8 +1286,9 @@ Scenario: User scanned old family photos. Scanner assigned current date (2024) i
 
 **audit_manager.py** - Core audit infrastructure module
 - `AuditManager` class: Manages import session tracking and reporting
+  - `_get_connection()`: Returns SQLite connection with WAL mode and 30s timeout
   - Session lifecycle: `start_session()`, `end_session()`, `get_session()`
-  - File operation logging: `log_file_operation()`, `update_verification_status()`
+  - File operation logging: `log_file_operation()` with retry logic for lock contention
   - Duplicate tracking: `record_duplicate()`, `get_duplicates_of()`
   - Retention management: `get_retention_settings()`, `set_retention_settings()`, `apply_retention_policy()`
   - Report generation: `generate_session_report()`, `generate_duplicate_report()`, `generate_error_report()`
@@ -1285,10 +1361,40 @@ CREATE TABLE AuditRetentionSettings (
 **GUI Integration:**
 
 **Import History Tab** (`ui/import_history_tab.py`):
-- Session list panel (left) with status filter dropdown
-- Session details panel showing statistics and timing
-- File logs tabs: All Files, Duplicates, Errors
-- Export buttons: JSON, CSV, Duplicates CSV
+- **Layout** (top to bottom):
+  - Row 1: Session dropdown, Status filter, Refresh button, Result/Started/Duration display
+  - Row 2: Statistics (Scanned, Processed, New, Duplicates, Filtered, Errors)
+  - Vertical splitter separating grid from preview
+  - File operations grid with 8 columns (sortable, resizable)
+  - Horizontal splitter separating preview from details
+  - Image preview panel with rubber band zoom (drag to zoom, double-click reset)
+  - File details panel with EXIF metadata
+  - Export buttons: JSON, CSV, Duplicates CSV, Delete Session
+
+- **Grid Features** (optimized for 100k+ records):
+  - Columns: Source Folder, Source Filename, Dest Folder, Dest Filename, Operation, Status, Hash, Details
+  - Custom `QAbstractTableModel` with display caching for performance
+  - `QSortFilterProxyModel` for search and filtering
+  - Proportional column resizing on window resize (respects minimum widths)
+  - View filter: All Files / Duplicates Only / Errors Only
+  - Operation filter: Copy, Move, Skip Duplicate, Skip Filtered, Error
+  - Status filter: Success, Failed, Skipped
+  - Text search with 300ms debounce
+
+- **Image Preview** (`ImagePreviewWidget`):
+  - Rubber band zoom: Click and drag to select region, release to zoom
+  - Double-click to reset to fit-to-view
+  - Maintains custom zoom during window resize
+  - Dark background (#2d2d2d) for better image visibility
+
+- **File Details Panel** (`FileDetailsWidget`):
+  - Operation details (operation type, status, errors)
+  - File paths (source and destination)
+  - SHA-256 hash
+  - File information (size, modified date)
+  - Image properties (dimensions, format, color mode)
+  - EXIF data (date taken, camera, exposure, aperture, ISO, focal length, GPS)
+
 - Auto-refresh on tab display
 
 **Settings Tab** (retention settings):

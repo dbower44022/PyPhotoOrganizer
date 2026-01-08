@@ -91,10 +91,22 @@ class DatabaseMetadata:
         self._ensure_unreliable_dates_table()
         self._ensure_file_rename_history_table()
 
+    def _get_connection(self) -> sqlite3.Connection:
+        """
+        Get a database connection with proper settings for concurrency.
+
+        Returns:
+            sqlite3.Connection with timeout and WAL mode enabled
+        """
+        conn = sqlite3.connect(self.database_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
+
     def _ensure_metadata_table(self):
         """Ensure the metadata table exists in the database with all columns."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 # Create table if it doesn't exist
@@ -153,7 +165,7 @@ class DatabaseMetadata:
     def _ensure_source_directories_table(self):
         """Ensure the SourceDirectories table exists in the database."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 # Create table if it doesn't exist
@@ -169,7 +181,7 @@ class DatabaseMetadata:
     def _ensure_unreliable_dates_table(self):
         """Ensure the UnreliableDates table exists in the database."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 # Create table if it doesn't exist
@@ -194,7 +206,7 @@ class DatabaseMetadata:
     def _ensure_file_rename_history_table(self):
         """Ensure the FileRenameHistory table exists in the database."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 # Create table if it doesn't exist
@@ -249,7 +261,7 @@ class DatabaseMetadata:
 
             created_date = datetime.now().isoformat()
 
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 # Check if metadata already exists
@@ -283,7 +295,7 @@ class DatabaseMetadata:
             Dictionary with metadata or None if not found
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT database_name, description, archive_location, video_archive_location,
@@ -366,7 +378,7 @@ class DatabaseMetadata:
                 if not os.path.isabs(video_archive_location):
                     raise ValueError("Video archive location must be an absolute path")
 
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     UPDATE DatabaseMetadata
@@ -386,7 +398,7 @@ class DatabaseMetadata:
     def update_last_used(self):
         """Update the last used timestamp."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     UPDATE DatabaseMetadata
@@ -406,7 +418,7 @@ class DatabaseMetadata:
             count: New total photos count
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     UPDATE DatabaseMetadata
@@ -424,7 +436,7 @@ class DatabaseMetadata:
         This should be called after processing files to update the count.
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 # Count rows in UniquePhotos table
@@ -459,7 +471,7 @@ class DatabaseMetadata:
             if not os.path.isabs(new_location):
                 raise ValueError("Archive location must be an absolute path")
 
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     UPDATE DatabaseMetadata
@@ -495,7 +507,7 @@ class DatabaseMetadata:
             True if successful, False otherwise
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     UPDATE DatabaseMetadata
@@ -535,7 +547,7 @@ class DatabaseMetadata:
             if mode not in valid_modes:
                 raise ValueError(f"Invalid mode: {mode}. Must be one of {valid_modes}")
 
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     UPDATE DatabaseMetadata
@@ -567,7 +579,7 @@ class DatabaseMetadata:
             if not os.path.isabs(path):
                 raise ValueError("Source directory path must be absolute")
 
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 # Get current max order_index
@@ -603,7 +615,7 @@ class DatabaseMetadata:
             True if successful, False otherwise
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 # Delete the source directory
@@ -640,7 +652,7 @@ class DatabaseMetadata:
             List of dictionaries with source directory information
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 cursor.execute("""
@@ -683,7 +695,7 @@ class DatabaseMetadata:
             if timestamp is None:
                 timestamp = datetime.now().isoformat()
 
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 cursor.execute("""
@@ -716,7 +728,7 @@ class DatabaseMetadata:
             True if successful, False otherwise
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 cursor.execute("""
@@ -745,7 +757,7 @@ class DatabaseMetadata:
             True if successful, False otherwise
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM SourceDirectories")
                 conn.commit()
@@ -767,7 +779,7 @@ class DatabaseMetadata:
             True if successful, False otherwise
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 for new_index, path in enumerate(paths_in_order):
@@ -805,7 +817,7 @@ class DatabaseMetadata:
             True if successful, False otherwise
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 # Check if record already exists for this file
@@ -840,7 +852,7 @@ class DatabaseMetadata:
             List of dict records with unreliable date information
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 if filter_reason:
@@ -899,7 +911,7 @@ class DatabaseMetadata:
             True if successful, False otherwise
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 cursor.execute("""
@@ -931,7 +943,7 @@ class DatabaseMetadata:
             List of dict records that need reorganization
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 cursor.execute("""
@@ -978,7 +990,7 @@ class DatabaseMetadata:
             from organization_template import OrganizationTemplate
             import os
 
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 # Get organization settings
@@ -1076,7 +1088,7 @@ class DatabaseMetadata:
             True if successful, False otherwise
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 cursor.execute("""
@@ -1109,7 +1121,7 @@ class DatabaseMetadata:
             True if successful, False otherwise
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 # Update UniquePhotos table
@@ -1148,7 +1160,7 @@ class DatabaseMetadata:
         try:
             import json
 
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 cursor.execute("SELECT user_specified_unreliable_paths FROM DatabaseMetadata WHERE id = 1")
@@ -1175,7 +1187,7 @@ class DatabaseMetadata:
         try:
             import json
 
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 cursor.execute("""
@@ -1243,7 +1255,7 @@ class DatabaseMetadata:
 
             logger.debug(f"  ✓ Template validation passed")
 
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 # Check if row exists
@@ -1325,7 +1337,7 @@ class DatabaseMetadata:
         try:
             logger.info(f"→ set_file_rename_enabled({enabled}) called for database: {self.database_path}")
 
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 # Check if row exists
@@ -1380,7 +1392,7 @@ class DatabaseMetadata:
             True if successful, False otherwise
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     INSERT INTO FileRenameHistory
@@ -1406,7 +1418,7 @@ class DatabaseMetadata:
             List of dict records with rename history, sorted by timestamp (newest first)
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT original_filename, renamed_filename, rename_timestamp

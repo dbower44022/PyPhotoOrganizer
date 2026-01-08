@@ -2,7 +2,8 @@
 
 > Solutions to common issues and problems
 
-**Last Updated:** 2026-01-02
+**Last Updated:** 2026-01-06
+**Version:** 2.3.1
 
 ---
 
@@ -317,10 +318,22 @@ python main.py
 
 **Problem:** Multiple processes accessing database
 
-**Solution:**
-- Close other instances of application
-- Check for background processes
-- Wait and retry
+**Solution (v2.3.1+):**
+- This should be rare now - WAL mode enabled by default
+- If it persists:
+  - Close other instances of application
+  - Check for background processes (other apps accessing the .db file)
+  - Delete `.db-wal` and `.db-shm` files (will be recreated)
+  - Wait and retry
+
+**Technical Note (v2.3.1):**
+All database connections now use WAL mode and 30-second timeouts:
+```python
+conn.execute("PRAGMA journal_mode=WAL")
+conn.execute("PRAGMA busy_timeout=30000")
+```
+
+If you're still seeing lock errors, the issue may be an external process accessing the database.
 
 ---
 
@@ -531,13 +544,16 @@ heic_image.save(path, format="JPEG", exif=heic_image.info.get('exif'))
 
 **Problem:** Verbose logging creating huge files
 
-**Solution:**
-```python
-# Reduce logging level
-logger.setLevel(logging.INFO)  # Instead of DEBUG
+**Solution (v2.3.1+):**
+Log rotation is now automatic! Logs rotate at 5MB with 3 backups.
+
+If you have old large log files from before v2.3.1:
+```bash
+# Safe to delete - new logs will be created
+rm *.log *.log.*
 ```
 
-Or rotate logs:
+**Manual rotation (older versions):**
 ```python
 from logging.handlers import RotatingFileHandler
 
@@ -870,6 +886,94 @@ pip install PySide6
 
 ---
 
+---
+
+## Date Corrections Issues (v2.2+)
+
+### Files not appearing in Date Corrections tab
+
+**Problem:** Files aren't being flagged as having unreliable dates
+
+**Diagnosis:**
+- Only files with unreliable dates appear in Date Corrections tab
+- Check flag reasons: no_exif, year_1000, suspicious, user_specified
+
+**Solutions:**
+1. Add source folder to "Manage Unreliable Paths" to force flagging
+2. Verify files actually have problematic dates
+3. Re-process files after adding unreliable paths
+
+---
+
+### EXIF not being written
+
+**Problem:** Date correction doesn't update EXIF data
+
+**Diagnosis:**
+- Check if "Write EXIF" checkbox was enabled in dialog
+- Check log files for EXIF write errors
+
+**Common Causes:**
+1. File format doesn't support EXIF (PNG doesn't store EXIF the same way as JPEG)
+2. File is read-only or permissions issue
+3. Archive file doesn't exist (path mismatch)
+
+**Note:** EXIF is only written to archive files, never source files.
+
+---
+
+### Reorganization fails
+
+**Problem:** "Reorganize All Marked" fails for some files
+
+**Diagnosis:**
+- Check Logs tab for detailed error messages
+- Look for ✗ indicators showing failed operations
+
+**Common Causes:**
+1. Destination folder is full
+2. File already exists at new location (collision)
+3. Permission denied on archive folder
+4. Archive path no longer valid (file was moved externally)
+
+---
+
+## Import History Issues (v2.3+)
+
+### Import History tab is empty
+
+**Problem:** No sessions appear in Import History tab
+
+**Solutions:**
+1. Run a processing session - history is created automatically
+2. Click "Refresh" button to reload
+3. Check if database was recently created (no history yet)
+
+---
+
+### Session shows as "failed" or "cancelled"
+
+**Problem:** Session has error status
+
+**Diagnosis:**
+- Click the session to see file-level details
+- Check "Errors" filter to see what failed
+- Export to JSON/CSV for detailed analysis
+
+---
+
+### Export fails
+
+**Problem:** Can't export to JSON/CSV
+
+**Solutions:**
+1. Check destination folder has write permissions
+2. Ensure filename doesn't contain invalid characters
+3. Check disk space available
+4. Try a different export location
+
+---
+
 **Still having issues?** Check:
 - [README.md](README.md) - Overview
 - [CONFIGURATION.md](CONFIGURATION.md) - Settings
@@ -879,4 +983,4 @@ pip install PySide6
 
 ---
 
-*Last updated: 2026-01-02*
+*Last updated: 2026-01-06*

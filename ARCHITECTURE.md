@@ -2,8 +2,8 @@
 
 > Technical design, architecture, and implementation details
 
-**Last Updated:** 2026-01-02
-**Version:** 2.0
+**Last Updated:** 2026-01-06
+**Version:** 2.3.1
 
 ---
 
@@ -838,12 +838,6 @@ timestamp - module - level - function - line --- message
 
 ---
 
-**Document Maintainer:** Architecture Team
-**Last Review:** 2026-01-02
-**Next Review:** 2026-04-01
-
----
-
 ## GUI Architecture (v2.0)
 
 ### Overview
@@ -913,5 +907,308 @@ ui/
 └── worker.py         (186 lines) - Background processing
 ```
 
-**Total**: ~1,500 lines of new GUI code, fully isolated from business logic.
+**Total**: ~2,500+ lines of GUI code, fully isolated from business logic.
+
+---
+
+## Date Correction System (v2.2)
+
+### Purpose
+
+Identify files with unreliable date information and provide tools to correct them, ensuring files are organized in the correct date-based folders.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Date Corrections Tab                       │
+│  ┌─────────────────┐  ┌──────────────────────────────────┐ │
+│  │  Filter Panel   │  │  Grid View (Sortable/Filterable)  │ │
+│  │  - Flag Reason  │  │  - Checkbox, Filename, Source    │ │
+│  │  - Status       │  │  - Archive, Date, Status         │ │
+│  └─────────────────┘  └──────────────────────────────────┘ │
+│  ┌─────────────────┐  ┌──────────────────────────────────┐ │
+│  │  Action Buttons │  │  Preview + Details Panel         │ │
+│  │  - Correct Date │  │  - Zoomable image preview        │ │
+│  │  - Batch Correct│  │  - EXIF metadata display         │ │
+│  │  - Reorganize   │  │  - Audit trail info              │ │
+│  └─────────────────┘  └──────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Date Correction Dialog                          │
+│  ┌───────────────┐  ┌─────────────────────────────────────┐│
+│  │  Date Picker  │  │  Options                            ││
+│  │  Year/Month/  │  │  - Write EXIF to archive file      ││
+│  │  Day spinboxes│  │  - Mark for reorganization         ││
+│  └───────────────┘  └─────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│              EXIF Writer + Hash History                      │
+│  ┌───────────────────────────────────────────────────────┐ │
+│  │  exif_writer.py                                       │ │
+│  │  - write_exif_date() → Archive file only!             │ │
+│  │  - update_file_hash_after_modification()              │ │
+│  └───────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Reorganize Worker (QThread)                     │
+│  ┌───────────────────────────────────────────────────────┐ │
+│  │  Copy-Verify-Delete Pattern                           │ │
+│  │  1. Calculate new path from corrected date            │ │
+│  │  2. Copy file to new location                         │ │
+│  │  3. Verify copy (exists + size match)                 │ │
+│  │  4. Delete original                                   │ │
+│  │  5. Update database paths                             │ │
+│  │  6. Clean up empty directories                        │ │
+│  └───────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Critical Design Decision: Source File Protection
+
+**Source files are NEVER modified.**
+
+- EXIF writes go ONLY to archive files (our managed copies)
+- Source files remain pristine for future reference
+- Prevents accidental corruption of original photos
+- Source may be on read-only media or shared drives
+
+### Unreliable Date Detection
+
+During processing, dates are flagged as unreliable when:
+1. **No EXIF Data** (`flag_reason='no_exif'`): Image has no EXIF metadata
+2. **Year 1000 Fallback** (`flag_reason='year_1000'`): All extraction methods failed
+3. **Suspicious Date** (`flag_reason='suspicious'`): Year < 1990, > current+1, or 1970-01-01
+4. **User-Specified Path** (`flag_reason='user_specified'`): File from configured unreliable source
+
+---
+
+## Hash History System (v2.2.3)
+
+### Purpose
+
+Preserve duplicate detection capability after EXIF modifications.
+
+### Problem
+
+When date corrections are written to image EXIF data, the file bytes change:
+- Original hash: `AAA...`
+- After EXIF write: `BBB...`
+- Same source file reprocessed: Hash = `AAA...`
+- Without history: `AAA` ≠ `BBB` → Duplicate not detected!
+
+### Solution: FileHashHistory Table
+
+```sql
+CREATE TABLE FileHashHistory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    current_file_hash TEXT NOT NULL,   -- Current hash in UniquePhotos
+    historical_hash TEXT NOT NULL,      -- Hash at some point in history
+    created_date TEXT NOT NULL,
+    reason TEXT NOT NULL,               -- 'original', 'migration', 'exif_edit', 'date_correction'
+    FOREIGN KEY (current_file_hash) REFERENCES UniquePhotos(file_hash)
+);
+
+CREATE INDEX idx_historical_hash ON FileHashHistory(historical_hash);
+```
+
+### Data Flow
+
+```
+Initial Import:
+  UniquePhotos: file_hash=AAA
+  FileHashHistory: historical_hash=AAA, reason='original'
+
+After Date Correction:
+  UniquePhotos: file_hash=BBB (updated)
+  FileHashHistory: [AAA entry preserved]
+                   + new entry: historical_hash=BBB, reason='date_correction'
+
+Duplicate Detection:
+  Incoming file hash=AAA
+  Check UniquePhotos → Not found
+  Check FileHashHistory → Found! (AAA is historical hash of current BBB)
+  Result: Duplicate detected ✓
+```
+
+### Migration
+
+Existing databases automatically upgraded:
+1. FileHashHistory table created
+2. All existing UniquePhotos records copied with `reason='migration'`
+3. No manual action required
+
+---
+
+## Import Audit System (v2.3)
+
+### Purpose
+
+Provide complete traceability for all file operations during import, enabling users to audit what happened, track duplicate relationships, and export reports.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Worker Thread                             │
+│  start_session() ─────────────────────────> end_session()   │
+│       │                                           │          │
+│       ▼                                           ▼          │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │               AuditManager                            │  │
+│  │  - Session lifecycle management                       │  │
+│  │  - File operation logging                             │  │
+│  │  - Duplicate relationship tracking                    │  │
+│  │  - Report generation                                  │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Database Tables                           │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
+│  │ImportSession │  │FileProcessing│  │DuplicateMapping  │  │
+│  │- session_id  │  │Log           │  │- original_hash   │  │
+│  │- start_time  │  │- source_path │  │- duplicate_path  │  │
+│  │- statistics  │  │- operation   │  │- times_seen      │  │
+│  └──────────────┘  └──────────────┘  └──────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                  Import History Tab                          │
+│  ┌────────────────────────────────────────────────────────┐│
+│  │  Session Selector + Filters                            ││
+│  │  Statistics Dashboard                                  ││
+│  │  File Operations Grid (Custom QAbstractTableModel)     ││
+│  │  Image Preview + File Details                          ││
+│  │  Export Buttons (JSON/CSV)                             ││
+│  └────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Session Lifecycle
+
+```python
+# In worker.py
+def run(self):
+    session_id = self.audit_manager.start_session(
+        source_directories=self.sources,
+        destination_directory=self.destination,
+        operation_mode='copy' or 'move'
+    )
+    try:
+        # Process files...
+        for file in files:
+            self.audit_manager.log_file_operation(
+                session_id, source_path, dest_path, hash,
+                operation='copy', status='success'
+            )
+        self.audit_manager.end_session(session_id, 'completed', stats)
+    except Exception:
+        self.audit_manager.end_session(session_id, 'failed', stats)
+```
+
+### Retention Management
+
+Settings stored in `AuditRetentionSettings` table:
+- **sessions**: Keep last N sessions
+- **days**: Keep last N days
+- **none**: Keep all (no automatic cleanup)
+
+---
+
+## Database Connection Management (v2.3.1)
+
+### Problem
+
+SQLite "database is locked" errors during concurrent access from:
+- Main processing thread
+- Audit logging
+- UI queries
+
+### Solution: WAL Mode + Timeouts
+
+**All database-accessing modules implement:**
+
+```python
+def _get_connection(self):
+    conn = sqlite3.connect(self.database_path, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+```
+
+### WAL Mode Benefits
+
+- **Readers don't block writers**: Multiple reads concurrent with one write
+- **Writers don't block readers**: Reads see consistent snapshot
+- **Better performance**: Especially for concurrent access
+- **WAL files**: Creates `*.db-wal` and `*.db-shm` (normal, don't delete)
+
+### Retry Logic (Audit Manager)
+
+```python
+def log_file_operation(self, ...):
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # ... insert operation ...
+            return
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e) and attempt < max_retries - 1:
+                time.sleep(0.1 * (attempt + 1))  # Exponential backoff
+                continue
+            raise
+```
+
+---
+
+## Log Rotation (v2.3.1)
+
+### Purpose
+
+Prevent log files from growing unbounded during long-running operations.
+
+### Implementation
+
+```python
+from logging.handlers import RotatingFileHandler
+
+LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
+LOG_BACKUP_COUNT = 3             # Keep 3 backups
+
+def setup_logger(name, log_file, level=logging.DEBUG):
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8"
+    )
+```
+
+### Rotation Behavior
+
+When log reaches 5MB:
+```
+app_error.log      → app_error.log.1
+app_error.log.1    → app_error.log.2
+app_error.log.2    → app_error.log.3
+app_error.log.3    → (deleted)
+(new) app_error.log
+```
+
+**Total max storage per module**: ~20MB (5MB × 4 files)
+
+---
+
+**Document Maintainer:** Architecture Team
+**Last Review:** 2026-01-06
+**Next Review:** 2026-04-06
 

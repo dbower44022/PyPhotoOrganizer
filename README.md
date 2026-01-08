@@ -4,7 +4,7 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.2.2-brightgreen.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.3.1-brightgreen.svg)](CHANGELOG.md)
 
 ## Overview
 
@@ -47,10 +47,18 @@ PyPhotoOrganizer helps you consolidate photos and videos from multiple devices a
 - ✅ **Image Preview**: Zoomable preview panel with rubber band selection
 - ✅ **Single File Correction**: Easy date correction with visual date picker
 - ✅ **Batch Correction**: Correct multiple files with same or sequential dates
-- ✅ **EXIF Writing**: Writes corrected dates to both source and archive files
+- ✅ **EXIF Writing**: Writes corrected dates to archive files (source files never modified)
 - ✅ **Safe Reorganization**: Copy-verify-delete pattern with empty directory cleanup
 - ✅ **Comprehensive Logging**: Visual indicators (✓✗⚠ℹ) for easy log navigation
 - ✅ **User-Specified Paths**: Auto-flag files from unreliable sources (e.g., scanned photos)
+
+**Import Audit Features (v2.3+):**
+- ✅ **Complete Audit Trail**: Every file operation logged with session tracking
+- ✅ **Import History Tab**: View all import sessions with statistics
+- ✅ **Duplicate Tracking**: See which files are duplicates of which originals
+- ✅ **Export Reports**: JSON and CSV export for external analysis
+- ✅ **Retention Settings**: Automatic cleanup of old audit records
+- ✅ **Hash History System**: Preserves duplicate detection after EXIF modifications
 
 **File Renaming Features (v2.2.1+):**
 - ✅ **Template-Based Renaming**: Customize filenames during processing with powerful template system
@@ -524,6 +532,34 @@ PyPhotoOrganizer/
 
 ## Recent Improvements
 
+### Version 2.3.1 (January 2026)
+
+**Database Reliability:**
+✅ WAL mode for all database connections (prevents "database is locked" errors)
+✅ 30-second timeouts with retry logic for concurrent access
+✅ Log rotation (5MB max, 3 backups) prevents unbounded log growth
+
+### Version 2.3 (January 2026)
+
+**Import Audit System:**
+✅ Complete audit trail for all file operations
+✅ New Import History tab with session tracking
+✅ File-level operation log (copy, move, skip, error)
+✅ Duplicate relationship tracking (which file is duplicate of which)
+✅ Export to JSON/CSV for external analysis
+✅ Configurable retention settings (sessions, days, or keep all)
+✅ Image preview and EXIF display in Import History tab
+
+### Version 2.2.3 (January 2026)
+
+**Hash History System:**
+✅ Preserves duplicate detection after EXIF modifications
+✅ FileHashHistory table tracks all hash changes
+✅ Original hashes retained when date corrections modify files
+✅ Automatic migration for existing databases
+✅ Fixed EXIF extraction on Linux/macOS (was Windows-only)
+✅ Case-insensitive file extension handling
+
 ### Version 2.2.2 (January 2026)
 
 **File Renaming System:**
@@ -574,7 +610,7 @@ PyPhotoOrganizer/
 ✅ New Date Corrections tab with sortable grid and filters
 ✅ Zoomable image preview with rubber band selection
 ✅ Single and batch date correction dialogs
-✅ EXIF writing to both source and archive files
+✅ EXIF writing to archive files (source files protected)
 ✅ Safe file reorganization with copy-verify-delete pattern
 ✅ Audit trail with original_archive_path tracking
 ✅ Three-state status system (Pending/Corrected/Reorganized)
@@ -826,5 +862,5 @@ MIT License - See LICENSE file for details
 
 **Made with ❤️ for photo enthusiasts everywhere**
 
-*Last updated: 2026-01-04*
-*Version: 2.2.2*
+*Last updated: 2026-01-06*
+*Version: 2.3.1*

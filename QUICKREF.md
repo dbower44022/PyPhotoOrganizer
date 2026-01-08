@@ -2,7 +2,8 @@
 
 > One-page cheat sheet for PyPhotoOrganizer (GUI + CLI)
 
-**Last Updated:** 2026-01-02
+**Last Updated:** 2026-01-06
+**Version:** 2.3.1
 
 ---
 
@@ -398,14 +399,30 @@ Everything else uses defaults from `constants.py`.
 
 ---
 
-## Version 2.0 Features
+## Version 2.3 Features
+
+✅ **New in v2.3.1:**
+- WAL mode database connections (no more "database locked")
+- Log rotation (5MB max, 3 backups)
+- Retry logic for concurrent database access
+
+✅ **New in v2.3:**
+- Import Audit System (complete file operation tracking)
+- Import History tab (sessions, statistics, exports)
+- Duplicate relationship tracking
+- Retention settings for audit data
+
+✅ **New in v2.2:**
+- Date Correction System (detect and fix unreliable dates)
+- Hash History (duplicate detection after EXIF edits)
+- File Renaming templates
+- EXIF writing to archive files
 
 ✅ **New in v2.0:**
 - Path traversal protection
 - Photo filtering system
 - Database indexes
 - Constants module
-- Bug fixes (HEIC, move mode, temp files)
 
 ---
 
@@ -417,6 +434,7 @@ Everything else uses defaults from `constants.py`.
 - **Browse**: Choose destination directory
 - **Copy/Move**: Choose operation mode
 - **Start/Stop**: Control processing
+- **Enable/Disable**: Checkbox per source for selective processing
 
 ### Progress Tab
 - **Overall Progress**: Total completion percentage
@@ -429,6 +447,12 @@ Everything else uses defaults from `constants.py`.
 - **Breakdown Tree**: Expandable categories
 - **Export Results**: Save to JSON or CSV
 
+### Filtered Files Tab
+- **Files Table**: All filtered files with reason
+- **Preview**: Thumbnail preview
+- **Open File/Folder**: Quick navigation
+- **Export**: CSV/TXT export
+
 ### Logs Tab
 - **Level Filter**: Filter by DEBUG/INFO/WARNING/ERROR
 - **Search**: Find specific log entries
@@ -438,8 +462,26 @@ Everything else uses defaults from `constants.py`.
 ### Settings Tab
 - **Load/Save**: Manage settings.json
 - **Restore Defaults**: Reset to defaults
-- **Validate**: Check settings validity
-- **Preview**: See folder structure example
+- **File Renaming**: Template-based filename customization
+- **Retention Settings**: Audit history cleanup
+
+### Database Tab
+- **Metadata**: View name, archive location, statistics
+- **Change Database**: Switch to different database
+
+### Date Corrections Tab (v2.2+)
+- **Filter**: By flag reason (no_exif, suspicious, etc.)
+- **Correct Date**: Single file correction
+- **Batch Correct**: Same or sequential dates
+- **Reorganize**: Move corrected files to proper folders
+- **Preview**: Zoomable image preview
+
+### Import History Tab (v2.3+)
+- **Sessions**: Select and view past imports
+- **Statistics**: Scanned, processed, duplicates, errors
+- **File Grid**: All operations with details
+- **Export**: JSON/CSV reports
+- **Preview**: Image and EXIF details
 
 ---
 
@@ -508,4 +550,4 @@ Before large run:
 
 **Print this page for quick reference!**
 
-*Last updated: 2026-01-02*
+*Last updated: 2026-01-06*

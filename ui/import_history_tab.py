@@ -14,8 +14,9 @@ from PySide6.QtWidgets import (
     QComboBox, QTabWidget, QTextEdit, QAbstractItemView,
     QTableView, QLineEdit, QApplication, QGraphicsView,
     QGraphicsScene, QGraphicsPixmapItem, QFrame, QScrollArea,
-    QFormLayout, QSizePolicy
+    QFormLayout, QSizePolicy, QProgressDialog
 )
+import subprocess
 from PySide6.QtCore import (
     Qt, QAbstractTableModel, QModelIndex, QSortFilterProxyModel,
     QTimer, QSize, QRectF
@@ -97,6 +98,8 @@ class FileLogTableModel(QAbstractTableModel):
                     return QBrush(QColor('red'))
                 elif status == 'skipped':
                     return QBrush(QColor('gray'))
+                elif status == 'duplicate':
+                    return QBrush(QColor('orange'))
 
         elif role == Qt.UserRole:
             # Return raw data for sorting
@@ -288,7 +291,7 @@ class FileLogTableView(QTableView):
         # Configure view for performance
         self.setAlternatingRowColors(True)
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setSortingEnabled(True)
         self.setWordWrap(False)
@@ -817,7 +820,7 @@ class ImportHistoryTab(QWidget):
         main_layout.setSpacing(4)
 
         # === Top Section: Session Selection and Details (compact) ===
-        # Row 1: Session selector and filter
+        # Row 1: Session selector, status filter, and session info
         row1 = QHBoxLayout()
         row1.setSpacing(8)
 
@@ -825,10 +828,11 @@ class ImportHistoryTab(QWidget):
         self.session_combo = QComboBox()
         self.session_combo.setMinimumWidth(280)
         self.session_combo.setMaximumWidth(400)
+        self.session_combo.setToolTip("Select a session to view details, or 'All Sessions' to view aggregate data")
         self.session_combo.currentIndexChanged.connect(self.on_session_selected)
         row1.addWidget(self.session_combo)
 
-        row1.addWidget(QLabel("Filter:"))
+        row1.addWidget(QLabel("Status:"))
         self.status_filter = QComboBox()
         self.status_filter.addItems(["All", "Completed", "Running", "Failed", "Cancelled"])
         self.status_filter.currentIndexChanged.connect(self.refresh_sessions)
@@ -838,20 +842,20 @@ class ImportHistoryTab(QWidget):
         refresh_btn.clicked.connect(self.refresh_sessions)
         row1.addWidget(refresh_btn)
 
-        row1.addSpacing(20)
+        row1.addSpacing(30)
 
-        # Session info inline
+        # Session info inline (selected session details)
+        row1.addWidget(QLabel("Result:"))
         self._detail_status = QLabel("--")
         self._detail_status.setMinimumWidth(70)
-        row1.addWidget(QLabel("Status:"))
         row1.addWidget(self._detail_status)
 
-        self._detail_started = QLabel("--")
         row1.addWidget(QLabel("Started:"))
+        self._detail_started = QLabel("--")
         row1.addWidget(self._detail_started)
 
-        self._detail_duration = QLabel("--")
         row1.addWidget(QLabel("Duration:"))
+        self._detail_duration = QLabel("--")
         row1.addWidget(self._detail_duration)
 
         row1.addStretch()
@@ -905,38 +909,28 @@ class ImportHistoryTab(QWidget):
         # Filter/search bar
         filter_layout = QHBoxLayout()
 
-        # Tab selector for All/Duplicates/Errors
-        filter_layout.addWidget(QLabel("View:"))
-        self.view_combo = QComboBox()
-        self.view_combo.addItems(["All Files", "Duplicates Only", "Errors Only"])
-        self.view_combo.currentIndexChanged.connect(self._on_view_changed)
-        filter_layout.addWidget(self.view_combo)
+        # Single "Show" dropdown for filtering by outcome
+        filter_layout.addWidget(QLabel("Show:"))
+        self._show_combo = QComboBox()
+        self._show_combo.addItems([
+            "All Files",
+            "New Files (Added to Archive)",
+            "Duplicates",
+            "Filtered (Icons/Thumbnails)",
+            "Errors"
+        ])
+        self._show_combo.currentTextChanged.connect(self._on_show_filter_changed)
+        filter_layout.addWidget(self._show_combo)
 
         filter_layout.addSpacing(20)
 
         # Search box
         filter_layout.addWidget(QLabel("Search:"))
         self._search_edit = QLineEdit()
-        self._search_edit.setPlaceholderText("Type to search all columns...")
+        self._search_edit.setPlaceholderText("Type to search filenames...")
         self._search_edit.setClearButtonEnabled(True)
         self._search_edit.textChanged.connect(self._on_search_changed)
         filter_layout.addWidget(self._search_edit, 2)
-
-        # Operation filter
-        filter_layout.addWidget(QLabel("Operation:"))
-        self._operation_combo = QComboBox()
-        self._operation_combo.addItems([
-            "All", "Copy", "Move", "Skip Duplicate", "Skip Filtered", "Error"
-        ])
-        self._operation_combo.currentTextChanged.connect(self._on_operation_changed)
-        filter_layout.addWidget(self._operation_combo)
-
-        # Status filter
-        filter_layout.addWidget(QLabel("Status:"))
-        self._status_combo = QComboBox()
-        self._status_combo.addItems(["All", "Success", "Failed", "Skipped"])
-        self._status_combo.currentTextChanged.connect(self._on_status_changed)
-        filter_layout.addWidget(self._status_combo)
 
         # Record count label
         self._count_label = QLabel("0 records")
@@ -1007,6 +1001,34 @@ class ImportHistoryTab(QWidget):
 
         export_layout.addStretch()
 
+        # File action buttons
+        self.open_file_btn = QPushButton("Open File")
+        self.open_file_btn.clicked.connect(self.open_selected_file)
+        self.open_file_btn.setEnabled(False)
+        self.open_file_btn.setToolTip("Open file with default application")
+        export_layout.addWidget(self.open_file_btn)
+
+        self.open_folder_btn = QPushButton("Open Folder")
+        self.open_folder_btn.clicked.connect(self.open_file_folder)
+        self.open_folder_btn.setEnabled(False)
+        self.open_folder_btn.setToolTip("Open folder containing the file")
+        export_layout.addWidget(self.open_folder_btn)
+
+        self.copy_path_btn = QPushButton("Copy Path")
+        self.copy_path_btn.clicked.connect(self.copy_file_path)
+        self.copy_path_btn.setEnabled(False)
+        self.copy_path_btn.setToolTip("Copy file path to clipboard")
+        export_layout.addWidget(self.copy_path_btn)
+
+        export_layout.addSpacing(20)
+
+        # Process File(s) button
+        self.reprocess_btn = QPushButton("Process File(s)")
+        self.reprocess_btn.clicked.connect(self.reprocess_files)
+        self.reprocess_btn.setEnabled(False)
+        self.reprocess_btn.setToolTip("Reprocess selected file(s) with current settings")
+        export_layout.addWidget(self.reprocess_btn)
+
         # Delete session button
         self.delete_btn = QPushButton("Delete Session")
         self.delete_btn.clicked.connect(self.delete_session)
@@ -1027,7 +1049,7 @@ class ImportHistoryTab(QWidget):
                 logger.error(f"Failed to initialize audit manager: {e}", exc_info=True)
                 self.audit_manager = None
                 self.session_combo.clear()
-                self.details_text.setPlainText(f"Failed to load audit data: {e}")
+                self._clear_session_display()
 
     def showEvent(self, event):
         """Handle tab becoming visible - refresh data."""
@@ -1059,10 +1081,14 @@ class ImportHistoryTab(QWidget):
             self.session_combo.blockSignals(True)
             self.session_combo.clear()
 
+            # Add "All Sessions" option as first item
+            self.session_combo.addItem("All Sessions", "__ALL__")
+
             if not sessions:
-                self.session_combo.addItem("No sessions found", None)
                 self.session_combo.blockSignals(False)
-                self._clear_session_display()
+                # Still allow "All Sessions" to be selected
+                self.session_combo.setCurrentIndex(0)
+                self.on_session_selected(0)
                 return
 
             for session in sessions:
@@ -1104,9 +1130,15 @@ class ImportHistoryTab(QWidget):
             return
 
         self.current_session_id = session_id
-        self._load_session_details()
-        self._load_file_logs()
-        self._set_export_buttons_enabled(True)
+
+        # Check if "All Sessions" is selected
+        if session_id == "__ALL__":
+            self._load_all_sessions_view()
+        else:
+            self._load_session_details()
+            self._load_file_logs()
+
+        self._set_export_buttons_enabled(session_id != "__ALL__")
 
         # Clear preview
         self._image_preview.clear()
@@ -1135,6 +1167,65 @@ class ImportHistoryTab(QWidget):
         self._detail_filtered.setText("--")
         self._detail_errors.setText("--")
         self._detail_errors.setStyleSheet("")
+
+    def _load_all_sessions_view(self):
+        """Load aggregate view of all sessions."""
+        if not self.audit_manager:
+            return
+
+        try:
+            # Get aggregate statistics
+            stats = self.audit_manager.get_aggregate_statistics()
+
+            if not stats:
+                self._clear_detail_labels()
+                return
+
+            # Display aggregate information
+            total_sessions = stats.get('total_sessions', 0)
+            first_date = stats.get('first_session_date', '')
+            last_date = stats.get('last_session_date', '')
+
+            # Format date range
+            if first_date and last_date:
+                try:
+                    first_dt = datetime.fromisoformat(first_date)
+                    last_dt = datetime.fromisoformat(last_date)
+                    date_range = f"{first_dt.strftime('%Y-%m-%d')} to {last_dt.strftime('%Y-%m-%d')}"
+                    self._detail_started.setText(date_range)
+                except Exception:
+                    self._detail_started.setText("Multiple sessions")
+            else:
+                self._detail_started.setText("No sessions")
+
+            # Status shows session count
+            self._detail_status.setText(f"{total_sessions} sessions")
+            self._detail_status.setStyleSheet("color: blue; font-weight: bold;")
+
+            # Duration not applicable
+            self._detail_duration.setText("--")
+
+            # Display aggregate statistics
+            self._detail_scanned.setText(f"{stats.get('total_files_scanned', 0):,}")
+            self._detail_processed.setText(f"{stats.get('total_files_processed', 0):,}")
+            self._detail_unique.setText(f"{stats.get('total_unique_files', 0):,}")
+            self._detail_duplicates.setText(f"{stats.get('total_duplicates', 0):,}")
+            self._detail_filtered.setText(f"{stats.get('total_filtered', 0):,}")
+
+            # Errors with color if > 0
+            errors = stats.get('total_errors', 0)
+            self._detail_errors.setText(f"{errors:,}")
+            if errors > 0:
+                self._detail_errors.setStyleSheet("color: red; font-weight: bold;")
+            else:
+                self._detail_errors.setStyleSheet("")
+
+            # Load all file logs
+            self._load_all_file_logs()
+
+        except Exception as e:
+            logger.error(f"Failed to load all sessions view: {e}", exc_info=True)
+            self._clear_detail_labels()
 
     def _load_session_details(self):
         """Load and display session details."""
@@ -1215,6 +1306,35 @@ class ImportHistoryTab(QWidget):
             logger.error(f"Failed to load session details: {e}", exc_info=True)
             self._clear_detail_labels()
 
+    def _load_all_file_logs(self):
+        """Load file operation logs from all sessions."""
+        if not self.audit_manager:
+            self._model.clear()
+            return
+
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+
+            # Get all file logs (limit to 10,000 most recent)
+            all_logs = self.audit_manager.get_all_file_logs(limit=10000)
+
+            # Store full data and pre-compute filtered views
+            self._all_logs = all_logs
+            self._new_files_logs = [l for l in all_logs if l.get('operation') in ('copy', 'move', 'reprocess')]
+            self._duplicate_logs = [l for l in all_logs if l.get('operation') == 'duplicate detected']
+            self._filtered_logs = [l for l in all_logs if l.get('operation') == 'skip_filtered']
+            self._error_logs = [l for l in all_logs if l.get('status') == 'failed']
+
+            # Apply current show filter
+            self._apply_show_filter()
+
+        except Exception as e:
+            logger.error(f"Failed to load all file logs: {e}", exc_info=True)
+            self._model.clear()
+            QMessageBox.warning(self, "Error", f"Failed to load file logs: {e}")
+        finally:
+            QApplication.restoreOverrideCursor()
+
     def _load_file_logs(self):
         """Load file operation logs for current session."""
         if not self.audit_manager or not self.current_session_id:
@@ -1227,13 +1347,15 @@ class ImportHistoryTab(QWidget):
             # Get all file logs
             all_logs = self.audit_manager.get_file_logs_for_session(self.current_session_id)
 
-            # Store full data
+            # Store full data and pre-compute filtered views
             self._all_logs = all_logs
-            self._duplicate_logs = [l for l in all_logs if l.get('operation') == 'skip_duplicate']
+            self._new_files_logs = [l for l in all_logs if l.get('operation') in ('copy', 'move', 'reprocess')]
+            self._duplicate_logs = [l for l in all_logs if l.get('operation') == 'duplicate detected']
+            self._filtered_logs = [l for l in all_logs if l.get('operation') == 'skip_filtered']
             self._error_logs = [l for l in all_logs if l.get('status') == 'failed']
 
-            # Apply current view filter
-            self._apply_view_filter()
+            # Apply current show filter
+            self._apply_show_filter()
 
         except Exception as e:
             logger.error(f"Failed to load file logs: {e}", exc_info=True)
@@ -1242,21 +1364,25 @@ class ImportHistoryTab(QWidget):
         finally:
             QApplication.restoreOverrideCursor()
 
-    def _on_view_changed(self, index):
-        """Handle view combo change."""
-        self._apply_view_filter()
+    def _on_show_filter_changed(self, text: str):
+        """Handle show filter dropdown change."""
+        self._apply_show_filter()
 
-    def _apply_view_filter(self):
-        """Apply the view filter (All/Duplicates/Errors)."""
+    def _apply_show_filter(self):
+        """Apply the show filter to display appropriate records."""
         if not hasattr(self, '_all_logs'):
             return
 
-        view = self.view_combo.currentText()
-        if view == "Duplicates Only":
+        show = self._show_combo.currentText()
+        if show == "New Files (Added to Archive)":
+            self._model.setData(self._new_files_logs)
+        elif show == "Duplicates":
             self._model.setData(self._duplicate_logs)
-        elif view == "Errors Only":
+        elif show == "Filtered (Icons/Thumbnails)":
+            self._model.setData(self._filtered_logs)
+        elif show == "Errors":
             self._model.setData(self._error_logs)
-        else:
+        else:  # "All Files"
             self._model.setData(self._all_logs)
 
         self._update_count()
@@ -1270,29 +1396,6 @@ class ImportHistoryTab(QWidget):
         """Apply the search filter."""
         text = self._search_edit.text()
         self._proxy.setSearchText(text)
-        self._update_count()
-
-    def _on_operation_changed(self, text: str):
-        """Handle operation filter change."""
-        if text == "All":
-            self._proxy.setOperationFilter("")
-        else:
-            op_map = {
-                "Copy": "copy",
-                "Move": "move",
-                "Skip Duplicate": "skip_duplicate",
-                "Skip Filtered": "skip_filtered",
-                "Error": "error",
-            }
-            self._proxy.setOperationFilter(op_map.get(text, text.lower()))
-        self._update_count()
-
-    def _on_status_changed(self, text: str):
-        """Handle status filter change."""
-        if text == "All":
-            self._proxy.setStatusFilter("")
-        else:
-            self._proxy.setStatusFilter(text.lower())
         self._update_count()
 
     def _update_count(self):
@@ -1310,9 +1413,17 @@ class ImportHistoryTab(QWidget):
         if not indexes:
             self._image_preview.clear()
             self._file_details.clear()
+            self.reprocess_btn.setEnabled(False)
+            self.open_file_btn.setEnabled(False)
+            self.open_folder_btn.setEnabled(False)
+            self.copy_path_btn.setEnabled(False)
             return
 
-        # Get selected row
+        # Enable reprocess button when files are selected (but not for "All Sessions" view)
+        can_reprocess = self.current_session_id != "__ALL__"
+        self.reprocess_btn.setEnabled(can_reprocess and len(indexes) > 0)
+
+        # Get selected row for preview (use first selected)
         proxy_index = indexes[0]
         source_index = self._proxy.mapToSource(proxy_index)
         log = self._model.getLog(source_index.row())
@@ -1320,12 +1431,21 @@ class ImportHistoryTab(QWidget):
         if not log:
             self._image_preview.clear()
             self._file_details.clear()
+            self.open_file_btn.setEnabled(False)
+            self.open_folder_btn.setEnabled(False)
+            self.copy_path_btn.setEnabled(False)
             return
 
         # Determine file path to preview (prefer destination, fall back to source)
         preview_path = log.get('destination_path', '')
         if not preview_path or not os.path.exists(preview_path):
             preview_path = log.get('source_path', '')
+
+        # Enable file action buttons if we have a valid path
+        has_path = bool(preview_path)
+        self.open_file_btn.setEnabled(has_path and os.path.exists(preview_path))
+        self.open_folder_btn.setEnabled(has_path)
+        self.copy_path_btn.setEnabled(has_path)
 
         # Update preview and details
         self._image_preview.setImage(preview_path)
@@ -1433,3 +1553,293 @@ class ImportHistoryTab(QWidget):
             logger.error(f"Failed to delete session: {e}", exc_info=True)
             QMessageBox.critical(self, "Delete Failed",
                                f"Failed to delete session:\n{e}")
+
+    def reprocess_files(self):
+        """Reprocess selected files from import history."""
+        if not self.database_path:
+            QMessageBox.warning(self, "No Database", "No database selected.")
+            return
+
+        # Get selected files
+        indexes = self._view.selectionModel().selectedRows()
+        if not indexes:
+            QMessageBox.warning(self, "No Selection", "Please select one or more files to reprocess.")
+            return
+
+        # Collect file records
+        file_records = []
+        for proxy_index in indexes:
+            source_index = self._proxy.mapToSource(proxy_index)
+            log = self._model.getLog(source_index.row())
+            if log:
+                file_records.append(log)
+
+        if not file_records:
+            QMessageBox.warning(self, "No Files", "No valid files selected.")
+            return
+
+        # Get archive location and organization template from database metadata
+        try:
+            from database_metadata import DatabaseMetadata
+            db_metadata = DatabaseMetadata(self.database_path)
+            metadata = db_metadata.get_metadata()
+
+            if not metadata:
+                QMessageBox.critical(self, "Database Error",
+                                   "Failed to load database metadata.")
+                return
+
+            archive_location = metadata.get('archive_location')
+            organization_template = metadata.get('organization_template', '{YYYY}/{MM}/{DD}')
+
+            if not archive_location:
+                QMessageBox.critical(self, "Configuration Error",
+                                   "Archive location not configured in database.")
+                return
+
+        except Exception as e:
+            logger.error(f"Failed to load database metadata: {e}", exc_info=True)
+            QMessageBox.critical(self, "Error",
+                               f"Failed to load database settings:\n{e}")
+            return
+
+        # Show confirmation dialog
+        count = len(file_records)
+        reply = QMessageBox.question(
+            self, "Confirm Reprocess",
+            f"Reprocess {count} file(s)?\n\n"
+            f"Files will be copied to:\n{archive_location}\n\n"
+            f"Organization: {organization_template}\n\n"
+            "Note: Duplicate files will be skipped automatically.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Create and start reprocess worker
+        try:
+            from ui.reprocess_worker import ReprocessWorker
+
+            self.reprocess_worker = ReprocessWorker(
+                database_path=self.database_path,
+                file_records=file_records,
+                archive_location=archive_location,
+                organization_template=organization_template,
+                copy_mode=True,  # Always copy (never move from import history)
+                audit_manager=self.audit_manager  # Pass audit manager for tracking
+            )
+
+            # Connect signals
+            self.reprocess_worker.progress_update.connect(self._on_reprocess_progress)
+            self.reprocess_worker.status_update.connect(self._on_reprocess_status)
+            self.reprocess_worker.completed.connect(self._on_reprocess_completed)
+            self.reprocess_worker.error_occurred.connect(self._on_reprocess_error)
+
+            # Create progress dialog
+            self.reprocess_progress_dialog = QProgressDialog(
+                "Initializing...", "Cancel", 0, count, self
+            )
+            self.reprocess_progress_dialog.setWindowTitle("Reprocessing Files")
+            self.reprocess_progress_dialog.setWindowModality(Qt.WindowModal)
+            self.reprocess_progress_dialog.setMinimumDuration(0)
+            self.reprocess_progress_dialog.canceled.connect(self._on_reprocess_cancel)
+
+            # Start worker
+            self.reprocess_worker.start()
+            logger.info(f"Started reprocessing {count} file(s)")
+
+        except Exception as e:
+            logger.error(f"Failed to start reprocess worker: {e}", exc_info=True)
+            QMessageBox.critical(self, "Error",
+                               f"Failed to start reprocessing:\n{e}")
+
+    def _on_reprocess_progress(self, current, total, filename):
+        """Update progress dialog."""
+        if hasattr(self, 'reprocess_progress_dialog'):
+            self.reprocess_progress_dialog.setValue(current)
+            self.reprocess_progress_dialog.setLabelText(f"Processing {filename}...")
+
+    def _on_reprocess_status(self, message):
+        """Update status in progress dialog."""
+        if hasattr(self, 'reprocess_progress_dialog'):
+            self.reprocess_progress_dialog.setLabelText(message)
+
+    def _on_reprocess_completed(self, results):
+        """Handle reprocess completion."""
+        if hasattr(self, 'reprocess_progress_dialog'):
+            self.reprocess_progress_dialog.close()
+
+        total = results.get('total', 0)
+        successful = results.get('successful', 0)
+        failed = results.get('failed', 0)
+        skipped = results.get('skipped', 0)
+        session_id = results.get('session_id')
+
+        # Build result message
+        message_parts = [
+            f"Reprocessing complete!",
+            f"",
+            f"Total: {total}",
+            f"Successful: {successful}",
+            f"Skipped (duplicates): {skipped}",
+            f"Failed: {failed}"
+        ]
+
+        # Add session info if available
+        if session_id:
+            message_parts.append("")
+            message_parts.append(f"Session ID: {session_id}")
+            message_parts.append("View details in Import History tab")
+
+        # Add details about failures if any
+        if failed > 0:
+            failed_files = results.get('failed_files', [])
+            message_parts.append("")
+            message_parts.append("Failed files:")
+            for item in failed_files[:5]:  # Show first 5 failures
+                filename = item.get('filename', 'Unknown')
+                reason = item.get('reason', 'Unknown error')
+                message_parts.append(f"  • {filename}: {reason}")
+            if len(failed_files) > 5:
+                message_parts.append(f"  ... and {len(failed_files) - 5} more")
+
+        # Add destination info for successful files
+        if successful > 0:
+            successful_files = results.get('successful_files', [])
+            if successful_files:
+                first_file = successful_files[0]
+                dest_path = first_file.get('destination_path', '')
+                if dest_path:
+                    message_parts.append("")
+                    message_parts.append(f"Files copied to: {os.path.dirname(dest_path)}")
+
+        message = "\n".join(message_parts)
+
+        # Show appropriate dialog based on results
+        if failed > 0:
+            QMessageBox.warning(self, "Reprocess Complete with Errors", message)
+        else:
+            QMessageBox.information(self, "Reprocess Complete", message)
+
+        # Refresh the session view
+        self.refresh_sessions()
+        logger.info(f"Reprocessing completed: {successful} successful, {skipped} skipped, {failed} failed (session: {session_id})")
+
+    def _on_reprocess_error(self, error_message):
+        """Handle reprocess error."""
+        if hasattr(self, 'reprocess_progress_dialog'):
+            self.reprocess_progress_dialog.close()
+
+        QMessageBox.critical(self, "Reprocess Error",
+                           f"An error occurred during reprocessing:\n\n{error_message}")
+        logger.error(f"Reprocess error: {error_message}")
+
+    def _on_reprocess_cancel(self):
+        """Handle reprocess cancellation."""
+        if hasattr(self, 'reprocess_worker'):
+            self.reprocess_worker.stop()
+            logger.info("Reprocess cancelled by user")
+
+    def open_selected_file(self):
+        """Open the selected file with default application."""
+        indexes = self._view.selectionModel().selectedRows()
+        if not indexes:
+            return
+
+        # Get first selected file
+        proxy_index = indexes[0]
+        source_index = self._proxy.mapToSource(proxy_index)
+        log = self._model.getLog(source_index.row())
+
+        if not log:
+            return
+
+        # Determine file path (prefer destination, fall back to source)
+        file_path = log.get('destination_path', '')
+        if not file_path or not os.path.exists(file_path):
+            file_path = log.get('source_path', '')
+
+        if not file_path or not os.path.exists(file_path):
+            QMessageBox.warning(self, "File Not Found",
+                              f"File does not exist:\n{file_path}")
+            return
+
+        try:
+            # Open file with default application (platform-independent)
+            if os.name == 'nt':  # Windows
+                os.startfile(file_path)
+            elif os.name == 'posix':  # Linux/Mac
+                subprocess.run(['xdg-open', file_path], check=False)
+
+        except Exception as e:
+            logger.error(f"Failed to open file: {e}", exc_info=True)
+            QMessageBox.critical(self, "Error Opening File",
+                               f"Failed to open file:\n{str(e)}")
+
+    def open_file_folder(self):
+        """Open the folder containing the selected file."""
+        indexes = self._view.selectionModel().selectedRows()
+        if not indexes:
+            return
+
+        # Get first selected file
+        proxy_index = indexes[0]
+        source_index = self._proxy.mapToSource(proxy_index)
+        log = self._model.getLog(source_index.row())
+
+        if not log:
+            return
+
+        # Determine file path (prefer destination, fall back to source)
+        file_path = log.get('destination_path', '')
+        if not file_path or not os.path.exists(file_path):
+            file_path = log.get('source_path', '')
+
+        folder_path = os.path.dirname(file_path) if file_path else ''
+
+        if not folder_path or not os.path.exists(folder_path):
+            QMessageBox.warning(self, "Folder Not Found",
+                              f"Folder does not exist:\n{folder_path}")
+            return
+
+        try:
+            # Open folder with file manager (platform-independent)
+            if os.name == 'nt':  # Windows
+                os.startfile(folder_path)
+            elif os.name == 'posix':  # Linux/Mac
+                subprocess.run(['xdg-open', folder_path], check=False)
+
+        except Exception as e:
+            logger.error(f"Failed to open folder: {e}", exc_info=True)
+            QMessageBox.critical(self, "Error Opening Folder",
+                               f"Failed to open folder:\n{str(e)}")
+
+    def copy_file_path(self):
+        """Copy the selected file path to clipboard."""
+        indexes = self._view.selectionModel().selectedRows()
+        if not indexes:
+            return
+
+        # Get first selected file
+        proxy_index = indexes[0]
+        source_index = self._proxy.mapToSource(proxy_index)
+        log = self._model.getLog(source_index.row())
+
+        if not log:
+            return
+
+        # Determine file path (prefer destination, fall back to source)
+        file_path = log.get('destination_path', '')
+        if not file_path or not os.path.exists(file_path):
+            file_path = log.get('source_path', '')
+
+        if not file_path:
+            return
+
+        clipboard = QApplication.clipboard()
+        clipboard.setText(file_path)
+
+        # Show brief confirmation (no blocking dialog)
+        logger.info(f"Copied to clipboard: {file_path}")
