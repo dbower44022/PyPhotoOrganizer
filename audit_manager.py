@@ -14,11 +14,20 @@ import uuid
 import json
 import logging
 import csv
+import time
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# SQLite connection timeout (seconds) - wait for locks
+SQLITE_TIMEOUT = 30
+
+# Retry settings for transient lock errors during concurrent access
+# Total retry time with exponential backoff: 0.5 + 1.0 + 1.5 + 2.0 + 2.5 = 7.5 seconds
+MAX_RETRIES = 5
+RETRY_DELAY = 0.5  # seconds base delay (multiplied by attempt number)
 
 
 def generate_session_id() -> str:
@@ -143,10 +152,23 @@ class AuditManager:
         self.database_path = database_path
         self._ensure_tables()
 
+    def _get_connection(self) -> sqlite3.Connection:
+        """
+        Get a database connection with proper settings.
+
+        Returns:
+            sqlite3.Connection with timeout and WAL mode enabled
+        """
+        conn = sqlite3.connect(self.database_path, timeout=SQLITE_TIMEOUT)
+        # Enable WAL mode for better concurrency
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")  # 30 second busy timeout
+        return conn
+
     def _ensure_tables(self) -> None:
         """Create audit tables if they don't exist."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 # Create all audit tables
@@ -227,7 +249,7 @@ class AuditManager:
         start_timestamp = datetime.now().isoformat()
 
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     INSERT INTO ImportSession
@@ -264,7 +286,8 @@ class AuditManager:
         Args:
             session_id: Session to close
             status: Final status ('completed', 'failed', 'cancelled')
-            stats: Dictionary of final statistics
+            stats: Dictionary of final statistics (only provided fields are updated,
+                   existing values are preserved for fields not in stats)
             error_summary: Error counts by type
 
         Returns:
@@ -273,8 +296,41 @@ class AuditManager:
         end_timestamp = datetime.now().isoformat()
 
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
+
+                # First fetch existing session values to preserve fields not in stats
+                cursor.execute("""
+                    SELECT total_files_scanned, total_files_processed, total_unique_files,
+                           total_duplicates, total_filtered, total_errors,
+                           total_unreliable_dates, total_bytes_processed
+                    FROM ImportSession WHERE session_id = ?
+                """, (session_id,))
+                existing = cursor.fetchone()
+
+                if existing:
+                    # Use existing values as defaults, override with stats if provided
+                    total_files_scanned = stats.get('total_files_scanned', existing[0] or 0)
+                    total_files_processed = stats.get('total_files_processed', existing[1] or 0)
+                    total_unique_files = stats.get('total_unique_files',
+                                                   stats.get('total_new_original_files', existing[2] or 0))
+                    total_duplicates = stats.get('total_duplicates', existing[3] or 0)
+                    total_filtered = stats.get('total_filtered', existing[4] or 0)
+                    total_errors = stats.get('total_errors', existing[5] or 0)
+                    total_unreliable_dates = stats.get('total_unreliable_dates', existing[6] or 0)
+                    total_bytes_processed = stats.get('total_bytes_processed', existing[7] or 0)
+                else:
+                    # No existing session, use stats with 0 defaults
+                    total_files_scanned = stats.get('total_files_scanned', 0)
+                    total_files_processed = stats.get('total_files_processed', 0)
+                    total_unique_files = stats.get('total_unique_files',
+                                                   stats.get('total_new_original_files', 0))
+                    total_duplicates = stats.get('total_duplicates', 0)
+                    total_filtered = stats.get('total_filtered', 0)
+                    total_errors = stats.get('total_errors', 0)
+                    total_unreliable_dates = stats.get('total_unreliable_dates', 0)
+                    total_bytes_processed = stats.get('total_bytes_processed', 0)
+
                 cursor.execute("""
                     UPDATE ImportSession
                     SET end_timestamp = ?,
@@ -292,14 +348,14 @@ class AuditManager:
                 """, (
                     end_timestamp,
                     status,
-                    stats.get('total_files_scanned', 0),
-                    stats.get('total_files_processed', 0),
-                    stats.get('total_unique_files', stats.get('total_new_original_files', 0)),
-                    stats.get('total_duplicates', 0),
-                    stats.get('total_filtered', 0),
-                    stats.get('total_errors', 0),
-                    stats.get('total_unreliable_dates', 0),
-                    stats.get('total_bytes_processed', 0),
+                    total_files_scanned,
+                    total_files_processed,
+                    total_unique_files,
+                    total_duplicates,
+                    total_filtered,
+                    total_errors,
+                    total_unreliable_dates,
+                    total_bytes_processed,
                     json.dumps(error_summary) if error_summary else None,
                     session_id
                 ))
@@ -315,7 +371,7 @@ class AuditManager:
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get session details by ID."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("""
@@ -352,7 +408,7 @@ class AuditManager:
             List of session dictionaries, newest first
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
 
@@ -408,7 +464,7 @@ class AuditManager:
 
             values.append(session_id)
 
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(f"""
                     UPDATE ImportSession
@@ -426,7 +482,7 @@ class AuditManager:
     def delete_session(self, session_id: str) -> bool:
         """Delete a session and all its related data."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 # FileProcessingLog will be deleted via CASCADE
                 cursor.execute("DELETE FROM ImportSession WHERE session_id = ?", (session_id,))
@@ -466,8 +522,8 @@ class AuditManager:
         Args:
             session_id: Current session ID
             source_path: Source file path
-            operation: 'copy', 'move', 'skip_duplicate', 'skip_filtered', 'error'
-            status: 'success', 'failed', 'skipped'
+            operation: 'copy', 'move', 'duplicate detected', 'skip_filtered', 'error'
+            status: 'success', 'failed', 'skipped', 'duplicate'
             file_hash: Full SHA-256 hash
             partial_hash: Partial hash (first 16KB)
             destination_path: Destination path (if applicable)
@@ -488,29 +544,43 @@ class AuditManager:
         """
         process_timestamp = datetime.now().isoformat()
 
-        try:
-            with sqlite3.connect(self.database_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO FileProcessingLog
-                    (session_id, source_path, destination_path, file_hash, partial_hash,
-                     operation, status, file_size, creation_date, date_source, date_reliable,
-                     process_timestamp, duration_ms, error_code, error_message, error_traceback,
-                     duplicate_of_hash, filter_reason, filter_details)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    session_id, source_path, destination_path, file_hash, partial_hash,
-                    operation, status, file_size, creation_date, date_source,
-                    1 if date_reliable else 0, process_timestamp, duration_ms,
-                    error_code, error_message, error_traceback, duplicate_of_hash,
-                    filter_reason, json.dumps(filter_details) if filter_details else None
-                ))
-                conn.commit()
-                return cursor.lastrowid
+        # Retry logic for transient database locks
+        last_error = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                with self._get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        INSERT INTO FileProcessingLog
+                        (session_id, source_path, destination_path, file_hash, partial_hash,
+                         operation, status, file_size, creation_date, date_source, date_reliable,
+                         process_timestamp, duration_ms, error_code, error_message, error_traceback,
+                         duplicate_of_hash, filter_reason, filter_details)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        session_id, source_path, destination_path, file_hash, partial_hash,
+                        operation, status, file_size, creation_date, date_source,
+                        1 if date_reliable else 0, process_timestamp, duration_ms,
+                        error_code, error_message, error_traceback, duplicate_of_hash,
+                        filter_reason, json.dumps(filter_details) if filter_details else None
+                    ))
+                    conn.commit()
+                    return cursor.lastrowid
 
-        except Exception as e:
-            logger.error(f"Failed to log file operation: {e}", exc_info=True)
-            return -1
+            except sqlite3.OperationalError as e:
+                last_error = e
+                if "locked" in str(e).lower() and attempt < MAX_RETRIES - 1:
+                    logger.warning(f"Database locked, retrying ({attempt + 1}/{MAX_RETRIES})...")
+                    time.sleep(RETRY_DELAY * (attempt + 1))  # Exponential backoff
+                else:
+                    logger.error(f"Failed to log file operation after {attempt + 1} attempts: {e}", exc_info=True)
+                    return -1
+            except Exception as e:
+                logger.error(f"Failed to log file operation: {e}", exc_info=True)
+                return -1
+
+        logger.error(f"Failed to log file operation after all retries: {last_error}", exc_info=True)
+        return -1
 
     def update_verification_status(
         self,
@@ -521,7 +591,7 @@ class AuditManager:
     ) -> bool:
         """Update hash verification status for a file operation."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     UPDATE FileProcessingLog
@@ -542,6 +612,113 @@ class AuditManager:
             logger.error(f"Failed to update verification status: {e}", exc_info=True)
             return False
 
+    def get_aggregate_statistics(self) -> Dict[str, Any]:
+        """
+        Get aggregate statistics across all sessions.
+
+        Returns:
+            Dictionary with aggregate counts and totals
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Get totals from ImportSession table
+                cursor.execute("""
+                    SELECT
+                        COUNT(*) as total_sessions,
+                        SUM(total_files_scanned) as total_scanned,
+                        SUM(total_files_processed) as total_processed,
+                        SUM(total_unique_files) as total_unique,
+                        SUM(total_duplicates) as total_duplicates,
+                        SUM(total_filtered) as total_filtered,
+                        SUM(total_errors) as total_errors,
+                        MIN(start_timestamp) as first_session,
+                        MAX(end_timestamp) as last_session
+                    FROM ImportSession
+                """)
+
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'total_sessions': row[0] or 0,
+                        'total_files_scanned': row[1] or 0,
+                        'total_files_processed': row[2] or 0,
+                        'total_unique_files': row[3] or 0,
+                        'total_duplicates': row[4] or 0,
+                        'total_filtered': row[5] or 0,
+                        'total_errors': row[6] or 0,
+                        'first_session_date': row[7],
+                        'last_session_date': row[8]
+                    }
+                else:
+                    return {
+                        'total_sessions': 0,
+                        'total_files_scanned': 0,
+                        'total_files_processed': 0,
+                        'total_unique_files': 0,
+                        'total_duplicates': 0,
+                        'total_filtered': 0,
+                        'total_errors': 0,
+                        'first_session_date': None,
+                        'last_session_date': None
+                    }
+
+        except Exception as e:
+            logger.error(f"Failed to get aggregate statistics: {e}", exc_info=True)
+            return {}
+
+    def get_all_file_logs(
+        self,
+        operation_filter: Optional[str] = None,
+        status_filter: Optional[str] = None,
+        limit: int = 10000,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """
+        Get file operation logs from all sessions.
+
+        Args:
+            operation_filter: Filter by operation type
+            status_filter: Filter by status
+            limit: Maximum number of records to return
+            offset: Number of records to skip
+
+        Returns:
+            List of file log dictionaries
+        """
+        try:
+            with self._get_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+
+                conditions = []
+                params = []
+
+                if operation_filter:
+                    conditions.append("operation = ?")
+                    params.append(operation_filter)
+
+                if status_filter:
+                    conditions.append("status = ?")
+                    params.append(status_filter)
+
+                where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+                params.extend([limit, offset])
+
+                cursor.execute(f"""
+                    SELECT * FROM FileProcessingLog
+                    {where_clause}
+                    ORDER BY process_timestamp DESC
+                    LIMIT ? OFFSET ?
+                """, params)
+
+                return [dict(row) for row in cursor.fetchall()]
+
+        except Exception as e:
+            logger.error(f"Failed to get all file logs: {e}", exc_info=True)
+            return []
+
     def get_file_logs_for_session(
         self,
         session_id: str,
@@ -552,7 +729,7 @@ class AuditManager:
     ) -> List[Dict[str, Any]]:
         """Get file operation logs for a session."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
 
@@ -585,7 +762,7 @@ class AuditManager:
     def get_file_history(self, file_hash: str) -> List[Dict[str, Any]]:
         """Get all operations involving a specific file hash."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("""
@@ -606,7 +783,7 @@ class AuditManager:
     def get_session_file_counts(self, session_id: str) -> Dict[str, int]:
         """Get file operation counts grouped by operation type."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT operation, COUNT(*) as count
@@ -646,7 +823,7 @@ class AuditManager:
         timestamp = datetime.now().isoformat()
 
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 # Try to update existing record
@@ -678,7 +855,7 @@ class AuditManager:
     def get_duplicates_of(self, original_hash: str) -> List[Dict[str, Any]]:
         """Get all known duplicates of an original file."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("""
@@ -703,7 +880,7 @@ class AuditManager:
             - top_duplicated: List of most-duplicated files
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 # Total duplicate mappings
@@ -740,7 +917,7 @@ class AuditManager:
     def get_duplicates_for_session(self, session_id: str) -> List[Dict[str, Any]]:
         """Get duplicates found during a specific session."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("""
@@ -759,7 +936,7 @@ class AuditManager:
     def get_retention_settings(self) -> Dict[str, Any]:
         """Get current retention settings."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("SELECT * FROM AuditRetentionSettings WHERE id = 1")
@@ -781,7 +958,7 @@ class AuditManager:
     ) -> bool:
         """Update retention settings."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     UPDATE AuditRetentionSettings
@@ -824,7 +1001,7 @@ class AuditManager:
         logs_deleted = 0
 
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 if mode == 'sessions':
@@ -887,7 +1064,7 @@ class AuditManager:
             Dictionary with counts and oldest session info
         """
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 cursor.execute("SELECT COUNT(*) FROM ImportSession")
@@ -972,7 +1149,7 @@ class AuditManager:
     ) -> Dict[str, Any]:
         """Generate error analysis report."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 if session_id:
@@ -1089,7 +1266,7 @@ class AuditManager:
     ) -> bool:
         """Export duplicate mappings to CSV."""
         try:
-            with sqlite3.connect(self.database_path) as conn:
+            with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
 

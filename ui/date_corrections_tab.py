@@ -9,8 +9,8 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QTableWidget, QTableWidgetItem,
                                QHeaderView, QGroupBox, QCheckBox, QMessageBox,
                                QSplitter, QAbstractItemView, QGraphicsView,
-                               QGraphicsScene, QGraphicsPixmapItem)
-from PySide6.QtCore import Qt, Signal, QRectF, QPointF
+                               QGraphicsScene, QGraphicsPixmapItem, QLineEdit)
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QTimer
 from PySide6.QtGui import QPixmap, QImage, QPainter, QPen, QColor
 from PIL import Image
 import os
@@ -200,6 +200,12 @@ class DateCorrectionsTab(QWidget):
         super().__init__(parent)
         self.db_metadata = None
         self.current_records = []
+
+        # Search debounce timer
+        self.search_timer = QTimer()
+        self.search_timer.setSingleShot(True)
+        self.search_timer.timeout.connect(self.apply_filters)
+
         self.init_ui()
 
     def init_ui(self):
@@ -211,9 +217,19 @@ class DateCorrectionsTab(QWidget):
         header.setStyleSheet("font-size: 16px; font-weight: bold; padding: 10px;")
         layout.addWidget(header)
 
-        self.file_count_label = QLabel("Files with unreliable date information: 0")
+        self.file_count_label = QLabel("Total files with unreliable dates (all import sessions): 0")
         self.file_count_label.setStyleSheet("padding: 5px; color: #666;")
         layout.addWidget(self.file_count_label)
+
+        # Search box
+        search_layout = QHBoxLayout()
+        search_layout.addWidget(QLabel("Search:"))
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Search filename, path, date, or reason...")
+        self.search_box.textChanged.connect(self._on_search_changed)
+        self.search_box.setClearButtonEnabled(True)
+        search_layout.addWidget(self.search_box)
+        layout.addLayout(search_layout)
 
         # Create main splitter for table and preview
         splitter = QSplitter(Qt.Horizontal)
@@ -441,7 +457,7 @@ class DateCorrectionsTab(QWidget):
         """Reload data from database and refresh table."""
         if not self.db_metadata:
             self.table.setRowCount(0)
-            self.file_count_label.setText("Files with unreliable date information: 0")
+            self.file_count_label.setText("Total files with unreliable dates (all import sessions): 0")
             return
 
         try:
@@ -455,7 +471,7 @@ class DateCorrectionsTab(QWidget):
 
             # Update count
             self.file_count_label.setText(
-                f"Files with unreliable date information: {len(self.current_records)}"
+                f"Total files with unreliable dates (all import sessions): {len(self.current_records)}"
             )
 
             # Apply current filters
@@ -467,8 +483,15 @@ class DateCorrectionsTab(QWidget):
             self._center_dialog(msg_box)
             msg_box.exec()
 
+    def _on_search_changed(self):
+        """Handle search text change with debouncing."""
+        # Stop any existing timer
+        self.search_timer.stop()
+        # Start new timer (300ms delay)
+        self.search_timer.start(300)
+
     def apply_filters(self):
-        """Apply filter checkboxes to show/hide rows."""
+        """Apply filter checkboxes and search to show/hide rows."""
         if not self.current_records:
             self.table.setRowCount(0)
             return
@@ -507,8 +530,47 @@ class DateCorrectionsTab(QWidget):
                (show_reorganized and is_reorganized):
                 status_filtered.append(record)
 
+        # Apply search filter
+        search_text = self.search_box.text().strip().lower() if hasattr(self, 'search_box') else ''
+        if search_text:
+            search_filtered = []
+            for record in status_filtered:
+                # Search across all text fields
+                filename = os.path.basename(record.get('source_path', ''))
+                source_path = record.get('source_path', '')
+                archive_path = record.get('archive_path', '')
+                original_date = record.get('original_date', '')
+                flag_reason = record.get('flag_reason', '')
+                corrected_date = record.get('corrected_date', '')
+                date_source = record.get('date_source', '')
+
+                # Combine all searchable text
+                searchable_text = ' '.join([
+                    filename, source_path, archive_path, original_date,
+                    flag_reason, corrected_date or '', date_source
+                ]).lower()
+
+                if search_text in searchable_text:
+                    search_filtered.append(record)
+
+            final_filtered = search_filtered
+        else:
+            final_filtered = status_filtered
+
+        # Update count label to show filtered vs total
+        total_count = len(self.current_records)
+        filtered_count = len(final_filtered)
+        if search_text or filtered_count != total_count:
+            self.file_count_label.setText(
+                f"Showing {filtered_count:,} of {total_count:,} files with unreliable dates"
+            )
+        else:
+            self.file_count_label.setText(
+                f"Total files with unreliable dates (all import sessions): {total_count:,}"
+            )
+
         # Populate table
-        self.populate_table(status_filtered)
+        self.populate_table(final_filtered)
 
     def populate_table(self, records):
         """
