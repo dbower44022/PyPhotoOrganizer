@@ -81,31 +81,55 @@ class SettingsTab(QWidget):
         custom_layout.addWidget(custom_label)
 
         self.custom_template_edit = QLineEdit()
-        self.custom_template_edit.setPlaceholderText("Example: {YYYY}/{MM-Month_Short}/{DD-Day_Short}")
+        self.custom_template_edit.setPlaceholderText("Example: {year}/{month}-{month_sname}/{day}-{day_sname}")
         self.custom_template_edit.textChanged.connect(self.on_custom_template_changed)
         custom_layout.addWidget(self.custom_template_edit)
 
-        # Helper buttons for placeholders
+        # Helper buttons for placeholders (updated to new naming convention)
         helper_layout = QHBoxLayout()
-        helper_label = QLabel("Insert:")
+        helper_label = QLabel("Quick Insert:")
         helper_layout.addWidget(helper_label)
 
         placeholder_buttons = [
-            ("YYYY", "{YYYY}"),
-            ("MM", "{MM}"),
-            ("DD", "{DD}"),
-            ("MM-Month", "{MM-Month_Short}"),
-            ("DD-Day", "{DD-Day_Short}"),
+            ("year", "{year}"),
+            ("month", "{month}"),
+            ("day", "{day}"),
+            ("month-name", "{month}-{month_sname}"),
+            ("day-name", "{day}-{day_sname}"),
         ]
 
         for btn_label, placeholder in placeholder_buttons:
             btn = QPushButton(btn_label)
-            btn.setMaximumWidth(80)
+            btn.setMaximumWidth(90)
             btn.clicked.connect(lambda checked, p=placeholder: self.insert_placeholder(p))
             helper_layout.addWidget(btn)
 
         helper_layout.addStretch()
         custom_layout.addLayout(helper_layout)
+
+        # Available Variables help text
+        help_label = QLabel("Available Variables (case-insensitive):")
+        help_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        custom_layout.addWidget(help_label)
+
+        help_text = QTextEdit()
+        help_text.setReadOnly(True)
+        help_text.setMaximumHeight(130)
+        help_text.setHtml("""
+            <table style='font-size: 9pt;'>
+            <tr><td style='padding: 2px;'><b>{year}</b></td><td style='padding: 2px;'>- Four-digit year (e.g., 2025)</td></tr>
+            <tr><td style='padding: 2px;'><b>{month}, {day}</b></td><td style='padding: 2px;'>- Zero-padded month/day (e.g., 02, 03)</td></tr>
+            <tr><td style='padding: 2px;'><b>{month_name}, {day_name}</b></td><td style='padding: 2px;'>- Full names (e.g., February, Monday)</td></tr>
+            <tr><td style='padding: 2px;'><b>{month_sname}, {day_sname}</b></td><td style='padding: 2px;'>- Short names (e.g., Feb, Mon)</td></tr>
+            <tr><td style='padding: 2px;'><b>{month}-{month_sname}</b></td><td style='padding: 2px;'>- Combined format (e.g., 02-Feb)</td></tr>
+            <tr><td style='padding: 2px;'><b>{day}-{day_sname}</b></td><td style='padding: 2px;'>- Combined format (e.g., 03-Mon)</td></tr>
+            </table>
+            <p style='font-size: 8pt; color: #666; margin-top: 5px;'>
+            All variables are case-insensitive ({year}, {YEAR}, {Year} work the same).<br>
+            Legacy placeholders ({YYYY}, {MM}, {DD}, etc.) still supported.
+            </p>
+        """)
+        custom_layout.addWidget(help_text)
 
         # Validation message
         self.template_validation_label = QLabel()
@@ -416,16 +440,18 @@ class SettingsTab(QWidget):
         rename_layout.addWidget(self.rename_validation_label)
 
         # Help text
-        help_label = QLabel("Available Variables:")
+        help_label = QLabel("Available Variables (case-insensitive):")
         help_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
         rename_layout.addWidget(help_label)
 
         help_text = QTextEdit()
         help_text.setReadOnly(True)
-        help_text.setMaximumHeight(120)
+        help_text.setMaximumHeight(170)
         help_text.setHtml("""
             <table style='font-size: 9pt;'>
             <tr><td style='padding: 2px;'><b>{year}, {month}, {day}</b></td><td style='padding: 2px;'>- Date components (e.g., 2025, 02, 03)</td></tr>
+            <tr><td style='padding: 2px;'><b>{month_name}, {day_name}</b></td><td style='padding: 2px;'>- Month/day full names (e.g., February, Monday)</td></tr>
+            <tr><td style='padding: 2px;'><b>{month_sname}, {day_sname}</b></td><td style='padding: 2px;'>- Month/day short names (e.g., Feb, Mon)</td></tr>
             <tr><td style='padding: 2px;'><b>{hour}, {minute}, {second}</b></td><td style='padding: 2px;'>- Time components (e.g., 14, 30, 15)</td></tr>
             <tr><td style='padding: 2px;'><b>{original_name}</b></td><td style='padding: 2px;'>- Full original filename</td></tr>
             <tr><td style='padding: 2px;'><b>{original_name_no_ext}</b></td><td style='padding: 2px;'>- Filename without extension</td></tr>
@@ -434,6 +460,7 @@ class SettingsTab(QWidget):
             <tr><td style='padding: 2px;'><b>{parent_folder_name}</b></td><td style='padding: 2px;'>- Grandparent folder name</td></tr>
             <tr><td style='padding: 2px;'><b>{counter}</b> or <b>{counter:04d}</b></td><td style='padding: 2px;'>- Sequential number (1, 2, 3 or 0001, 0002, 0003)</td></tr>
             </table>
+            <p style='font-size: 8pt; color: #666; margin-top: 5px;'>All variables are case-insensitive ({year}, {YEAR}, {Year} work the same).</p>
         """)
         rename_layout.addWidget(help_text)
 

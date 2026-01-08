@@ -170,13 +170,8 @@ class DateCorrectionDialog(QDialog):
 
         self.setLayout(layout)
 
-        # Center on parent
-        if self.parent():
-            parent_geometry = self.parent().frameGeometry()
-            dialog_geometry = self.frameGeometry()
-            center_point = parent_geometry.center()
-            dialog_geometry.moveCenter(center_point)
-            self.move(dialog_geometry.topLeft())
+        # Center on main application window (multi-monitor support)
+        self._center_dialog(self)
 
     def update_day_range(self):
         """Update day spinbox range based on selected month and year."""

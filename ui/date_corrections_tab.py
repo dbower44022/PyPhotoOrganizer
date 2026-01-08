@@ -518,17 +518,24 @@ class DateCorrectionsTab(QWidget):
         show_corrected = self.filter_corrected.isChecked()
         show_reorganized = self.filter_reorganized.isChecked()
 
-        # Filter by status
+        # Filter by status (OR logic - if none checked, show all)
         status_filtered = []
-        for record in filtered_records:
-            is_pending = not record['corrected_date']
-            is_reorganized = record['corrected_date'] and not record['needs_reorganization']
-            is_corrected = record['corrected_date'] and record['needs_reorganization']
+        any_status_filter_active = show_pending or show_corrected or show_reorganized
 
-            if (show_pending and is_pending) or \
-               (show_corrected and is_corrected) or \
-               (show_reorganized and is_reorganized):
+        for record in filtered_records:
+            if not any_status_filter_active:
+                # No status filters active - show all records
                 status_filtered.append(record)
+            else:
+                # OR logic: show if matches ANY checked status
+                is_pending = not record['corrected_date']
+                is_reorganized = record['corrected_date'] and not record['needs_reorganization']
+                is_corrected = record['corrected_date'] and record['needs_reorganization']
+
+                if (show_pending and is_pending) or \
+                   (show_corrected and is_corrected) or \
+                   (show_reorganized and is_reorganized):
+                    status_filtered.append(record)
 
         # Apply search filter
         search_text = self.search_box.text().strip().lower() if hasattr(self, 'search_box') else ''

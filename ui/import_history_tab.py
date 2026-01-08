@@ -1002,22 +1002,22 @@ class ImportHistoryTab(QWidget):
         export_layout.addStretch()
 
         # File action buttons
-        self.open_file_btn = QPushButton("Open File")
+        self.open_file_btn = QPushButton("Open Source File")
         self.open_file_btn.clicked.connect(self.open_selected_file)
         self.open_file_btn.setEnabled(False)
-        self.open_file_btn.setToolTip("Open file with default application")
+        self.open_file_btn.setToolTip("Open source file with default application")
         export_layout.addWidget(self.open_file_btn)
 
-        self.open_folder_btn = QPushButton("Open Folder")
+        self.open_folder_btn = QPushButton("Open Source Folder")
         self.open_folder_btn.clicked.connect(self.open_file_folder)
         self.open_folder_btn.setEnabled(False)
-        self.open_folder_btn.setToolTip("Open folder containing the file")
+        self.open_folder_btn.setToolTip("Open folder containing the source file")
         export_layout.addWidget(self.open_folder_btn)
 
-        self.copy_path_btn = QPushButton("Copy Path")
+        self.copy_path_btn = QPushButton("Copy Source Path")
         self.copy_path_btn.clicked.connect(self.copy_file_path)
         self.copy_path_btn.setEnabled(False)
-        self.copy_path_btn.setToolTip("Copy file path to clipboard")
+        self.copy_path_btn.setToolTip("Copy source file path to clipboard")
         export_layout.addWidget(self.copy_path_btn)
 
         export_layout.addSpacing(20)
