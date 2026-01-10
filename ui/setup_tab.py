@@ -7,7 +7,7 @@ Allows users to configure source/destination folders and operation mode.
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QTableWidget, QTableWidgetItem, QPushButton, QLineEdit, QRadioButton,
                                QButtonGroup, QLabel, QFileDialog, QMessageBox, QHeaderView,
-                               QAbstractItemView, QCheckBox)
+                               QAbstractItemView, QCheckBox, QListWidget)
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QIcon, QColor
 import os
@@ -87,6 +87,89 @@ class SetupTab(QWidget):
 
         source_group.setLayout(source_layout)
         layout.addWidget(source_group)
+
+        # Ignored Directories group
+        ignored_dirs_group = QGroupBox("Ignored Directories (Skip During Scan)")
+        ignored_dirs_layout = QVBoxLayout()
+
+        # Description
+        ignored_dirs_desc = QLabel(
+            "Directories matching these patterns will be skipped during scanning. "
+            "This helps exclude system folders, thumbnails, and other non-photo directories."
+        )
+        ignored_dirs_desc.setWordWrap(True)
+        ignored_dirs_desc.setStyleSheet("font-style: italic; color: gray; padding: 5px;")
+        ignored_dirs_layout.addWidget(ignored_dirs_desc)
+
+        # Pattern list and controls in horizontal layout
+        ignored_content_layout = QHBoxLayout()
+
+        # Left side: List widget
+        list_container = QVBoxLayout()
+        list_label = QLabel("Ignored Patterns:")
+        list_label.setStyleSheet("font-weight: bold;")
+        list_container.addWidget(list_label)
+
+        self.ignored_dirs_list = QListWidget()
+        self.ignored_dirs_list.setMaximumHeight(120)
+        self.ignored_dirs_list.setToolTip("Double-click to edit, select and click Remove to delete")
+        list_container.addWidget(self.ignored_dirs_list)
+        ignored_content_layout.addLayout(list_container)
+
+        # Right side: Control buttons
+        ignored_buttons = QVBoxLayout()
+
+        self.add_ignored_dir_input = QLineEdit()
+        self.add_ignored_dir_input.setPlaceholderText("e.g., @eaDir, thumb*, .git, /path/to/skip")
+        ignored_buttons.addWidget(self.add_ignored_dir_input)
+
+        self.add_ignored_dir_btn = QPushButton("Add Pattern")
+        self.add_ignored_dir_btn.clicked.connect(self.add_ignored_dir_pattern)
+        ignored_buttons.addWidget(self.add_ignored_dir_btn)
+
+        self.remove_ignored_dir_btn = QPushButton("Remove Selected")
+        self.remove_ignored_dir_btn.clicked.connect(self.remove_ignored_dir_pattern)
+        ignored_buttons.addWidget(self.remove_ignored_dir_btn)
+
+        self.add_preset_dirs_btn = QPushButton("Add Common Presets")
+        self.add_preset_dirs_btn.setToolTip("Add commonly ignored folders like @eaDir, .git, node_modules, etc.")
+        self.add_preset_dirs_btn.clicked.connect(self.add_preset_ignored_dirs)
+        ignored_buttons.addWidget(self.add_preset_dirs_btn)
+
+        ignored_buttons.addStretch()
+        ignored_content_layout.addLayout(ignored_buttons)
+
+        ignored_dirs_layout.addLayout(ignored_content_layout)
+
+        # Help text in expandable/collapsible format
+        help_text_widget = QWidget()
+        help_text_widget.setStyleSheet("background-color: #f9f9f9; border: 1px solid #ddd; border-radius: 3px; padding: 8px;")
+        help_text_layout = QVBoxLayout()
+        help_text_layout.setContentsMargins(5, 5, 5, 5)
+
+        help_title = QLabel("ℹ Wildcard Syntax:")
+        help_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
+        help_text_layout.addWidget(help_title)
+
+        help_examples = QLabel(
+            "• <b>*</b> = Match any characters (e.g., <i>thumb*</i> matches thumbnail, thumbs, thumb_cache)<br>"
+            "• <b>?</b> = Match single character (e.g., <i>temp?</i> matches temp1, temp2)<br>"
+            "• <b>Examples:</b> @eaDir, .git, node_modules, thumb*, /mnt/backup/old"
+        )
+        help_examples.setWordWrap(True)
+        help_examples.setStyleSheet("color: #555; font-size: 9pt;")
+        help_text_layout.addWidget(help_examples)
+
+        help_text_widget.setLayout(help_text_layout)
+        ignored_dirs_layout.addWidget(help_text_widget)
+
+        # Statistics label
+        self.ignored_dirs_count_label = QLabel("Total patterns: 0")
+        self.ignored_dirs_count_label.setStyleSheet("font-style: italic; color: gray; margin-top: 5px;")
+        ignored_dirs_layout.addWidget(self.ignored_dirs_count_label)
+
+        ignored_dirs_group.setLayout(ignored_dirs_layout)
+        layout.addWidget(ignored_dirs_group)
 
         # Destination folder group
         dest_group = QGroupBox("Destination Folder (Archive Location)")
@@ -428,13 +511,14 @@ class SetupTab(QWidget):
 
     def set_database(self, db_metadata: DatabaseMetadata):
         """
-        Set the database metadata reference and load sources.
+        Set the database metadata reference and load sources and ignored directories.
 
         Args:
             db_metadata: DatabaseMetadata instance
         """
         self.db_metadata = db_metadata
         self.load_sources_from_database()
+        self.load_ignored_dirs_from_database()
 
     def browse_destination(self):
         """Show informative dialog - destination is managed by database."""
@@ -643,3 +727,143 @@ class SetupTab(QWidget):
                         checkbox.setChecked(is_selected)
 
         self.source_table.blockSignals(False)
+
+    # ========== Ignored Directories Methods ==========
+
+    def add_ignored_dir_pattern(self):
+        """Add a new ignored directory pattern to the list."""
+        pattern = self.add_ignored_dir_input.text().strip()
+        if not pattern:
+            msg_box = QMessageBox(QMessageBox.Warning, "Empty Pattern",
+                                 "Please enter a pattern to add.", QMessageBox.Ok, self)
+            self._center_dialog(msg_box)
+            msg_box.exec()
+            return
+
+        # Check if already exists
+        for i in range(self.ignored_dirs_list.count()):
+            if self.ignored_dirs_list.item(i).text().lower() == pattern.lower():
+                msg_box = QMessageBox(QMessageBox.Information, "Pattern Exists",
+                                     f"Pattern '{pattern}' already exists in the list.", QMessageBox.Ok, self)
+                self._center_dialog(msg_box)
+                msg_box.exec()
+                return
+
+        # Add to list
+        self.ignored_dirs_list.addItem(pattern)
+        self.add_ignored_dir_input.clear()
+        self.update_ignored_dirs_count()
+
+        # Save to database
+        self.save_ignored_dirs_to_database()
+
+    def remove_ignored_dir_pattern(self):
+        """Remove selected ignored directory pattern from the list."""
+        current_item = self.ignored_dirs_list.currentItem()
+        if not current_item:
+            msg_box = QMessageBox(QMessageBox.Information, "No Selection",
+                                 "Please select a pattern to remove.", QMessageBox.Ok, self)
+            self._center_dialog(msg_box)
+            msg_box.exec()
+            return
+
+        # Remove the selected item
+        row = self.ignored_dirs_list.row(current_item)
+        self.ignored_dirs_list.takeItem(row)
+        self.update_ignored_dirs_count()
+
+        # Save to database
+        self.save_ignored_dirs_to_database()
+
+    def add_preset_ignored_dirs(self):
+        """Add common preset patterns for ignored directories."""
+        preset_patterns = [
+            "@eaDir",           # Synology NAS thumbnails
+            ".git",             # Git version control
+            ".svn",             # SVN version control
+            "node_modules",     # Node.js packages
+            "venv",             # Python virtual environment
+            ".venv",            # Python virtual environment (alternate)
+            "__pycache__",      # Python cache
+            "$RECYCLE.BIN",     # Windows recycle bin
+            ".Trash-*",         # Linux trash
+            "Thumbs.db",        # Windows thumbnail cache
+            ".DS_Store",        # macOS metadata
+            "__MACOSX",         # macOS metadata folder
+            ".thumbnails",      # Linux thumbnail cache
+            "*.tmp",            # Temporary folders
+            ".cache",           # Cache folders
+        ]
+
+        added_count = 0
+        for pattern in preset_patterns:
+            # Check if already exists
+            exists = False
+            for i in range(self.ignored_dirs_list.count()):
+                if self.ignored_dirs_list.item(i).text().lower() == pattern.lower():
+                    exists = True
+                    break
+
+            if not exists:
+                self.ignored_dirs_list.addItem(pattern)
+                added_count += 1
+
+        self.update_ignored_dirs_count()
+
+        # Save to database
+        if added_count > 0:
+            self.save_ignored_dirs_to_database()
+            msg_box = QMessageBox(QMessageBox.Information, "Presets Added",
+                                 f"Added {added_count} preset patterns.\n"
+                                 f"Total patterns: {self.ignored_dirs_list.count()}",
+                                 QMessageBox.Ok, self)
+            self._center_dialog(msg_box)
+            msg_box.exec()
+        else:
+            msg_box = QMessageBox(QMessageBox.Information, "No New Presets",
+                                 "All preset patterns are already in the list.",
+                                 QMessageBox.Ok, self)
+            self._center_dialog(msg_box)
+            msg_box.exec()
+
+    def update_ignored_dirs_count(self):
+        """Update the ignored directories count label."""
+        count = self.ignored_dirs_list.count()
+        self.ignored_dirs_count_label.setText(f"Total patterns: {count}")
+
+    def save_ignored_dirs_to_database(self):
+        """Save ignored directories to database."""
+        if self.db_metadata is None:
+            return
+
+        # Get all patterns from list
+        patterns = []
+        for i in range(self.ignored_dirs_list.count()):
+            patterns.append(self.ignored_dirs_list.item(i).text())
+
+        # Save to database
+        try:
+            self.db_metadata.set_ignored_directories(patterns)
+            logger.info(f"Saved {len(patterns)} ignored directory patterns to database")
+        except Exception as e:
+            logger.error(f"Failed to save ignored directories: {e}")
+            msg_box = QMessageBox(QMessageBox.Critical, "Error",
+                                 f"Failed to save ignored directories to database:\n\n{str(e)}",
+                                 QMessageBox.Ok, self)
+            self._center_dialog(msg_box)
+            msg_box.exec()
+
+    def load_ignored_dirs_from_database(self):
+        """Load ignored directories from database."""
+        if self.db_metadata is None:
+            return
+
+        try:
+            patterns = self.db_metadata.get_ignored_directories()
+            self.ignored_dirs_list.clear()
+            for pattern in patterns:
+                self.ignored_dirs_list.addItem(pattern)
+            self.update_ignored_dirs_count()
+            logger.info(f"Loaded {len(patterns)} ignored directory patterns from database")
+        except Exception as e:
+            logger.error(f"Failed to load ignored directories from database: {e}")

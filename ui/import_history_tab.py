@@ -27,6 +27,9 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
+# Import profiling utilities
+from utils import profile_block
+
 logger = logging.getLogger(__name__)
 
 
@@ -110,30 +113,30 @@ class FileLogTableModel(QAbstractTableModel):
     def _get_display_value(self, log: Dict, col_key: str) -> str:
         """Get display value for a column."""
         if col_key == "source_folder":
-            source = log.get('source_path', '')
+            source = log.get('source_path') or ''
             return os.path.dirname(source) if source else ''
 
         elif col_key == "source_filename":
-            source = log.get('source_path', '')
+            source = log.get('source_path') or ''
             return os.path.basename(source) if source else ''
 
         elif col_key == "dest_folder":
-            dest = log.get('destination_path', '')
+            dest = log.get('destination_path') or ''
             return os.path.dirname(dest) if dest else ''
 
         elif col_key == "dest_filename":
-            dest = log.get('destination_path', '')
+            dest = log.get('destination_path') or ''
             return os.path.basename(dest) if dest else ''
 
         elif col_key == "operation":
-            op = log.get('operation', '')
+            op = log.get('operation') or ''
             return op.replace('_', ' ').title()
 
         elif col_key == "status":
-            return log.get('status', '').title()
+            return (log.get('status') or '').title()
 
         elif col_key == "file_hash":
-            h = log.get('file_hash', '')
+            h = log.get('file_hash') or ''
             return h[:12] + "..." if h and len(h) > 12 else h
 
         elif col_key == "details":
@@ -145,11 +148,11 @@ class FileLogTableModel(QAbstractTableModel):
     def _get_tooltip(self, log: Dict, col_key: str) -> str:
         """Get tooltip for a cell."""
         if col_key == "source_folder" or col_key == "source_filename":
-            return log.get('source_path', '')
+            return log.get('source_path') or ''
         elif col_key == "dest_folder" or col_key == "dest_filename":
-            return log.get('destination_path', '')
+            return log.get('destination_path') or ''
         elif col_key == "file_hash":
-            return log.get('file_hash', '')
+            return log.get('file_hash') or ''
         elif col_key == "details":
             return log.get('error_message') or log.get('filter_reason') or ''
         return ''
@@ -157,23 +160,23 @@ class FileLogTableModel(QAbstractTableModel):
     def _get_sort_value(self, log: Dict, col_key: str):
         """Get value for sorting (may differ from display)."""
         if col_key == "source_folder":
-            source = log.get('source_path', '')
+            source = log.get('source_path') or ''
             return os.path.dirname(source).lower() if source else ''
         elif col_key == "source_filename":
-            source = log.get('source_path', '')
+            source = log.get('source_path') or ''
             return os.path.basename(source).lower() if source else ''
         elif col_key == "dest_folder":
-            dest = log.get('destination_path', '')
+            dest = log.get('destination_path') or ''
             return os.path.dirname(dest).lower() if dest else ''
         elif col_key == "dest_filename":
-            dest = log.get('destination_path', '')
+            dest = log.get('destination_path') or ''
             return os.path.basename(dest).lower() if dest else ''
         elif col_key == "operation":
-            return log.get('operation', '').lower()
+            return (log.get('operation') or '').lower()
         elif col_key == "status":
-            return log.get('status', '').lower()
+            return (log.get('status') or '').lower()
         elif col_key == "file_hash":
-            return log.get('file_hash', '')
+            return log.get('file_hash') or ''
         elif col_key == "details":
             return (log.get('error_message') or log.get('filter_reason') or '').lower()
         return ''
@@ -247,26 +250,27 @@ class FileLogFilterProxyModel(QSortFilterProxyModel):
 
         # Operation filter
         if self._operation_filter:
-            op = log.get('operation', '').lower()
+            op = (log.get('operation') or '').lower()
             if self._operation_filter not in op:
                 return False
 
         # Status filter
         if self._status_filter:
-            status = log.get('status', '').lower()
+            status = (log.get('status') or '').lower()
             if self._status_filter != status:
                 return False
 
         # Search text filter (search across all fields)
         if self._search_text:
+            # Handle None values by converting to empty string
             searchable = ' '.join([
-                log.get('source_path', ''),
-                log.get('destination_path', ''),
-                log.get('operation', ''),
-                log.get('status', ''),
-                log.get('file_hash', ''),
-                log.get('error_message', ''),
-                log.get('filter_reason', ''),
+                log.get('source_path') or '',
+                log.get('destination_path') or '',
+                log.get('operation') or '',
+                log.get('status') or '',
+                log.get('file_hash') or '',
+                log.get('error_message') or '',
+                log.get('filter_reason') or '',
             ]).lower()
             if self._search_text not in searchable:
                 return False
@@ -1070,10 +1074,11 @@ class ImportHistoryTab(QWidget):
             status_filter = status_filter.lower()
 
         try:
-            sessions = self.audit_manager.get_recent_sessions(
-                limit=100,
-                status_filter=status_filter
-            )
+            with profile_block("Database query - get_recent_sessions", logger):
+                sessions = self.audit_manager.get_recent_sessions(
+                    limit=100,
+                    status_filter=status_filter
+                )
 
             self._sessions_cache = sessions
 
@@ -1315,18 +1320,42 @@ class ImportHistoryTab(QWidget):
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
 
-            # Get all file logs (limit to 10,000 most recent)
-            all_logs = self.audit_manager.get_all_file_logs(limit=10000)
+            # Get all file logs (limit to 1,000 most recent for performance)
+            with profile_block("Database query - get_all_file_logs", logger):
+                all_logs = self.audit_manager.get_all_file_logs(limit=1000)
 
-            # Store full data and pre-compute filtered views
-            self._all_logs = all_logs
-            self._new_files_logs = [l for l in all_logs if l.get('operation') in ('copy', 'move', 'reprocess')]
-            self._duplicate_logs = [l for l in all_logs if l.get('operation') == 'duplicate detected']
-            self._filtered_logs = [l for l in all_logs if l.get('operation') == 'skip_filtered']
-            self._error_logs = [l for l in all_logs if l.get('status') == 'failed']
+            logger.info(f"📊 Loaded {len(all_logs)} records from database")
+
+            # Store full data and pre-compute filtered views in single pass
+            with profile_block("Pre-compute filtered views (optimized single-pass)", logger):
+                self._all_logs = all_logs
+                self._new_files_logs = []
+                self._duplicate_logs = []
+                self._filtered_logs = []
+                self._error_logs = []
+
+                # Single-pass filtering (much faster than 4 separate list comprehensions)
+                for log in all_logs:
+                    op = log.get('operation') or ''
+                    status = log.get('status') or ''
+
+                    # Categorize by operation
+                    if op in ('copy', 'move', 'reprocess'):
+                        self._new_files_logs.append(log)
+                    elif op == 'duplicate detected':
+                        self._duplicate_logs.append(log)
+                    elif op == 'skip_filtered':
+                        self._filtered_logs.append(log)
+
+                    # Check for errors (can overlap with other categories)
+                    if status == 'failed':
+                        self._error_logs.append(log)
+
+            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Filtered: {len(self._filtered_logs)}, Errors: {len(self._error_logs)}")
 
             # Apply current show filter
-            self._apply_show_filter()
+            with profile_block("Apply show filter and populate model", logger):
+                self._apply_show_filter()
 
         except Exception as e:
             logger.error(f"Failed to load all file logs: {e}", exc_info=True)
@@ -1344,18 +1373,42 @@ class ImportHistoryTab(QWidget):
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
 
-            # Get all file logs
-            all_logs = self.audit_manager.get_file_logs_for_session(self.current_session_id)
+            # Get all file logs for this session
+            with profile_block(f"Database query - get_file_logs_for_session({self.current_session_id})", logger):
+                all_logs = self.audit_manager.get_file_logs_for_session(self.current_session_id)
 
-            # Store full data and pre-compute filtered views
-            self._all_logs = all_logs
-            self._new_files_logs = [l for l in all_logs if l.get('operation') in ('copy', 'move', 'reprocess')]
-            self._duplicate_logs = [l for l in all_logs if l.get('operation') == 'duplicate detected']
-            self._filtered_logs = [l for l in all_logs if l.get('operation') == 'skip_filtered']
-            self._error_logs = [l for l in all_logs if l.get('status') == 'failed']
+            logger.info(f"📊 Loaded {len(all_logs)} records for session {self.current_session_id}")
+
+            # Store full data and pre-compute filtered views in single pass
+            with profile_block("Pre-compute filtered views (optimized single-pass)", logger):
+                self._all_logs = all_logs
+                self._new_files_logs = []
+                self._duplicate_logs = []
+                self._filtered_logs = []
+                self._error_logs = []
+
+                # Single-pass filtering (much faster than 4 separate list comprehensions)
+                for log in all_logs:
+                    op = log.get('operation') or ''
+                    status = log.get('status') or ''
+
+                    # Categorize by operation
+                    if op in ('copy', 'move', 'reprocess'):
+                        self._new_files_logs.append(log)
+                    elif op == 'duplicate detected':
+                        self._duplicate_logs.append(log)
+                    elif op == 'skip_filtered':
+                        self._filtered_logs.append(log)
+
+                    # Check for errors (can overlap with other categories)
+                    if status == 'failed':
+                        self._error_logs.append(log)
+
+            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Filtered: {len(self._filtered_logs)}, Errors: {len(self._error_logs)}")
 
             # Apply current show filter
-            self._apply_show_filter()
+            with profile_block("Apply show filter and populate model", logger):
+                self._apply_show_filter()
 
         except Exception as e:
             logger.error(f"Failed to load file logs: {e}", exc_info=True)

@@ -180,11 +180,16 @@ class ProcessingWorker(QThread):
     def _scan_directories(self):
         """Scan directories for files."""
         try:
+            # Get ignored directories from config (if available)
+            ignored_dirs = self.config.get('ignored_directories', [])
+            logger.info(f"Using ignored directories: {ignored_dirs}")
+
             files = DuplicateFileDetection.get_file_list(
                 sources=self.config.source_directory,
                 recursive=self.config.include_subdirectories,
                 file_endings=self.config.file_endings,
-                progress_callback=self._scanning_callback
+                progress_callback=self._scanning_callback,
+                ignored_directories=ignored_dirs
             )
             return files
         except Exception as e:

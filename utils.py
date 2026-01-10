@@ -256,6 +256,79 @@ def is_photo_file(file_path):
     return file_ext in [ext.lower() for ext in constants.PHOTO_EXTENSIONS]
 
 
+# ==================== Performance Profiling ====================
+
+import time
+import functools
+from contextlib import contextmanager
+
+
+def profile_function(logger=None):
+    """
+    Decorator to profile function execution time.
+
+    Usage:
+        @profile_function(logger)
+        def my_function():
+            ...
+
+    Args:
+        logger: Logger instance to use (defaults to function's module logger)
+
+    Logs:
+        INFO level: function_name completed in X.XXXs
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # Get logger
+            if logger is not None:
+                log = logger
+            else:
+                log = logging.getLogger(func.__module__)
+
+            # Time execution
+            start_time = time.perf_counter()
+            try:
+                result = func(*args, **kwargs)
+                return result
+            finally:
+                elapsed = time.perf_counter() - start_time
+                log.info(f"⏱️ {func.__name__} completed in {elapsed:.3f}s")
+
+        return wrapper
+    return decorator
+
+
+@contextmanager
+def profile_block(description, logger=None, level=logging.INFO):
+    """
+    Context manager to profile a code block.
+
+    Usage:
+        with profile_block("Loading data", logger):
+            # code to profile
+            ...
+
+    Args:
+        description: Description of the block being profiled
+        logger: Logger instance (defaults to root logger)
+        level: Log level (default: INFO)
+
+    Logs:
+        [level]: [description] completed in X.XXXs
+    """
+    if logger is None:
+        logger = logging.getLogger()
+
+    start_time = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start_time
+        logger.log(level, f"⏱️ {description} completed in {elapsed:.3f}s")
+
+
 if __name__ == '__main__':
     """Test the utility functions"""
     print("Testing utils.py")
