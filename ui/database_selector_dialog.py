@@ -17,9 +17,18 @@ class DatabaseSelectorDialog(QDialog):
 
     database_selected = Signal(str)  # Emits database path
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, search_paths=None):
+        """
+        Initialize database selector dialog.
+
+        Args:
+            parent: Parent widget
+            search_paths: List of directories to search for databases.
+                         If None, searches current directory only.
+        """
         super().__init__(parent)
         self.selected_database = None
+        self.search_paths = search_paths if search_paths else ["."]
         self.init_ui()
         self.load_databases()
 
@@ -110,7 +119,21 @@ class DatabaseSelectorDialog(QDialog):
     def load_databases(self):
         """Load and display available databases."""
         self.database_list.clear()
-        self.databases = DatabaseMetadata.find_databases()
+
+        # Search all configured paths for databases
+        all_databases = []
+        seen_paths = set()  # Avoid duplicates
+
+        for search_path in self.search_paths:
+            databases = DatabaseMetadata.find_databases(search_path)
+            for db in databases:
+                # Avoid duplicates (same database in multiple search paths)
+                db_path = db.get('path')
+                if db_path and db_path not in seen_paths:
+                    all_databases.append(db)
+                    seen_paths.add(db_path)
+
+        self.databases = all_databases
 
         if not self.databases:
             item = QListWidgetItem("No databases found. Click 'Create New Database' to get started.")
