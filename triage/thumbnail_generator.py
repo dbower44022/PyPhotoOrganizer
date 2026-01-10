@@ -290,7 +290,7 @@ class ThumbnailWorker(QRunnable):
         """
         try:
             # Import here to avoid circular dependency
-            from triage_database import TriageDatabase
+            from triage.triage_database import TriageDatabase
 
             # Get file modification time
             file_mtime = os.path.getmtime(self.file_path)
@@ -393,7 +393,7 @@ if __name__ == '__main__':
         test_db_path = f.name
 
     # Initialize database tables
-    from triage_database import TriageDatabase
+    from triage.triage_database import TriageDatabase
     triage_db = TriageDatabase(test_db_path)
     triage_db.ensure_triage_tables()
 
