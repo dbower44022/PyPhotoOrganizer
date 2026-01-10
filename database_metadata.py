@@ -35,7 +35,12 @@ class DatabaseMetadata:
             file_type_organization TEXT DEFAULT 'combined',
             user_specified_unreliable_paths TEXT DEFAULT '[]',
             filename_template TEXT DEFAULT '{original_name}',
-            enable_file_rename INTEGER DEFAULT 0
+            enable_file_rename INTEGER DEFAULT 0,
+            ignored_directories TEXT DEFAULT '[]',
+            thumbnail_size INTEGER DEFAULT 100,
+            thumbnail_cache_dir TEXT,
+            preview_window_geometry TEXT,
+            preview_window_visible INTEGER DEFAULT 1
         );
     """
 
@@ -78,6 +83,19 @@ class DatabaseMetadata:
         );
     """
 
+    THUMBNAIL_CACHE_TABLE_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS ThumbnailCache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_hash TEXT NOT NULL,
+            thumbnail_path TEXT NOT NULL,
+            thumbnail_size INTEGER NOT NULL,
+            created_timestamp TEXT NOT NULL,
+            last_accessed_timestamp TEXT NOT NULL,
+            file_size_bytes INTEGER,
+            UNIQUE(file_hash, thumbnail_size)
+        );
+    """
+
     def __init__(self, database_path: str):
         """
         Initialize database metadata manager.
@@ -90,6 +108,7 @@ class DatabaseMetadata:
         self._ensure_source_directories_table()
         self._ensure_unreliable_dates_table()
         self._ensure_file_rename_history_table()
+        self._ensure_thumbnail_cache_table()
 
     def _get_connection(self) -> sqlite3.Connection:
         """
@@ -155,6 +174,33 @@ class DatabaseMetadata:
                     # Set default value for existing rows
                     cursor.execute("UPDATE DatabaseMetadata SET enable_file_rename = 0 WHERE enable_file_rename IS NULL")
 
+                # Add ignored_directories column if missing
+                if 'ignored_directories' not in columns:
+                    logger.info("Upgrading database: adding ignored_directories column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN ignored_directories TEXT DEFAULT '[]'")
+                    # Set default value for existing rows
+                    cursor.execute("UPDATE DatabaseMetadata SET ignored_directories = '[]' WHERE ignored_directories IS NULL")
+
+                # Add thumbnail_size column if missing
+                if 'thumbnail_size' not in columns:
+                    logger.info("Upgrading database: adding thumbnail_size column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN thumbnail_size INTEGER DEFAULT 100")
+
+                # Add thumbnail_cache_dir column if missing
+                if 'thumbnail_cache_dir' not in columns:
+                    logger.info("Upgrading database: adding thumbnail_cache_dir column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN thumbnail_cache_dir TEXT")
+
+                # Add preview_window_geometry column if missing
+                if 'preview_window_geometry' not in columns:
+                    logger.info("Upgrading database: adding preview_window_geometry column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN preview_window_geometry TEXT")
+
+                # Add preview_window_visible column if missing
+                if 'preview_window_visible' not in columns:
+                    logger.info("Upgrading database: adding preview_window_visible column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN preview_window_visible INTEGER DEFAULT 1")
+
                 conn.commit()
                 logger.debug(f"Metadata table ensured in {self.database_path}")
 
@@ -217,6 +263,26 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to create FileRenameHistory table: {e}")
+            raise
+
+    def _ensure_thumbnail_cache_table(self):
+        """Ensure the ThumbnailCache table exists in the database."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Create table if it doesn't exist
+                cursor.execute(self.THUMBNAIL_CACHE_TABLE_SCHEMA)
+
+                # Create indexes for performance
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_thumbnail_cache_hash ON ThumbnailCache(file_hash)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_thumbnail_cache_accessed ON ThumbnailCache(last_accessed)")
+
+                conn.commit()
+                logger.debug(f"ThumbnailCache table ensured in {self.database_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to create ThumbnailCache table: {e}")
             raise
 
     def ensure_all_tables(self):
@@ -1433,6 +1499,254 @@ class DatabaseMetadata:
         except Exception as e:
             logger.error(f"Failed to get rename history: {e}")
             return []
+
+    # ========== Thumbnail Settings ==========
+
+    def get_thumbnail_size(self) -> int:
+        """
+        Get the thumbnail size setting for the grid view.
+
+        Returns:
+            Thumbnail size in pixels (default: 100)
+        """
+        try:
+            metadata = self.get_metadata()
+            if metadata is None:
+                logger.warning("get_metadata() returned None - using default thumbnail size")
+                return 100
+
+            size = metadata.get('thumbnail_size', 100)
+            return int(size) if size else 100
+
+        except Exception as e:
+            logger.error(f"Failed to get thumbnail size: {e}")
+            return 100
+
+    def set_thumbnail_size(self, size: int) -> bool:
+        """
+        Set the thumbnail size setting for the grid view.
+
+        Args:
+            size: Thumbnail size in pixels (typically 64, 100, or 150)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET thumbnail_size = ?
+                    WHERE id = 1
+                """, (size,))
+
+                conn.commit()
+                logger.info(f"Updated thumbnail size to {size}px")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to set thumbnail size: {e}")
+            return False
+
+    # ========== Preview Window Settings ==========
+
+    def get_preview_window_geometry(self) -> Optional[str]:
+        """
+        Get the saved preview window geometry (JSON string).
+
+        Returns:
+            JSON string with window geometry or None
+        """
+        try:
+            metadata = self.get_metadata()
+            if metadata is None:
+                return None
+
+            return metadata.get('preview_window_geometry')
+
+        except Exception as e:
+            logger.error(f"Failed to get preview window geometry: {e}")
+            return None
+
+    def set_preview_window_geometry(self, geometry: str) -> bool:
+        """
+        Save the preview window geometry (JSON string).
+
+        Args:
+            geometry: JSON string with window geometry (x, y, width, height)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET preview_window_geometry = ?
+                    WHERE id = 1
+                """, (geometry,))
+
+                conn.commit()
+                logger.debug(f"Updated preview window geometry")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to set preview window geometry: {e}")
+            return False
+
+    def get_preview_window_visible(self) -> bool:
+        """
+        Check if preview window should be visible on startup.
+
+        Returns:
+            True if preview window should be shown, False otherwise
+        """
+        try:
+            metadata = self.get_metadata()
+            if metadata is None:
+                return True  # Default: show preview
+
+            visible = metadata.get('preview_window_visible', 1)
+            return bool(visible)
+
+        except Exception as e:
+            logger.error(f"Failed to get preview window visible state: {e}")
+            return True
+
+    def set_preview_window_visible(self, visible: bool) -> bool:
+        """
+        Set whether preview window should be visible on startup.
+
+        Args:
+            visible: True to show preview window, False to hide
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET preview_window_visible = ?
+                    WHERE id = 1
+                """, (1 if visible else 0,))
+
+                conn.commit()
+                logger.info(f"Preview window visibility set to {visible}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to set preview window visible state: {e}")
+            return False
+
+    # ========== Ignored Directories Management ==========
+
+    def get_ignored_directories(self) -> List[str]:
+        """
+        Get list of ignored directory patterns.
+
+        Returns:
+            List of directory pattern strings (can contain wildcards *, ?)
+        """
+        try:
+            import json
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("SELECT ignored_directories FROM DatabaseMetadata WHERE id = 1")
+                row = cursor.fetchone()
+
+                if row and row[0]:
+                    return json.loads(row[0])
+                return []
+
+        except Exception as e:
+            logger.error(f"Failed to get ignored directories: {e}")
+            return []
+
+    def set_ignored_directories(self, patterns: List[str]) -> bool:
+        """
+        Save list of ignored directory patterns.
+
+        Args:
+            patterns: List of directory pattern strings (can contain wildcards *, ?)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            import json
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET ignored_directories = ?
+                    WHERE id = 1
+                """, (json.dumps(patterns),))
+
+                conn.commit()
+                logger.info(f"Updated ignored directories: {len(patterns)} patterns")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to set ignored directories: {e}")
+            return False
+
+    def add_ignored_directory(self, pattern: str) -> bool:
+        """
+        Add a directory pattern to the ignored list.
+
+        Args:
+            pattern: Directory pattern string (can contain wildcards *, ?)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            patterns = self.get_ignored_directories()
+
+            # Check if pattern already exists (case-insensitive)
+            if any(p.lower() == pattern.lower() for p in patterns):
+                logger.debug(f"Pattern already exists: {pattern}")
+                return True
+
+            patterns.append(pattern)
+            return self.set_ignored_directories(patterns)
+
+        except Exception as e:
+            logger.error(f"Failed to add ignored directory: {e}")
+            return False
+
+    def remove_ignored_directory(self, pattern: str) -> bool:
+        """
+        Remove a directory pattern from the ignored list.
+
+        Args:
+            pattern: Directory pattern string to remove
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            patterns = self.get_ignored_directories()
+
+            # Remove pattern (case-insensitive match)
+            patterns = [p for p in patterns if p.lower() != pattern.lower()]
+
+            return self.set_ignored_directories(patterns)
+
+        except Exception as e:
+            logger.error(f"Failed to remove ignored directory: {e}")
+            return False
 
     # ========== Static Methods ==========
 

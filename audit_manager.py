@@ -19,6 +19,9 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 
+# Import profiling utilities
+from utils import profile_block
+
 logger = logging.getLogger(__name__)
 
 # SQLite connection timeout (seconds) - wait for locks
@@ -201,6 +204,16 @@ class AuditManager:
                 cursor.execute("""
                     CREATE INDEX IF NOT EXISTS idx_filelog_operation
                     ON FileProcessingLog(operation)
+                """)
+                # Index on process_timestamp for ORDER BY optimization
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_filelog_timestamp
+                    ON FileProcessingLog(process_timestamp)
+                """)
+                # Composite index for session queries with ORDER BY timestamp
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_filelog_session_timestamp
+                    ON FileProcessingLog(session_id, process_timestamp)
                 """)
                 cursor.execute("""
                     CREATE INDEX IF NOT EXISTS idx_dupmap_original
@@ -706,14 +719,18 @@ class AuditManager:
                 where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
                 params.extend([limit, offset])
 
-                cursor.execute(f"""
-                    SELECT * FROM FileProcessingLog
-                    {where_clause}
-                    ORDER BY process_timestamp DESC
-                    LIMIT ? OFFSET ?
-                """, params)
+                with profile_block(f"SQL - SELECT FileProcessingLog (limit={limit})", logger):
+                    cursor.execute(f"""
+                        SELECT * FROM FileProcessingLog
+                        {where_clause}
+                        ORDER BY process_timestamp DESC
+                        LIMIT ? OFFSET ?
+                    """, params)
 
-                return [dict(row) for row in cursor.fetchall()]
+                    results = [dict(row) for row in cursor.fetchall()]
+
+                logger.info(f"📊 Query returned {len(results)} records")
+                return results
 
         except Exception as e:
             logger.error(f"Failed to get all file logs: {e}", exc_info=True)
@@ -746,14 +763,18 @@ class AuditManager:
 
                 params.extend([limit, offset])
 
-                cursor.execute(f"""
-                    SELECT * FROM FileProcessingLog
-                    WHERE {' AND '.join(conditions)}
-                    ORDER BY process_timestamp
-                    LIMIT ? OFFSET ?
-                """, params)
+                with profile_block(f"SQL - SELECT FileProcessingLog for session (limit={limit})", logger):
+                    cursor.execute(f"""
+                        SELECT * FROM FileProcessingLog
+                        WHERE {' AND '.join(conditions)}
+                        ORDER BY process_timestamp
+                        LIMIT ? OFFSET ?
+                    """, params)
 
-                return [dict(row) for row in cursor.fetchall()]
+                    results = [dict(row) for row in cursor.fetchall()]
+
+                logger.info(f"📊 Query returned {len(results)} records for session {session_id}")
+                return results
 
         except Exception as e:
             logger.error(f"Failed to get file logs for session {session_id}: {e}", exc_info=True)

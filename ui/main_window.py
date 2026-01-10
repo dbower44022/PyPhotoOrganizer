@@ -83,16 +83,47 @@ class MainWindow(QMainWindow):
         self.date_corrections_tab = DateCorrectionsTab()
         self.import_history_tab = ImportHistoryTab()
 
-        # Add tabs
-        self.tabs.addTab(self.setup_tab, "Setup")
-        self.tabs.addTab(self.progress_tab, "Progress")
-        self.tabs.addTab(self.results_tab, "Results")
-        self.tabs.addTab(self.filtered_files_tab, "Filtered Files")
-        self.tabs.addTab(self.logs_tab, "Logs")
-        self.tabs.addTab(self.settings_tab, "Settings")
-        self.tabs.addTab(self.database_tab, "Database")
-        self.tabs.addTab(self.date_corrections_tab, "Date Corrections")
-        self.tabs.addTab(self.import_history_tab, "Import History")
+        # Add tabs in workflow order
+        # Tab 0: Database (must be first - required before anything else)
+        self.tabs.addTab(self.database_tab, "📊 Database")
+        self.tabs.setTabToolTip(0, "Select or create a database (required first step)")
+
+        # Tab 1: Sources (define input scope)
+        self.tabs.addTab(self.setup_tab, "📂 Sources")
+        self.tabs.setTabToolTip(1, "Choose source folders, set ignored patterns, and configure operation mode")
+
+        # Tab 2: Settings (define processing behavior)
+        self.tabs.addTab(self.settings_tab, "⚙️ Settings")
+        self.tabs.setTabToolTip(2, "Configure organization templates, filtering rules, and file renaming")
+
+        # Tab 3: Progress (active during processing)
+        self.tabs.addTab(self.progress_tab, "▶️ Progress")
+        self.tabs.setTabToolTip(3, "View real-time processing status and statistics")
+
+        # Tab 4: Results (processing summary)
+        self.tabs.addTab(self.results_tab, "✅ Results")
+        self.tabs.setTabToolTip(4, "Review processing results and summary statistics")
+
+        # Review/maintenance tabs
+        # Tab 5: Date Corrections
+        self.tabs.addTab(self.date_corrections_tab, "📅 Date Corrections")
+        self.tabs.setTabToolTip(5, "Fix files with unreliable dates and reorganize them")
+
+        # Tab 6: Import History
+        self.tabs.addTab(self.import_history_tab, "📜 Import History")
+        self.tabs.setTabToolTip(6, "Review past import sessions and reprocess files if needed")
+
+        # Tab 7: Filtered Files
+        self.tabs.addTab(self.filtered_files_tab, "🔍 Filtered Files")
+        self.tabs.setTabToolTip(7, "Review files that were excluded by photo filters")
+
+        # Tab 8: Logs (troubleshooting)
+        self.tabs.addTab(self.logs_tab, "📋 Logs")
+        self.tabs.setTabToolTip(8, "View detailed application logs for troubleshooting")
+
+        # Initially disable Sources and Settings until database is selected
+        self.tabs.setTabEnabled(1, False)  # Sources
+        self.tabs.setTabEnabled(2, False)  # Settings
 
         # Connect signals
         self.setup_tab.start_clicked.connect(self.start_processing)
@@ -172,6 +203,11 @@ class MainWindow(QMainWindow):
 
             config['copy_files'] = self.setup_tab.is_copy_mode()
             config['move_files'] = self.setup_tab.is_move_mode()
+
+            # Get ignored directories from database
+            ignored_dirs = self.database_metadata.get_ignored_directories()
+            config['ignored_directories'] = ignored_dirs
+            logger.info(f"Ignored directories: {ignored_dirs}")
 
             # Save organization settings to database before processing
             if not self.settings_tab.save_organization_to_database():
@@ -351,6 +387,10 @@ class MainWindow(QMainWindow):
 
         # Update status bar
         self.status_bar.showMessage(f"Database loaded: {db_name}")
+
+        # Enable Sources and Settings tabs now that database is loaded
+        self.tabs.setTabEnabled(1, True)  # Sources tab
+        self.tabs.setTabEnabled(2, True)  # Settings tab
 
     def on_database_changed(self, new_database_path):
         """Handle database change from Database tab."""

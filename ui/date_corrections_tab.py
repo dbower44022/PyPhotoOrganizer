@@ -6,15 +6,26 @@ Allows users to review, preview, and correct file dates.
 """
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                               QPushButton, QTableWidget, QTableWidgetItem,
-                               QHeaderView, QGroupBox, QCheckBox, QMessageBox,
-                               QSplitter, QAbstractItemView, QGraphicsView,
-                               QGraphicsScene, QGraphicsPixmapItem, QLineEdit)
+                               QPushButton, QGroupBox, QCheckBox, QMessageBox,
+                               QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
+                               QLineEdit, QApplication, QComboBox)
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QTimer
 from PySide6.QtGui import QPixmap, QImage, QPainter, QPen, QColor
 from PIL import Image
 import os
 import logging
+from typing import List, Dict, Any, Optional
+
+# Import profiling utilities
+from utils import profile_block
+
+# Import grid components
+from ui.unreliable_dates_grid_model import UnreliableDatesGridModel
+from ui.unreliable_dates_grid_view import UnreliableDatesGridView
+from ui.detachable_preview_window import DetachablePreviewWindow
+
+# Import triage thumbnail cache
+from triage.thumbnail_cache import ThumbnailCache
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +212,14 @@ class DateCorrectionsTab(QWidget):
         self.db_metadata = None
         self.current_records = []
 
+        # Thumbnail cache (initialized when database is set)
+        self.thumbnail_cache = None
+        self.grid_model = None
+        self.grid_view = None
+
+        # Preview window (created when needed)
+        self.preview_window = None
+
         # Search debounce timer
         self.search_timer = QTimer()
         self.search_timer.setSingleShot(True)
@@ -221,6 +240,26 @@ class DateCorrectionsTab(QWidget):
         self.file_count_label.setStyleSheet("padding: 5px; color: #666;")
         layout.addWidget(self.file_count_label)
 
+        # Toolbar with thumbnail size and preview window controls
+        toolbar_layout = QHBoxLayout()
+
+        # Thumbnail size selector
+        toolbar_layout.addWidget(QLabel("Thumbnail Size:"))
+        self.thumbnail_size_combo = QComboBox()
+        self.thumbnail_size_combo.addItems(["64px", "100px", "150px"])
+        self.thumbnail_size_combo.setCurrentText("100px")
+        self.thumbnail_size_combo.currentTextChanged.connect(self.on_thumbnail_size_changed)
+        toolbar_layout.addWidget(self.thumbnail_size_combo)
+
+        # Preview window button
+        self.preview_window_btn = QPushButton("Open Preview Window")
+        self.preview_window_btn.setCheckable(True)
+        self.preview_window_btn.toggled.connect(self.on_toggle_preview_window)
+        toolbar_layout.addWidget(self.preview_window_btn)
+
+        toolbar_layout.addStretch()
+        layout.addLayout(toolbar_layout)
+
         # Search box
         search_layout = QHBoxLayout()
         search_layout.addWidget(QLabel("Search:"))
@@ -230,14 +269,6 @@ class DateCorrectionsTab(QWidget):
         self.search_box.setClearButtonEnabled(True)
         search_layout.addWidget(self.search_box)
         layout.addLayout(search_layout)
-
-        # Create main splitter for table and preview
-        splitter = QSplitter(Qt.Horizontal)
-
-        # Left side: Table and filters
-        left_widget = QWidget()
-        left_layout = QVBoxLayout()
-        left_layout.setContentsMargins(0, 0, 0, 0)
 
         # Filter group
         filter_group = QGroupBox("Filter by:")
@@ -285,46 +316,14 @@ class DateCorrectionsTab(QWidget):
 
         filter_layout.addStretch()
         filter_group.setLayout(filter_layout)
-        left_layout.addWidget(filter_group)
+        layout.addWidget(filter_group)
 
-        # Table
-        self.table = QTableWidget()
-        self.table.setColumnCount(9)
-        self.table.setHorizontalHeaderLabels([
-            "", "Filename", "Source Location", "Archive Location",
-            "Detected Date", "EXIF Date", "File Date", "Flag Reason", "Status"
-        ])
-
-        # Configure table
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)  # Supports Shift/Ctrl selection
-        self.table.setSortingEnabled(True)
-        self.table.setAlternatingRowColors(True)
-
-        # Set column widths
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Fixed)  # Checkbox
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # Filename
-        header.setSectionResizeMode(2, QHeaderView.Stretch)  # Source
-        header.setSectionResizeMode(3, QHeaderView.Stretch)  # Archive
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # Detected Date
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)  # EXIF Date
-        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)  # File Date
-        header.setSectionResizeMode(7, QHeaderView.ResizeToContents)  # Flag Reason
-        header.setSectionResizeMode(8, QHeaderView.ResizeToContents)  # Status
-
-        self.table.setColumnWidth(0, 30)  # Checkbox column
-
-        # Track last clicked row for shift-selection
-        self.last_clicked_row = -1
-
-        # Connect selection change, double-click, and item clicked (for checkbox shift/ctrl)
-        self.table.itemSelectionChanged.connect(self.on_selection_changed)
-        self.table.itemSelectionChanged.connect(self.sync_checkboxes_with_selection)
-        self.table.itemDoubleClicked.connect(self.on_item_double_clicked)
-        self.table.itemClicked.connect(self.on_item_clicked)
-
-        left_layout.addWidget(self.table)
+        # Grid view (will be created when database is set)
+        # Placeholder for grid_view
+        self.grid_view_placeholder = QLabel("Please select a database to view files.")
+        self.grid_view_placeholder.setStyleSheet("font-size: 14pt; color: #999; padding: 50px;")
+        self.grid_view_placeholder.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.grid_view_placeholder, 1)
 
         # Selection buttons
         selection_layout = QHBoxLayout()
@@ -342,78 +341,7 @@ class DateCorrectionsTab(QWidget):
         selection_layout.addWidget(self.batch_correct_btn)
 
         selection_layout.addStretch()
-        left_layout.addLayout(selection_layout)
-
-        left_widget.setLayout(left_layout)
-        splitter.addWidget(left_widget)
-
-        # Right side: Preview panel
-        preview_widget = QWidget()
-        preview_layout = QVBoxLayout()
-
-        preview_header = QLabel("Preview (drag to zoom, double-click to reset)")
-        preview_header.setStyleSheet("font-weight: bold; font-size: 14px;")
-        preview_layout.addWidget(preview_header)
-
-        # Image preview with zoom capabilities
-        self.preview_viewer = ZoomableImageViewer()
-        self.preview_viewer.setMinimumSize(300, 300)
-        preview_layout.addWidget(self.preview_viewer, 1)
-
-        # File details
-        details_group = QGroupBox("File Details")
-        details_layout = QVBoxLayout()
-
-        self.detail_filename = QLabel("Filename: -")
-        self.detail_filename.setWordWrap(True)
-        details_layout.addWidget(self.detail_filename)
-
-        self.detail_source = QLabel("Source: -")
-        self.detail_source.setWordWrap(True)
-        details_layout.addWidget(self.detail_source)
-
-        self.detail_archive = QLabel("Archive: -")
-        self.detail_archive.setWordWrap(True)
-        details_layout.addWidget(self.detail_archive)
-
-        self.detail_detected = QLabel("Detected Date: -")
-        details_layout.addWidget(self.detail_detected)
-
-        self.detail_exif = QLabel("EXIF Date: -")
-        details_layout.addWidget(self.detail_exif)
-
-        self.detail_file_date = QLabel("File Date: -")
-        details_layout.addWidget(self.detail_file_date)
-
-        self.detail_reason = QLabel("Reason: -")
-        details_layout.addWidget(self.detail_reason)
-
-        self.detail_status = QLabel("Status: -")
-        details_layout.addWidget(self.detail_status)
-
-        self.detail_hash = QLabel("Hash: -")
-        self.detail_hash.setWordWrap(True)
-        self.detail_hash.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.detail_hash.setStyleSheet("font-family: monospace; font-size: 9pt;")
-        details_layout.addWidget(self.detail_hash)
-
-        details_group.setLayout(details_layout)
-        preview_layout.addWidget(details_group)
-
-        # Correct date button
-        self.correct_date_btn = QPushButton("Correct Date...")
-        self.correct_date_btn.setMinimumHeight(35)
-        self.correct_date_btn.clicked.connect(self.on_correct_single_date)
-        self.correct_date_btn.setEnabled(False)
-        preview_layout.addWidget(self.correct_date_btn)
-
-        preview_widget.setLayout(preview_layout)
-        splitter.addWidget(preview_widget)
-
-        # Set splitter sizes (table gets 60%, preview gets 40%)
-        splitter.setSizes([600, 400])
-
-        layout.addWidget(splitter, 1)
+        layout.addLayout(selection_layout)
 
         # Bottom buttons
         button_layout = QHBoxLayout()
@@ -439,35 +367,90 @@ class DateCorrectionsTab(QWidget):
             db_metadata: DatabaseMetadata instance
         """
         self.db_metadata = db_metadata
+
+        # Initialize thumbnail cache
+        if self.db_metadata:
+            db_dir = os.path.dirname(self.db_metadata.database_path)
+            cache_dir = os.path.join(db_dir, '.thumbnails')
+
+            logger.info(f"Initializing thumbnail cache at {cache_dir}")
+            self.thumbnail_cache = ThumbnailCache(
+                db_path=self.db_metadata.database_path,
+                cache_dir=cache_dir,
+                memory_size=500,  # 500 items in memory
+                disk_size_gb=2,   # 2GB disk cache
+                worker_threads=4  # 4 background workers
+            )
+
+            # Create grid model
+            self.grid_model = UnreliableDatesGridModel(
+                self.thumbnail_cache,
+                self.db_metadata,
+                self
+            )
+
+            # Create grid view
+            self.grid_view = UnreliableDatesGridView(self.grid_model, self)
+            self.grid_view.selection_changed.connect(self.on_grid_selection_changed)
+            self.grid_view.item_activated.connect(self.on_grid_item_activated)
+
+            # Replace placeholder with grid view
+            layout = self.layout()
+            # Find placeholder and replace it
+            for i in range(layout.count()):
+                item = layout.itemAt(i)
+                if item and item.widget() == self.grid_view_placeholder:
+                    self.grid_view_placeholder.hide()
+                    layout.insertWidget(i, self.grid_view, 1)
+                    break
+
+            # Load saved thumbnail size
+            saved_size = self.db_metadata.get_thumbnail_size()
+            size_text = f"{saved_size}px"
+            if size_text in ["64px", "100px", "150px"]:
+                self.thumbnail_size_combo.setCurrentText(size_text)
+                self.grid_view.set_thumbnail_size_pixels(saved_size)
+
         self.refresh_data()
 
     def showEvent(self, event):
         """
-        Handle tab becoming visible - auto-refresh data.
+        Handle tab becoming visible - auto-refresh data and open preview.
 
         This ensures the grid is always up-to-date when the user
-        switches to this tab, eliminating the need for a manual refresh button.
+        switches to this tab, and auto-opens the preview window if enabled.
         """
         super().showEvent(event)
         # Only refresh if we have a database connection
         if self.db_metadata:
             self.refresh_data()
 
+            # Auto-open preview window on first visit (if enabled in settings)
+            if not self.preview_window and self.db_metadata.get_preview_window_visible():
+                self.on_toggle_preview_window(True)
+
     def refresh_data(self):
-        """Reload data from database and refresh table."""
+        """Reload data from database and refresh grid."""
         if not self.db_metadata:
-            self.table.setRowCount(0)
+            if self.grid_model:
+                self.grid_model.load_data([])
             self.file_count_label.setText("Total files with unreliable dates (all import sessions): 0")
             return
 
         try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+
             # Sync archive paths from UniquePhotos (fixes NULL paths from old processing)
-            updated_count = self.db_metadata.sync_archive_paths_from_unique_photos()
-            if updated_count > 0:
-                logger.info(f"Synced {updated_count} archive paths from UniquePhotos")
+            with profile_block("Sync archive paths from UniquePhotos", logger):
+                updated_count = self.db_metadata.sync_archive_paths_from_unique_photos()
+                if updated_count > 0:
+                    logger.info(f"Synced {updated_count} archive paths from UniquePhotos")
 
             # Get all unreliable dates
-            self.current_records = self.db_metadata.get_unreliable_dates()
+            with profile_block("Database query - get_unreliable_dates", logger):
+                self.current_records = self.db_metadata.get_unreliable_dates()
+
+            logger.info(f"📊 Loaded {len(self.current_records)} unreliable date records from database")
 
             # Update count
             self.file_count_label.setText(
@@ -475,13 +458,16 @@ class DateCorrectionsTab(QWidget):
             )
 
             # Apply current filters
-            self.apply_filters()
+            with profile_block("Apply filters and populate grid", logger):
+                self.apply_filters()
 
         except Exception as e:
             logger.error(f"Failed to load unreliable dates: {e}")
             msg_box = QMessageBox(QMessageBox.Critical, "Error", f"Failed to load data:\n\n{str(e)}", QMessageBox.Ok, self)
             self._center_dialog(msg_box)
             msg_box.exec()
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def _on_search_changed(self):
         """Handle search text change with debouncing."""
@@ -493,76 +479,80 @@ class DateCorrectionsTab(QWidget):
     def apply_filters(self):
         """Apply filter checkboxes and search to show/hide rows."""
         if not self.current_records:
-            self.table.setRowCount(0)
+            if self.grid_model:
+                self.grid_model.load_data([])
             return
 
-        # Get active flag_reason filters
-        active_flag_filters = []
-        if self.filter_no_exif.isChecked():
-            active_flag_filters.append('no_exif')
-        if self.filter_year_1000.isChecked():
-            active_flag_filters.append('year_1000')
-        if self.filter_suspicious.isChecked():
-            active_flag_filters.append('suspicious')
-        if self.filter_user_path.isChecked():
-            active_flag_filters.append('user_specified')
+        with profile_block("Filter by flag_reason", logger):
+            # Get active flag_reason filters
+            active_flag_filters = []
+            if self.filter_no_exif.isChecked():
+                active_flag_filters.append('no_exif')
+            if self.filter_year_1000.isChecked():
+                active_flag_filters.append('year_1000')
+            if self.filter_suspicious.isChecked():
+                active_flag_filters.append('suspicious')
+            if self.filter_user_path.isChecked():
+                active_flag_filters.append('user_specified')
 
-        # Filter by flag_reason if any are checked
-        if active_flag_filters:
-            filtered_records = [r for r in self.current_records if r['flag_reason'] in active_flag_filters]
-        else:
-            filtered_records = self.current_records
-
-        # Get active status filters
-        show_pending = self.filter_pending.isChecked()
-        show_corrected = self.filter_corrected.isChecked()
-        show_reorganized = self.filter_reorganized.isChecked()
-
-        # Filter by status (OR logic - if none checked, show all)
-        status_filtered = []
-        any_status_filter_active = show_pending or show_corrected or show_reorganized
-
-        for record in filtered_records:
-            if not any_status_filter_active:
-                # No status filters active - show all records
-                status_filtered.append(record)
+            # Filter by flag_reason if any are checked
+            if active_flag_filters:
+                filtered_records = [r for r in self.current_records if r['flag_reason'] in active_flag_filters]
             else:
-                # OR logic: show if matches ANY checked status
-                is_pending = not record['corrected_date']
-                is_reorganized = record['corrected_date'] and not record['needs_reorganization']
-                is_corrected = record['corrected_date'] and record['needs_reorganization']
+                filtered_records = self.current_records
 
-                if (show_pending and is_pending) or \
-                   (show_corrected and is_corrected) or \
-                   (show_reorganized and is_reorganized):
+        with profile_block("Filter by status", logger):
+            # Get active status filters
+            show_pending = self.filter_pending.isChecked()
+            show_corrected = self.filter_corrected.isChecked()
+            show_reorganized = self.filter_reorganized.isChecked()
+
+            # Filter by status (OR logic - if none checked, show all)
+            status_filtered = []
+            any_status_filter_active = show_pending or show_corrected or show_reorganized
+
+            for record in filtered_records:
+                if not any_status_filter_active:
+                    # No status filters active - show all records
                     status_filtered.append(record)
+                else:
+                    # OR logic: show if matches ANY checked status
+                    is_pending = not record['corrected_date']
+                    is_reorganized = record['corrected_date'] and not record['needs_reorganization']
+                    is_corrected = record['corrected_date'] and record['needs_reorganization']
 
-        # Apply search filter
-        search_text = self.search_box.text().strip().lower() if hasattr(self, 'search_box') else ''
-        if search_text:
-            search_filtered = []
-            for record in status_filtered:
-                # Search across all text fields
-                filename = os.path.basename(record.get('source_path', ''))
-                source_path = record.get('source_path', '')
-                archive_path = record.get('archive_path', '')
-                original_date = record.get('original_date', '')
-                flag_reason = record.get('flag_reason', '')
-                corrected_date = record.get('corrected_date', '')
-                date_source = record.get('date_source', '')
+                    if (show_pending and is_pending) or \
+                       (show_corrected and is_corrected) or \
+                       (show_reorganized and is_reorganized):
+                        status_filtered.append(record)
 
-                # Combine all searchable text
-                searchable_text = ' '.join([
-                    filename, source_path, archive_path, original_date,
-                    flag_reason, corrected_date or '', date_source
-                ]).lower()
+        with profile_block("Apply search filter", logger):
+            # Apply search filter
+            search_text = self.search_box.text().strip().lower() if hasattr(self, 'search_box') else ''
+            if search_text:
+                search_filtered = []
+                for record in status_filtered:
+                    # Search across all text fields
+                    filename = os.path.basename(record.get('source_path', ''))
+                    source_path = record.get('source_path', '')
+                    archive_path = record.get('archive_path', '')
+                    original_date = record.get('original_date', '')
+                    flag_reason = record.get('flag_reason', '')
+                    corrected_date = record.get('corrected_date', '')
+                    date_source = record.get('date_source', '')
 
-                if search_text in searchable_text:
-                    search_filtered.append(record)
+                    # Combine all searchable text
+                    searchable_text = ' '.join([
+                        filename, source_path, archive_path, original_date,
+                        flag_reason, corrected_date or '', date_source
+                    ]).lower()
 
-            final_filtered = search_filtered
-        else:
-            final_filtered = status_filtered
+                    if search_text in searchable_text:
+                        search_filtered.append(record)
+
+                final_filtered = search_filtered
+            else:
+                final_filtered = status_filtered
 
         # Update count label to show filtered vs total
         total_count = len(self.current_records)
@@ -576,95 +566,27 @@ class DateCorrectionsTab(QWidget):
                 f"Total files with unreliable dates (all import sessions): {total_count:,}"
             )
 
-        # Populate table
-        self.populate_table(final_filtered)
+        # Populate grid
+        self.populate_grid(final_filtered)
 
-    def populate_table(self, records):
+    def populate_grid(self, records):
         """
-        Populate table with records.
+        Populate grid with records using high-performance model.
 
         Args:
             records: List of unreliable date records
+
+        Performance Note:
+            Uses QAbstractListModel for lazy loading - only visible items are rendered.
+            This is 10-100x faster for large datasets (1000+ records).
         """
-        self.table.setSortingEnabled(False)
-        self.table.setRowCount(len(records))
+        if not self.grid_model:
+            logger.warning("Grid model not initialized - skipping populate")
+            return
 
-        for row, record in enumerate(records):
-            # Checkbox
-            checkbox = QTableWidgetItem()
-            checkbox.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-            checkbox.setCheckState(Qt.Unchecked)
-            self.table.setItem(row, 0, checkbox)
-
-            # Filename
-            filename = os.path.basename(record['source_path'])
-            filename_item = QTableWidgetItem(filename)
-            filename_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.table.setItem(row, 1, filename_item)
-
-            # Source location (truncated with tooltip)
-            source_item = QTableWidgetItem(self._truncate_path(record['source_path'], 50))
-            source_item.setToolTip(record['source_path'])
-            source_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.table.setItem(row, 2, source_item)
-
-            # Archive location
-            archive_path = record['archive_path'] or "Not yet organized"
-            archive_item = QTableWidgetItem(self._truncate_path(archive_path, 50))
-            archive_item.setToolTip(archive_path)
-            archive_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.table.setItem(row, 3, archive_item)
-
-            # Detected date
-            detected_item = QTableWidgetItem(record['original_date'] or "-")
-            detected_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.table.setItem(row, 4, detected_item)
-
-            # EXIF date (read from file if possible)
-            exif_date = self._get_exif_date_for_display(record)
-            exif_item = QTableWidgetItem(exif_date)
-            exif_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.table.setItem(row, 5, exif_item)
-
-            # File date (OS metadata)
-            file_date = self._get_file_date_for_display(record)
-            file_date_item = QTableWidgetItem(file_date)
-            file_date_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.table.setItem(row, 6, file_date_item)
-
-            # Flag reason
-            reason_text = record['flag_reason'].replace('_', ' ').title()
-            reason_item = QTableWidgetItem(reason_text)
-            reason_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.table.setItem(row, 7, reason_item)
-
-            # Status
-            if record['corrected_date']:
-                if record['needs_reorganization']:
-                    status = f"Corrected: {record['corrected_date']}"
-                    status_item = QTableWidgetItem(status)
-                    status_item.setForeground(Qt.darkGreen)
-                else:
-                    status = f"Reorganized: {record['corrected_date']}"
-                    status_item = QTableWidgetItem(status)
-                    status_item.setForeground(Qt.blue)
-            else:
-                status = "Pending"
-                status_item = QTableWidgetItem(status)
-                status_item.setForeground(Qt.darkGray)
-            status_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.table.setItem(row, 8, status_item)
-
-            # Store record data in first column for later retrieval
-            self.table.item(row, 1).setData(Qt.UserRole, record)
-
-        self.table.setSortingEnabled(True)
-
-    def _truncate_path(self, path, max_length):
-        """Truncate path for display."""
-        if len(path) <= max_length:
-            return path
-        return "..." + path[-(max_length-3):]
+        with profile_block(f"Populate grid with {len(records)} records (via model)", logger):
+            # Load data into model - it handles everything efficiently
+            self.grid_model.load_data(records)
 
     def _get_exif_date_for_display(self, record):
         """Get EXIF date for display by reading from file."""
@@ -705,197 +627,140 @@ class DateCorrectionsTab(QWidget):
             logger.warning(f"Failed to get file date for {record.get('source_path', 'unknown')}: {e}")
         return "-"
 
-    def on_selection_changed(self):
-        """Handle table row selection change."""
-        selected_rows = self.table.selectionModel().selectedRows()
+    def on_grid_selection_changed(self, selected_hashes):
+        """
+        Handle grid selection change - update preview window.
 
-        if not selected_rows:
-            self.preview_viewer.clear()
-            self.detail_filename.setText("Filename: -")
-            self.detail_source.setText("Source: -")
-            self.detail_archive.setText("Archive: -")
-            self.detail_detected.setText("Detected Date: -")
-            self.detail_exif.setText("EXIF Date: -")
-            self.detail_file_date.setText("File Date: -")
-            self.detail_reason.setText("Reason: -")
-            self.detail_status.setText("Status: -")
-            self.detail_hash.setText("Hash: -")
-            self.correct_date_btn.setEnabled(False)
+        Args:
+            selected_hashes: List of selected file hashes
+        """
+        if self.preview_window and selected_hashes:
+            # Update preview with first selected item
+            record = self.grid_model.get_record_by_hash(selected_hashes[0])
+            if record:
+                self.preview_window.update_preview(record)
+
+    def on_grid_item_activated(self, record):
+        """
+        Handle grid item activation (double-click or Space key).
+
+        Opens or focuses the preview window.
+
+        Args:
+            record: Activated record dict
+        """
+        # Open preview window if not open
+        if not self.preview_window:
+            self.on_toggle_preview_window(True)
+
+        # Update and raise preview window
+        if self.preview_window:
+            self.preview_window.update_preview(record)
+            self.preview_window.raise_()
+            self.preview_window.activateWindow()
+
+    def on_thumbnail_size_changed(self, size_text):
+        """
+        Handle thumbnail size change from combo box.
+
+        Args:
+            size_text: Size string like "64px", "100px", or "150px"
+        """
+        if not self.grid_view:
             return
 
-        # Get selected record
-        row = selected_rows[0].row()
-        record = self.table.item(row, 1).data(Qt.UserRole)
+        size = int(size_text.replace('px', ''))
 
-        # Update preview image
-        self.load_preview(record['source_path'])
+        # Update grid view
+        self.grid_view.set_thumbnail_size_pixels(size)
 
-        # Update details
-        self.detail_filename.setText(f"Filename: {os.path.basename(record['source_path'])}")
-        self.detail_source.setText(f"Source: {record['source_path']}")
+        # Save to database
+        if self.db_metadata:
+            self.db_metadata.set_thumbnail_size(size)
 
-        # Show archive location (with original if reorganized)
-        if record.get('original_archive_path') and record['archive_path'] != record['original_archive_path']:
-            archive_text = f"Archive: {record['archive_path']}\nOriginal: {record['original_archive_path']}"
+        logger.info(f"Thumbnail size changed to {size}px")
+
+    def on_toggle_preview_window(self, checked):
+        """
+        Toggle preview window open/closed.
+
+        Args:
+            checked: True to open, False to close
+        """
+        if checked:
+            # Open preview window
+            if not self.preview_window:
+                self.preview_window = DetachablePreviewWindow(self.db_metadata, self)
+                self.preview_window.window_closed.connect(self._on_preview_window_closed)
+                self.preview_window.correct_date_clicked.connect(self._on_preview_correct_date)
+
+            self.preview_window.show()
+            self.preview_window_btn.setChecked(True)
+
+            # Update with current selection if any
+            if self.grid_view:
+                selected_items = self.grid_view.get_selected_items()
+                if selected_items:
+                    self.preview_window.update_preview(selected_items[0])
+
+            # Save visible state
+            if self.db_metadata:
+                self.db_metadata.set_preview_window_visible(True)
+
         else:
-            archive_text = f"Archive: {record['archive_path'] or 'Not yet organized'}"
-        self.detail_archive.setText(archive_text)
+            # Close preview window
+            if self.preview_window:
+                self.preview_window.close()
 
-        self.detail_detected.setText(f"Detected Date: {record['original_date'] or '-'}")
-        self.detail_exif.setText(f"EXIF Date: {self._get_exif_date_for_display(record)}")
-        self.detail_file_date.setText(f"File Date: {self._get_file_date_for_display(record)}")
-        self.detail_reason.setText(f"Reason: {record['flag_reason'].replace('_', ' ').title()}")
+    def _on_preview_window_closed(self):
+        """Handle preview window close event."""
+        self.preview_window = None
+        self.preview_window_btn.setChecked(False)
 
-        if record['corrected_date']:
-            if record['needs_reorganization']:
-                status_text = f"Corrected to: {record['corrected_date']} (Needs reorganization)"
-            else:
-                status_text = f"Reorganized to: {record['corrected_date']}"
-        else:
-            status_text = "Pending correction"
-        self.detail_status.setText(f"Status: {status_text}")
+        # Save visible state
+        if self.db_metadata:
+            self.db_metadata.set_preview_window_visible(False)
 
-        # Display file hash (selectable for copying)
-        file_hash = record.get('file_hash', 'N/A')
-        self.detail_hash.setText(f"Hash: {file_hash}")
+    def _on_preview_correct_date(self, record):
+        """
+        Handle correct date button clicked in preview window.
 
-        self.correct_date_btn.setEnabled(True)
-
-    def on_item_double_clicked(self, item):
-        """Handle double-click on table item - toggle checkbox."""
-        if item is None:
-            return
-
-        row = item.row()
-        checkbox_item = self.table.item(row, 0)
-
-        if checkbox_item:
-            # Toggle checkbox state
-            current_state = checkbox_item.checkState()
-            new_state = Qt.Unchecked if current_state == Qt.Checked else Qt.Checked
-            checkbox_item.setCheckState(new_state)
-
-    def on_item_clicked(self, item):
-        """Handle click on table item - support Shift/Ctrl selection on checkbox column."""
-        if item is None:
-            return
-
-        row = item.row()
-        column = item.column()
-
-        # Only handle clicks on checkbox column (column 0)
-        if column != 0:
-            # For non-checkbox columns, just update last clicked row for future shift-clicks
-            self.last_clicked_row = row
-            return
-
-        # Get keyboard modifiers
-        from PySide6.QtWidgets import QApplication
-        modifiers = QApplication.keyboardModifiers()
-
-        # Handle Shift-click: select range and check all checkboxes in range
-        if modifiers & Qt.ShiftModifier and self.last_clicked_row >= 0:
-            start_row = min(self.last_clicked_row, row)
-            end_row = max(self.last_clicked_row, row)
-
-            # Determine the target state based on the clicked checkbox
-            target_state = item.checkState()
-
-            # Block signals temporarily to avoid triggering selection changes
-            self.table.blockSignals(True)
-
-            # Select all rows in range and set their checkboxes
-            for r in range(start_row, end_row + 1):
-                # Select the row
-                self.table.selectRow(r)
-
-                # Set checkbox state
-                checkbox_item = self.table.item(r, 0)
-                if checkbox_item:
-                    checkbox_item.setCheckState(target_state)
-
-            self.table.blockSignals(False)
-
-            # Manually trigger selection changed to update preview
-            self.on_selection_changed()
-
-        # Handle Ctrl-click: toggle row selection and checkbox
-        elif modifiers & Qt.ControlModifier:
-            # The row selection is already handled by ExtendedSelection mode
-            # Just ensure the checkbox reflects the selection
-            # (Qt already handles the checkbox toggle, we just update last_clicked_row)
-            self.last_clicked_row = row
-
-        # Handle normal click: select single row
-        else:
-            # Qt already handles the checkbox toggle
-            self.last_clicked_row = row
-
-    def sync_checkboxes_with_selection(self):
-        """Sync checkbox states with row selection - checkboxes match selected rows."""
-        # Get selected rows
-        selected_rows = set(index.row() for index in self.table.selectedIndexes())
-
-        # Block signals to avoid recursive calls
-        self.table.blockSignals(True)
-
-        # Update all checkboxes to match selection
-        for row in range(self.table.rowCount()):
-            checkbox_item = self.table.item(row, 0)
-            if checkbox_item:
-                is_selected = row in selected_rows
-                new_state = Qt.Checked if is_selected else Qt.Unchecked
-                if checkbox_item.checkState() != new_state:
-                    checkbox_item.setCheckState(new_state)
-
-        self.table.blockSignals(False)
-
-    def load_preview(self, file_path):
-        """Load and display image preview with zoom capabilities."""
-        try:
-            if not os.path.exists(file_path):
-                self.preview_viewer.clear()
-                return
-
-            # Load image using the zoomable viewer
-            self.preview_viewer.load_image(file_path)
-
-        except Exception as e:
-            logger.error(f"Failed to load preview for {file_path}: {e}")
-            self.preview_viewer.clear()
-
-    def select_all(self):
-        """Select all visible rows."""
-        for row in range(self.table.rowCount()):
-            self.table.item(row, 0).setCheckState(Qt.Checked)
-
-    def deselect_all(self):
-        """Deselect all rows."""
-        for row in range(self.table.rowCount()):
-            self.table.item(row, 0).setCheckState(Qt.Unchecked)
-
-    def get_selected_records(self):
-        """Get all checked records."""
-        selected = []
-        for row in range(self.table.rowCount()):
-            if self.table.item(row, 0).checkState() == Qt.Checked:
-                record = self.table.item(row, 1).data(Qt.UserRole)
-                selected.append(record)
-        return selected
-
-    def on_correct_single_date(self):
-        """Handle correct date button for single file."""
-        selected_rows = self.table.selectionModel().selectedRows()
-        if not selected_rows:
-            return
-
-        row = selected_rows[0].row()
-        record = self.table.item(row, 1).data(Qt.UserRole)
-
-        # Open date correction dialog
+        Args:
+            record: Record to correct
+        """
         from ui.date_correction_dialog import DateCorrectionDialog
 
         dialog = DateCorrectionDialog(self, [record], batch_mode=False)
+        if dialog.exec():
+            self.refresh_data()
+
+    def select_all(self):
+        """Select all visible items in grid."""
+        if self.grid_view:
+            self.grid_view.selectAll()
+
+    def deselect_all(self):
+        """Deselect all items in grid."""
+        if self.grid_view:
+            self.grid_view.clearSelection()
+
+    def get_selected_records(self):
+        """Get all selected records from grid."""
+        if self.grid_view:
+            return self.grid_view.get_selected_items()
+        return []
+
+    def on_correct_single_date(self):
+        """Handle correct date button for single file."""
+        # Get selected items from grid view
+        selected_records = self.get_selected_records()
+        if not selected_records:
+            return
+
+        # Open date correction dialog for first selected record
+        from ui.date_correction_dialog import DateCorrectionDialog
+
+        dialog = DateCorrectionDialog(self, [selected_records[0]], batch_mode=False)
         if dialog.exec():
             self.refresh_data()
 

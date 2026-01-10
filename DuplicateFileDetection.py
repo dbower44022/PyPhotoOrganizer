@@ -490,7 +490,59 @@ class PhotoDatabase:
             raise
 
 
-def get_file_list(sources, recursive=False, file_endings=None, progress_callback=None):
+def should_ignore_directory(dir_path, dir_name, ignored_patterns):
+    """
+    Check if a directory should be ignored based on patterns.
+
+    Supports two types of patterns:
+    1. Absolute paths: Full directory paths (e.g., /mnt/backup/old_photos)
+    2. Name patterns: Wildcard patterns to match directory names (e.g., @eaDir, *.tmp, thumb*)
+
+    Wildcards:
+    - * = match any number of characters
+    - ? = match exactly one character
+
+    Pattern matching is case-insensitive.
+
+    Parameters:
+        dir_path (str): Full path to the directory
+        dir_name (str): Name of the directory (basename)
+        ignored_patterns (list): List of patterns to check
+
+    Returns:
+        bool: True if directory should be ignored, False otherwise
+    """
+    import fnmatch
+
+    if not ignored_patterns:
+        return False
+
+    # Normalize paths for comparison
+    dir_path_normalized = os.path.normpath(dir_path)
+
+    for pattern in ignored_patterns:
+        # Case-insensitive matching
+        pattern_lower = pattern.lower()
+        dir_path_lower = dir_path_normalized.lower()
+        dir_name_lower = dir_name.lower()
+
+        # Check if pattern is an absolute path
+        if os.path.isabs(pattern):
+            # Match against full directory path
+            pattern_normalized = os.path.normpath(pattern).lower()
+            if dir_path_lower == pattern_normalized or dir_path_lower.startswith(pattern_normalized + os.sep):
+                logger.debug(f"Ignoring directory (absolute path match): {dir_path} matches {pattern}")
+                return True
+        else:
+            # Match against directory name using wildcards
+            if fnmatch.fnmatch(dir_name_lower, pattern_lower):
+                logger.debug(f"Ignoring directory (name pattern match): {dir_name} matches {pattern}")
+                return True
+
+    return False
+
+
+def get_file_list(sources, recursive=False, file_endings=None, progress_callback=None, ignored_directories=None):
     """
     Create a list all files in the source directory, and subdirectories if the recursive parameter is true.
 
@@ -499,6 +551,7 @@ def get_file_list(sources, recursive=False, file_endings=None, progress_callback
     recursive (bool): If True, list files recursively. Default is False.
     file_endings (list): List of file endings/extensions to include. Default is None.
     progress_callback (callable): Optional callback function(dirs_scanned, total_dirs, current_dir) for progress updates.
+    ignored_directories (list): List of directory patterns to ignore. Default is None.
 
     Returns:
     file_list: A list of file paths contained in the source folder provided.
@@ -525,7 +578,19 @@ def get_file_list(sources, recursive=False, file_endings=None, progress_callback
                     logger.info(f"Processing the source = {source}")
                     if recursive:
                         logger.info(f"Recursively processing {source}")
+                        skipped_dirs_count = 0
                         for root, dirs, files in os.walk(source):
+                            # Filter out ignored directories (modifies dirs in-place to prevent descending)
+                            if ignored_directories:
+                                original_dir_count = len(dirs)
+                                dirs[:] = [d for d in dirs if not should_ignore_directory(
+                                    os.path.join(root, d), d, ignored_directories
+                                )]
+                                skipped_count = original_dir_count - len(dirs)
+                                if skipped_count > 0:
+                                    skipped_dirs_count += skipped_count
+                                    logger.debug(f"Filtered {skipped_count} directories from {root}")
+
                             logger.info(f"Processing root = {root}, and Subdirectories = {dirs}.")
                             files_processed_count = 0
                             files_added_count = 0
@@ -545,6 +610,9 @@ def get_file_list(sources, recursive=False, file_endings=None, progress_callback
                                     logger.info(f"The verifyfiletype routine determined that the file is not a valid type!")
 
                             logger.debug(f"Processed {files_processed_count } and Added {files_added_count} files from {root}/{dirs} to the list to process.")
+
+                        if skipped_dirs_count > 0:
+                            logger.info(f"Skipped {skipped_dirs_count} ignored directories in {source}")
                     else:
                         logger.info(f"EXCLUSIVELY processing {source}")
                         with os.scandir(source) as entries:
@@ -1083,22 +1151,33 @@ def get_creation_date(file_path, database_path=None):
                                 # if a value for DateTimeOriginal is included in EXIF data, then use that as the fileDate.
                                 fileDate = exif_data_PIL[datetime_original_tag]
                                 logger.info(f"fileDate = {fileDate}")
-                                if fileDate != '' and len(fileDate) > 10 and fileDate != "0000:00:00 00:00:00":
+                                # Validate EXIF date is not empty, not just whitespace, not "0000:00:00 00:00:00", and can be parsed
+                                if (fileDate != '' and len(fileDate) > 10 and
+                                    fileDate != "0000:00:00 00:00:00" and
+                                    fileDate.strip() != '' and
+                                    fileDate.strip().replace(':', '').replace(' ', '').strip() != ''):
                                     # we located a proper file date in the exif data, so use that instead of date from OS.
-                                    has_exif = True  # Mark that we found EXIF data
-                                    date_source = 'exif'  # Date came from EXIF
-                                    logger.info("------------------  File Dates --------------------------")
-                                    logger.info(f"Date from os {datetime.datetime.fromtimestamp(creation_time)}, date from EXIF {fileDate}")
-                                    logger.info(f"Converted EXIF fileDate = {datetime.datetime.strptime(fileDate, '%Y:%m:%d %H:%M:%S')}")
-                                    logger.info("--------------------------------------------")
+                                    # Try to parse the EXIF date - if it fails, fall back to OS date
+                                    try:
+                                        has_exif = True  # Mark that we found EXIF data
+                                        date_source = 'exif'  # Date came from EXIF
+                                        logger.info("------------------  File Dates --------------------------")
+                                        logger.info(f"Date from os {datetime.datetime.fromtimestamp(creation_time)}, date from EXIF {fileDate}")
+                                        exif_datetime = datetime.datetime.strptime(fileDate, '%Y:%m:%d %H:%M:%S')
+                                        logger.info(f"Converted EXIF fileDate = {exif_datetime}")
+                                        logger.info("--------------------------------------------")
 
-                                    if creation_date != datetime.datetime.strptime(fileDate, '%Y:%m:%d %H:%M:%S'):
-                                        logger.info("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
-                                        logger.info("The OS and EXIF dates do NOT match, so using the EXIF date!")
-                                        logger.info("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
-                                        creation_date = datetime.datetime.strptime(fileDate, '%Y:%m:%d %H:%M:%S')
-                                    else:
-                                        logger.info("The OS and EXIF dates matched, so using them both :)")
+                                        if creation_date != exif_datetime:
+                                            logger.info("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
+                                            logger.info("The OS and EXIF dates do NOT match, so using the EXIF date!")
+                                            logger.info("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
+                                            creation_date = exif_datetime
+                                        else:
+                                            logger.info("The OS and EXIF dates matched, so using them both :)")
+                                    except ValueError as e:
+                                        logger.warning(f"EXIF date '{fileDate}' could not be parsed, falling back to OS date: {e}")
+                                        has_exif = False
+                                        date_source = 'os_metadata'
 
                                     im.close()
                                     processed_photos += 1
