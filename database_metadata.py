@@ -276,7 +276,7 @@ class DatabaseMetadata:
 
                 # Create indexes for performance
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_thumbnail_cache_hash ON ThumbnailCache(file_hash)")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_thumbnail_cache_accessed ON ThumbnailCache(last_accessed)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_thumbnail_cache_accessed ON ThumbnailCache(last_accessed_timestamp)")
 
                 conn.commit()
                 logger.debug(f"ThumbnailCache table ensured in {self.database_path}")
