@@ -1524,27 +1524,27 @@ class DatabaseMetadata:
         Get the thumbnail size setting for the grid view.
 
         Returns:
-            Thumbnail size in pixels (default: 100)
+            Thumbnail size in pixels (default: 200)
         """
         try:
             metadata = self.get_metadata()
             if metadata is None:
                 logger.warning("get_metadata() returned None - using default thumbnail size")
-                return 100
+                return 200
 
-            size = metadata.get('thumbnail_size', 100)
-            return int(size) if size else 100
+            size = metadata.get('thumbnail_size', 200)
+            return int(size) if size else 200
 
         except Exception as e:
             logger.error(f"Failed to get thumbnail size: {e}")
-            return 100
+            return 200
 
     def set_thumbnail_size(self, size: int) -> bool:
         """
         Set the thumbnail size setting for the grid view.
 
         Args:
-            size: Thumbnail size in pixels (typically 64, 100, or 150)
+            size: Thumbnail size in pixels (typically 150, 200, or 300)
 
         Returns:
             True if successful, False otherwise

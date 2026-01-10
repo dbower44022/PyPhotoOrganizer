@@ -407,13 +407,22 @@ class DateCorrectionsTab(QWidget):
             # Load saved thumbnail size
             saved_size = self.db_metadata.get_thumbnail_size()
             size_text = f"{saved_size}px"
+
+            # Block signals while setting initial value to avoid triggering save
+            self.thumbnail_size_combo.blockSignals(True)
+
             if size_text in ["150px", "200px", "300px"]:
                 self.thumbnail_size_combo.setCurrentText(size_text)
                 self.grid_view.set_thumbnail_size_pixels(saved_size)
+                logger.info(f"Loaded saved thumbnail size: {saved_size}px")
             else:
                 # Default to 200px if saved size is not in new range
                 self.thumbnail_size_combo.setCurrentText("200px")
                 self.grid_view.set_thumbnail_size_pixels(200)
+                logger.info(f"Using default thumbnail size: 200px (saved was {saved_size}px)")
+
+            # Unblock signals
+            self.thumbnail_size_combo.blockSignals(False)
 
         self.refresh_data()
 
