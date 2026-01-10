@@ -156,3 +156,11 @@ PhotoDB_TEST_001_DB.db
 PhotoDB_PYTEST_01DB.db
 
 PhotoDB_FullTestArchiveDB.db
+
+# Thumbnail cache directories
+.thumbnails/
+*/.thumbnails/
+
+# SQLite temporary files
+*.db-shm
+*.db-wal
