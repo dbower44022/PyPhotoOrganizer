@@ -55,9 +55,9 @@ class UnreliableDatesGridView(QListView):
         # Current thumbnail size
         self.current_size_name = 'medium'
         self.size_map = {
-            'small': 64,
-            'medium': 100,
-            'large': 150
+            'small': 150,
+            'medium': 200,
+            'large': 300
         }
 
         # Configure view for high performance
@@ -118,7 +118,7 @@ class UnreliableDatesGridView(QListView):
         Change grid size.
 
         Args:
-            size_name: 'small' (64px), 'medium' (100px), or 'large' (150px)
+            size_name: 'small' (150px), 'medium' (200px), or 'large' (300px)
         """
         if size_name not in self.size_map:
             logger.warning(f"Invalid thumbnail size: {size_name}")
@@ -146,10 +146,10 @@ class UnreliableDatesGridView(QListView):
         Change grid size by pixel value.
 
         Args:
-            pixel_size: Size in pixels (64, 100, or 150)
+            pixel_size: Size in pixels (150, 200, or 300)
         """
         # Map pixel size to size name
-        size_name_map = {64: 'small', 100: 'medium', 150: 'large'}
+        size_name_map = {150: 'small', 200: 'medium', 300: 'large'}
         size_name = size_name_map.get(pixel_size, 'medium')
         self.set_thumbnail_size(size_name)
 
