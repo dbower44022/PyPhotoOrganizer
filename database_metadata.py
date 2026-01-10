@@ -37,7 +37,7 @@ class DatabaseMetadata:
             filename_template TEXT DEFAULT '{original_name}',
             enable_file_rename INTEGER DEFAULT 0,
             ignored_directories TEXT DEFAULT '[]',
-            thumbnail_size INTEGER DEFAULT 100,
+            thumbnail_size INTEGER DEFAULT 200,
             thumbnail_cache_dir TEXT,
             preview_window_geometry TEXT,
             preview_window_visible INTEGER DEFAULT 1
@@ -184,7 +184,7 @@ class DatabaseMetadata:
                 # Add thumbnail_size column if missing
                 if 'thumbnail_size' not in columns:
                     logger.info("Upgrading database: adding thumbnail_size column")
-                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN thumbnail_size INTEGER DEFAULT 100")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN thumbnail_size INTEGER DEFAULT 200")
 
                 # Add thumbnail_cache_dir column if missing
                 if 'thumbnail_cache_dir' not in columns:

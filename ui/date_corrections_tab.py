@@ -246,8 +246,8 @@ class DateCorrectionsTab(QWidget):
         # Thumbnail size selector
         toolbar_layout.addWidget(QLabel("Thumbnail Size:"))
         self.thumbnail_size_combo = QComboBox()
-        self.thumbnail_size_combo.addItems(["64px", "100px", "150px"])
-        self.thumbnail_size_combo.setCurrentText("100px")
+        self.thumbnail_size_combo.addItems(["150px", "200px", "300px"])
+        self.thumbnail_size_combo.setCurrentText("200px")
         self.thumbnail_size_combo.currentTextChanged.connect(self.on_thumbnail_size_changed)
         toolbar_layout.addWidget(self.thumbnail_size_combo)
 
@@ -407,9 +407,13 @@ class DateCorrectionsTab(QWidget):
             # Load saved thumbnail size
             saved_size = self.db_metadata.get_thumbnail_size()
             size_text = f"{saved_size}px"
-            if size_text in ["64px", "100px", "150px"]:
+            if size_text in ["150px", "200px", "300px"]:
                 self.thumbnail_size_combo.setCurrentText(size_text)
                 self.grid_view.set_thumbnail_size_pixels(saved_size)
+            else:
+                # Default to 200px if saved size is not in new range
+                self.thumbnail_size_combo.setCurrentText("200px")
+                self.grid_view.set_thumbnail_size_pixels(200)
 
         self.refresh_data()
 
@@ -664,7 +668,7 @@ class DateCorrectionsTab(QWidget):
         Handle thumbnail size change from combo box.
 
         Args:
-            size_text: Size string like "64px", "100px", or "150px"
+            size_text: Size string like "150px", "200px", or "300px"
         """
         if not self.grid_view:
             return
