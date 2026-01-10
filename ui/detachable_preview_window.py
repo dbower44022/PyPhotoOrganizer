@@ -8,10 +8,12 @@ Can be moved to second monitor for dual-screen workflows.
 import logging
 import os
 import json
+import subprocess
+import platform
 from typing import Optional, Dict, Any
 
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                               QLabel, QPushButton, QGroupBox)
+                               QLabel, QPushButton, QGroupBox, QApplication)
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCloseEvent
 
@@ -110,6 +112,28 @@ class DetachablePreviewWindow(QMainWindow):
         # Button layout
         button_layout = QHBoxLayout()
 
+        # File action buttons
+        self.open_file_btn = QPushButton("Open File")
+        self.open_file_btn.setMinimumHeight(40)
+        self.open_file_btn.clicked.connect(self.on_open_file)
+        self.open_file_btn.setEnabled(False)
+        button_layout.addWidget(self.open_file_btn)
+
+        self.open_folder_btn = QPushButton("Open Folder")
+        self.open_folder_btn.setMinimumHeight(40)
+        self.open_folder_btn.clicked.connect(self.on_open_folder)
+        self.open_folder_btn.setEnabled(False)
+        button_layout.addWidget(self.open_folder_btn)
+
+        self.copy_path_btn = QPushButton("Copy Path")
+        self.copy_path_btn.setMinimumHeight(40)
+        self.copy_path_btn.clicked.connect(self.on_copy_path)
+        self.copy_path_btn.setEnabled(False)
+        button_layout.addWidget(self.copy_path_btn)
+
+        # Spacer
+        button_layout.addStretch()
+
         # Correct date button
         self.correct_btn = QPushButton("Correct Date...")
         self.correct_btn.setMinimumHeight(40)
@@ -187,7 +211,14 @@ class DetachablePreviewWindow(QMainWindow):
             file_hash = record.get('file_hash', 'N/A')
             self.detail_hash.setText(f"Hash: {file_hash}")
 
+            # Enable buttons
             self.correct_btn.setEnabled(True)
+
+            # Enable file action buttons if source path exists
+            has_source = source_path and os.path.exists(source_path)
+            self.open_file_btn.setEnabled(has_source)
+            self.open_folder_btn.setEnabled(has_source)
+            self.copy_path_btn.setEnabled(has_source)
 
         except Exception as e:
             logger.error(f"Error updating preview: {e}", exc_info=True)
@@ -199,6 +230,71 @@ class DetachablePreviewWindow(QMainWindow):
 
         # Emit signal for parent to handle (opens dialog)
         self.correct_date_clicked.emit(self.current_record)
+
+    def on_open_file(self):
+        """Open source file with default application."""
+        if not self.current_record:
+            return
+
+        source_path = self.current_record.get('source_path', '')
+        if not source_path or not os.path.exists(source_path):
+            logger.warning(f"Source file does not exist: {source_path}")
+            return
+
+        try:
+            system = platform.system()
+            if system == 'Windows':
+                os.startfile(source_path)
+            elif system == 'Darwin':  # macOS
+                subprocess.run(['open', source_path], check=True)
+            else:  # Linux and others
+                subprocess.run(['xdg-open', source_path], check=True)
+            logger.info(f"Opened file: {source_path}")
+        except Exception as e:
+            logger.error(f"Failed to open file: {e}", exc_info=True)
+
+    def on_open_folder(self):
+        """Open folder containing the source file."""
+        if not self.current_record:
+            return
+
+        source_path = self.current_record.get('source_path', '')
+        if not source_path or not os.path.exists(source_path):
+            logger.warning(f"Source file does not exist: {source_path}")
+            return
+
+        try:
+            folder_path = os.path.dirname(source_path)
+            system = platform.system()
+            if system == 'Windows':
+                # Select the file in Explorer
+                subprocess.run(['explorer', '/select,', source_path], check=True)
+            elif system == 'Darwin':  # macOS
+                # Reveal file in Finder
+                subprocess.run(['open', '-R', source_path], check=True)
+            else:  # Linux and others
+                # Open folder in file manager
+                subprocess.run(['xdg-open', folder_path], check=True)
+            logger.info(f"Opened folder: {folder_path}")
+        except Exception as e:
+            logger.error(f"Failed to open folder: {e}", exc_info=True)
+
+    def on_copy_path(self):
+        """Copy source file path to clipboard."""
+        if not self.current_record:
+            return
+
+        source_path = self.current_record.get('source_path', '')
+        if not source_path:
+            logger.warning("No source path to copy")
+            return
+
+        try:
+            clipboard = QApplication.clipboard()
+            clipboard.setText(source_path)
+            logger.info(f"Copied path to clipboard: {source_path}")
+        except Exception as e:
+            logger.error(f"Failed to copy path to clipboard: {e}", exc_info=True)
 
     def closeEvent(self, event: QCloseEvent):
         """
