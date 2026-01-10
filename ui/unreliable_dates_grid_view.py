@@ -77,7 +77,7 @@ class UnreliableDatesGridView(QListView):
         # View mode
         self.setViewMode(QListView.IconMode)
         self.setResizeMode(QListView.Adjust)
-        self.setSpacing(10)
+        self.setSpacing(2)  # Minimal spacing to maximize thumbnails on screen
 
         # CRITICAL for performance!
         self.setUniformItemSizes(True)  # All items same size
@@ -134,10 +134,10 @@ class UnreliableDatesGridView(QListView):
         self.delegate.set_thumbnail_size(pixel_size)
 
         # Update grid size
-        # Add margins for filename + spacing
-        item_size = pixel_size + 60  # 20px margins + 40px text
+        # Minimal margins to maximize thumbnails on screen
+        item_size = pixel_size + 10  # Small margins for selection border
         self.setIconSize(QSize(item_size, item_size))
-        self.setGridSize(QSize(item_size + 20, item_size + 20))
+        self.setGridSize(QSize(item_size + 4, item_size + 4))  # Minimal spacing between items
 
         logger.info(f"Grid size changed to {size_name} ({pixel_size}px)")
 

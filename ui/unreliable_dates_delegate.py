@@ -127,7 +127,7 @@ class UnreliableDatesDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         """
-        Return item size (thumbnail + margins + text).
+        Return item size (thumbnail + minimal margins).
 
         Args:
             option: Style options
@@ -136,8 +136,8 @@ class UnreliableDatesDelegate(QStyledItemDelegate):
         Returns:
             QSize for the item
         """
-        # Size = thumbnail + top/bottom margins + text space
-        size = self.thumbnail_size + 60  # 20px margins + 40px text
+        # Minimal margins to maximize thumbnails on screen
+        size = self.thumbnail_size + 10  # Small margins for selection border
         return QSize(size, size)
 
     def set_thumbnail_size(self, size: int):
