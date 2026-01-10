@@ -474,7 +474,7 @@ if __name__ == '__main__':
         test_db_path = f.name
 
     # Initialize database
-    from triage_database import TriageDatabase
+    from triage.triage_database import TriageDatabase
     triage_db = TriageDatabase(test_db_path)
     triage_db.ensure_triage_tables()
 
