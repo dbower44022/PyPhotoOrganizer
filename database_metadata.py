@@ -266,12 +266,29 @@ class DatabaseMetadata:
             raise
 
     def _ensure_thumbnail_cache_table(self):
-        """Ensure the ThumbnailCache table exists in the database."""
+        """Ensure the ThumbnailCache table exists in the database with correct schema."""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
 
-                # Create table if it doesn't exist
+                # Check if table exists and has old schema
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ThumbnailCache'")
+                table_exists = cursor.fetchone()
+
+                if table_exists:
+                    # Check if old schema (has 'size' column instead of 'thumbnail_size')
+                    cursor.execute("PRAGMA table_info(ThumbnailCache)")
+                    columns = {row[1] for row in cursor.fetchall()}
+
+                    # Old schema has 'size', new schema has 'thumbnail_size'
+                    if 'size' in columns and 'thumbnail_size' not in columns:
+                        logger.info("Migrating ThumbnailCache table to new schema")
+                        # Drop old table (it's just a cache, safe to recreate)
+                        cursor.execute("DROP TABLE ThumbnailCache")
+                        cursor.execute("DROP INDEX IF EXISTS idx_thumbnail_cache_hash")
+                        cursor.execute("DROP INDEX IF EXISTS idx_thumbnail_cache_accessed")
+
+                # Create table with new schema (if not exists or after migration)
                 cursor.execute(self.THUMBNAIL_CACHE_TABLE_SCHEMA)
 
                 # Create indexes for performance
