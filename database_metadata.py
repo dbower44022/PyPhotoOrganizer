@@ -383,7 +383,8 @@ class DatabaseMetadata:
                 cursor.execute("""
                     SELECT database_name, description, archive_location, video_archive_location,
                            separate_video_archive, created_date, last_used_date, schema_version, total_photos,
-                           organization_template, file_type_organization, enable_file_rename, filename_template
+                           organization_template, file_type_organization, enable_file_rename, filename_template,
+                           thumbnail_size, thumbnail_cache_dir, preview_window_geometry, preview_window_visible
                     FROM DatabaseMetadata WHERE id = 1
                 """)
 
@@ -402,7 +403,11 @@ class DatabaseMetadata:
                         'organization_template': row[9] if len(row) > 9 else '{YYYY}/{MM}/{DD}',
                         'file_type_organization': row[10] if len(row) > 10 else 'combined',
                         'enable_file_rename': row[11] if len(row) > 11 else 0,
-                        'filename_template': row[12] if len(row) > 12 else '{original_name}'
+                        'filename_template': row[12] if len(row) > 12 else '{original_name}',
+                        'thumbnail_size': row[13] if len(row) > 13 else 200,
+                        'thumbnail_cache_dir': row[14] if len(row) > 14 else None,
+                        'preview_window_geometry': row[15] if len(row) > 15 else None,
+                        'preview_window_visible': row[16] if len(row) > 16 else 1
                     }
                 return None
 
