@@ -373,13 +373,23 @@ class DateCorrectionsTab(QWidget):
             db_dir = os.path.dirname(self.db_metadata.database_path)
             cache_dir = os.path.join(db_dir, '.thumbnails')
 
+            # Get cache settings from database (user-configurable)
+            cache_memory_mb = self.db_metadata.get_cache_memory_mb()
+            worker_threads = self.db_metadata.get_cache_worker_threads()
+
+            # Calculate number of items from MB (assuming ~150KB per thumbnail)
+            memory_items = int((cache_memory_mb * 1024 * 1024) / (150 * 1024))
+
             logger.info(f"Initializing thumbnail cache at {cache_dir}")
+            logger.info(f"  Cache memory: {cache_memory_mb}MB (~{memory_items:,} items)")
+            logger.info(f"  Worker threads: {worker_threads}")
+
             self.thumbnail_cache = ThumbnailCache(
                 db_path=self.db_metadata.database_path,
                 cache_dir=cache_dir,
-                memory_size=500,  # 500 items in memory
-                disk_size_gb=2,   # 2GB disk cache
-                worker_threads=4  # 4 background workers
+                memory_size=memory_items,  # Calculated from MB setting
+                disk_size_gb=5,            # 5GB disk cache
+                worker_threads=worker_threads  # User-configurable
             )
 
             # Create grid model
