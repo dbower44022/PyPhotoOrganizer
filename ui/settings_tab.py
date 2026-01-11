@@ -128,6 +128,63 @@ class SettingsTab(QWidget):
         perf_group.setLayout(perf_layout)
         layout.addWidget(perf_group)
 
+        # Thumbnail Cache Settings
+        cache_group = QGroupBox("Thumbnail Cache Settings (Date Corrections Tab)")
+        cache_group.setStyleSheet(self.groupbox_style)
+        cache_layout = QFormLayout()
+
+        # Cache memory size
+        cache_memory_layout = QHBoxLayout()
+        self.cache_memory_spin = QSpinBox()
+        self.cache_memory_spin.setRange(50, 2000)  # 50MB to 2000MB (2GB)
+        self.cache_memory_spin.setValue(500)  # Default 500MB
+        self.cache_memory_spin.setSuffix(" MB")
+        self.cache_memory_spin.valueChanged.connect(self.on_cache_settings_changed)
+        cache_memory_layout.addWidget(self.cache_memory_spin)
+
+        # Show calculated item count
+        self.cache_items_label = QLabel()
+        self.cache_items_label.setStyleSheet("color: #666; font-style: italic;")
+        cache_memory_layout.addWidget(self.cache_items_label)
+        cache_memory_layout.addStretch()
+
+        cache_layout.addRow("Cache memory size:", cache_memory_layout)
+
+        # Worker threads
+        worker_layout = QHBoxLayout()
+        self.worker_threads_spin = QSpinBox()
+        self.worker_threads_spin.setRange(1, 16)  # 1 to 16 threads
+        self.worker_threads_spin.setValue(8)  # Default 8 threads
+        self.worker_threads_spin.setSuffix(" threads")
+        self.worker_threads_spin.valueChanged.connect(self.on_cache_settings_changed)
+        worker_layout.addWidget(self.worker_threads_spin)
+
+        # Hint about CPU cores
+        import multiprocessing
+        cpu_count = multiprocessing.cpu_count()
+        cpu_hint = QLabel(f"(System has {cpu_count} CPU cores)")
+        cpu_hint.setStyleSheet("color: #666; font-style: italic;")
+        worker_layout.addWidget(cpu_hint)
+        worker_layout.addStretch()
+
+        cache_layout.addRow("Worker threads:", worker_layout)
+
+        # Help text
+        cache_help = QLabel(
+            "Cache memory determines how many thumbnails are kept in RAM for instant access.\n"
+            "Higher values = faster scrolling but more memory usage.\n"
+            "Worker threads control parallel thumbnail generation. Match your CPU cores for best performance."
+        )
+        cache_help.setWordWrap(True)
+        cache_help.setStyleSheet("color: #666; font-size: 9pt; padding: 5px;")
+        cache_layout.addRow("", cache_help)
+
+        cache_group.setLayout(cache_layout)
+        layout.addWidget(cache_group)
+
+        # Update initial label
+        self.update_cache_items_label()
+
         layout.addStretch()
         main_widget.setLayout(layout)
         scroll.setWidget(main_widget)
@@ -1096,6 +1153,24 @@ class SettingsTab(QWidget):
         # Load retention settings
         self.load_retention_settings()
 
+        # Load cache settings
+        cache_memory_mb = db_metadata.get_cache_memory_mb()
+        worker_threads = db_metadata.get_cache_worker_threads()
+
+        # Block signals during loading to prevent saving during initialization
+        self.cache_memory_spin.blockSignals(True)
+        self.worker_threads_spin.blockSignals(True)
+
+        self.cache_memory_spin.setValue(cache_memory_mb)
+        self.worker_threads_spin.setValue(worker_threads)
+
+        # Unblock signals
+        self.cache_memory_spin.blockSignals(False)
+        self.worker_threads_spin.blockSignals(False)
+
+        # Update label
+        self.update_cache_items_label()
+
         # Load ignored directories
 
     def get_config(self):
@@ -1570,3 +1645,31 @@ class SettingsTab(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Cleanup Failed",
                                f"Failed to run cleanup:\n\n{str(e)}")
+
+    # ========== Thumbnail Cache Settings Methods ==========
+
+    def update_cache_items_label(self):
+        """Update the label showing calculated item count from MB."""
+        cache_memory_mb = self.cache_memory_spin.value()
+        # Calculate items (assuming ~150KB per thumbnail)
+        items = int((cache_memory_mb * 1024 * 1024) / (150 * 1024))
+        self.cache_items_label.setText(f"(~{items:,} thumbnails)")
+
+    def on_cache_settings_changed(self):
+        """Handle cache settings change - update label and save to database."""
+        # Update item count label
+        self.update_cache_items_label()
+
+        # Save to database if loaded
+        if self.db_metadata:
+            cache_memory_mb = self.cache_memory_spin.value()
+            worker_threads = self.worker_threads_spin.value()
+
+            self.db_metadata.set_cache_memory_mb(cache_memory_mb)
+            self.db_metadata.set_cache_worker_threads(worker_threads)
+
+            # Log for user awareness
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"Updated cache settings: {cache_memory_mb}MB memory, {worker_threads} worker threads")
+            logger.info("Note: Changes will take effect when Date Corrections tab is reopened")

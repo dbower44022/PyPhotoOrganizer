@@ -201,6 +201,16 @@ class DatabaseMetadata:
                     logger.info("Upgrading database: adding preview_window_visible column")
                     cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN preview_window_visible INTEGER DEFAULT 1")
 
+                # Add cache_memory_mb column if missing
+                if 'cache_memory_mb' not in columns:
+                    logger.info("Upgrading database: adding cache_memory_mb column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN cache_memory_mb INTEGER DEFAULT 500")
+
+                # Add cache_worker_threads column if missing
+                if 'cache_worker_threads' not in columns:
+                    logger.info("Upgrading database: adding cache_worker_threads column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN cache_worker_threads INTEGER DEFAULT 8")
+
                 conn.commit()
                 logger.debug(f"Metadata table ensured in {self.database_path}")
 
@@ -384,7 +394,8 @@ class DatabaseMetadata:
                     SELECT database_name, description, archive_location, video_archive_location,
                            separate_video_archive, created_date, last_used_date, schema_version, total_photos,
                            organization_template, file_type_organization, enable_file_rename, filename_template,
-                           thumbnail_size, thumbnail_cache_dir, preview_window_geometry, preview_window_visible
+                           thumbnail_size, thumbnail_cache_dir, preview_window_geometry, preview_window_visible,
+                           cache_memory_mb, cache_worker_threads
                     FROM DatabaseMetadata WHERE id = 1
                 """)
 
@@ -407,7 +418,9 @@ class DatabaseMetadata:
                         'thumbnail_size': row[13] if len(row) > 13 else 200,
                         'thumbnail_cache_dir': row[14] if len(row) > 14 else None,
                         'preview_window_geometry': row[15] if len(row) > 15 else None,
-                        'preview_window_visible': row[16] if len(row) > 16 else 1
+                        'preview_window_visible': row[16] if len(row) > 16 else 1,
+                        'cache_memory_mb': row[17] if len(row) > 17 else 500,
+                        'cache_worker_threads': row[18] if len(row) > 18 else 8
                     }
                 return None
 
@@ -1570,6 +1583,104 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to set thumbnail size: {e}")
+            return False
+
+    # ========== Thumbnail Cache Settings ==========
+
+    def get_cache_memory_mb(self) -> int:
+        """
+        Get the thumbnail cache memory size in MB.
+
+        Returns:
+            Cache memory size in MB (default: 500MB)
+        """
+        try:
+            metadata = self.get_metadata()
+            if metadata is None:
+                logger.warning("get_metadata() returned None - using default cache memory size")
+                return 500
+
+            size_mb = metadata.get('cache_memory_mb', 500)
+            return int(size_mb) if size_mb else 500
+
+        except Exception as e:
+            logger.error(f"Failed to get cache memory size: {e}")
+            return 500
+
+    def set_cache_memory_mb(self, size_mb: int) -> bool:
+        """
+        Set the thumbnail cache memory size in MB.
+
+        Args:
+            size_mb: Cache memory size in MB (e.g., 100, 500, 1000)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET cache_memory_mb = ?
+                    WHERE id = 1
+                """, (size_mb,))
+
+                conn.commit()
+                logger.info(f"Updated cache memory size to {size_mb}MB")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to set cache memory size: {e}")
+            return False
+
+    def get_cache_worker_threads(self) -> int:
+        """
+        Get the number of worker threads for thumbnail generation.
+
+        Returns:
+            Number of worker threads (default: 8)
+        """
+        try:
+            metadata = self.get_metadata()
+            if metadata is None:
+                logger.warning("get_metadata() returned None - using default worker threads")
+                return 8
+
+            threads = metadata.get('cache_worker_threads', 8)
+            return int(threads) if threads else 8
+
+        except Exception as e:
+            logger.error(f"Failed to get cache worker threads: {e}")
+            return 8
+
+    def set_cache_worker_threads(self, threads: int) -> bool:
+        """
+        Set the number of worker threads for thumbnail generation.
+
+        Args:
+            threads: Number of worker threads (1-16, typically matches CPU cores)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET cache_worker_threads = ?
+                    WHERE id = 1
+                """, (threads,))
+
+                conn.commit()
+                logger.info(f"Updated cache worker threads to {threads}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to set cache worker threads: {e}")
             return False
 
     # ========== Preview Window Settings ==========
