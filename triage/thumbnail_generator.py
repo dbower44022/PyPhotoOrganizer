@@ -58,7 +58,7 @@ class ThumbnailWorker(QRunnable):
     """
 
     def __init__(self, file_hash: str, file_path: str, size: int,
-                 cache_dir: Path, db_path: str):
+                 cache_dir: Path, cache=None):
         """
         Initialize thumbnail worker.
 
@@ -67,14 +67,14 @@ class ThumbnailWorker(QRunnable):
             file_path: Full path to original image
             size: Thumbnail size in pixels (256, 512, or 1024)
             cache_dir: Root directory for disk cache
-            db_path: Path to SQLite database
+            cache: ThumbnailCache instance (for async DB writes)
         """
         super().__init__()
         self.file_hash = file_hash
         self.file_path = file_path
         self.size = size
         self.cache_dir = Path(cache_dir)
-        self.db_path = db_path
+        self.cache = cache  # Reference to ThumbnailCache for async writes
         self.signals = ThumbnailWorkerSignals()
 
         # Auto-delete when done
@@ -283,29 +283,36 @@ class ThumbnailWorker(QRunnable):
 
     def _update_cache_metadata(self, disk_path: Path):
         """
-        Record thumbnail in ThumbnailCache table.
+        Queue thumbnail metadata for async database write.
 
         Args:
             disk_path: Path to saved thumbnail file
         """
         try:
-            # Import here to avoid circular dependency
-            from triage.triage_database import TriageDatabase
-
             # Get file modification time
             file_mtime = os.path.getmtime(self.file_path)
 
-            # Add to database
-            triage_db = TriageDatabase(self.db_path)
-            triage_db.add_thumbnail(
-                self.file_hash,
-                str(disk_path),
-                self.size,
-                file_mtime
-            )
+            # Queue async database write (non-blocking)
+            if self.cache:
+                self.cache.queue_database_write(
+                    self.file_hash,
+                    str(disk_path),
+                    self.size,
+                    file_mtime
+                )
+            else:
+                # Fallback to direct write (for backwards compatibility)
+                from triage.triage_database import TriageDatabase
+                triage_db = TriageDatabase(self.cache.db_path if self.cache else '')
+                triage_db.add_thumbnail(
+                    self.file_hash,
+                    str(disk_path),
+                    self.size,
+                    file_mtime
+                )
 
         except Exception as e:
-            logger.warning(f"Failed to update thumbnail cache metadata: {e}")
+            logger.debug(f"Failed to queue thumbnail metadata: {e}")
             # Don't fail the whole operation if database update fails
 
 
