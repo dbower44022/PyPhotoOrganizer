@@ -20,6 +20,8 @@ Key features:
 
 import logging
 import os
+import threading
+import queue
 from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -92,20 +94,33 @@ class ThumbnailCache(QObject):
         # Track in-progress generations to avoid duplicates
         self._generating: set = set()  # Set of cache keys being generated
 
+        # Async database write queue (eliminates contention and UI blocking)
+        self._db_write_queue = queue.Queue()
+        self._db_writer_thread = threading.Thread(
+            target=self._database_writer_worker,
+            daemon=True,  # Allow graceful shutdown
+            name="ThumbnailCacheDBWriter"
+        )
+        self._db_writer_running = True
+        self._db_writer_thread.start()
+
         # Statistics
         self.stats = {
             'memory_hits': 0,
             'disk_hits': 0,
             'misses': 0,
             'generated': 0,
-            'errors': 0
+            'errors': 0,
+            'db_writes_queued': 0,
+            'db_writes_completed': 0
         }
 
         # Placeholder generator
         self.placeholder_gen = PlaceholderGenerator()
 
         logger.info(f"Thumbnail cache initialized: memory={memory_size}, "
-                   f"disk={disk_size_gb}GB, workers={worker_threads}")
+                   f"disk={disk_size_gb}GB, workers={worker_threads}, "
+                   f"async_db_writes=enabled")
 
     def get_thumbnail(self, file_hash: str, file_path: str,
                      size: int = 256, priority: str = 'normal') -> QPixmap:
@@ -246,7 +261,7 @@ class ThumbnailCache(QObject):
             file_path=file_path,
             size=size,
             cache_dir=self.cache_dir,
-            db_path=self.db_path
+            cache=self  # Pass cache reference for async DB writes
         )
 
         # Connect signals
@@ -457,6 +472,91 @@ class ThumbnailCache(QObject):
             True if all completed, False if timeout
         """
         return self.thread_pool.waitForDone(timeout_ms)
+
+    def queue_database_write(self, file_hash: str, disk_path: str, size: int, file_mtime: float):
+        """
+        Queue a database write operation (non-blocking).
+
+        This is called by thumbnail workers to avoid database contention.
+        Writes are processed by a dedicated background thread.
+
+        Args:
+            file_hash: SHA-256 hash of source file
+            disk_path: Path to cached thumbnail file
+            size: Thumbnail size in pixels
+            file_mtime: File modification time (timestamp)
+        """
+        try:
+            self._db_write_queue.put({
+                'file_hash': file_hash,
+                'disk_path': disk_path,
+                'size': size,
+                'file_mtime': file_mtime
+            }, block=False)
+            self.stats['db_writes_queued'] += 1
+        except queue.Full:
+            logger.warning(f"Database write queue full - dropping write for {file_hash[:8]}...")
+
+    def _database_writer_worker(self):
+        """
+        Background thread that processes database writes from queue.
+
+        This eliminates database lock contention by ensuring only one thread
+        writes to the database at a time.
+        """
+        logger.info("Database writer thread started")
+
+        while self._db_writer_running:
+            try:
+                # Wait for write operation (1 second timeout for graceful shutdown)
+                write_op = self._db_write_queue.get(timeout=1.0)
+
+                # Perform database write
+                try:
+                    self.triage_db.add_thumbnail(
+                        write_op['file_hash'],
+                        write_op['disk_path'],
+                        write_op['size'],
+                        write_op['file_mtime']
+                    )
+                    self.stats['db_writes_completed'] += 1
+                except Exception as e:
+                    logger.warning(f"Database write failed for {write_op['file_hash'][:8]}...: {e}")
+
+                self._db_write_queue.task_done()
+
+            except queue.Empty:
+                # Timeout - continue loop (allows graceful shutdown)
+                continue
+            except Exception as e:
+                logger.error(f"Database writer thread error: {e}", exc_info=True)
+
+        logger.info("Database writer thread stopped")
+
+    def shutdown(self):
+        """
+        Gracefully shutdown the thumbnail cache.
+
+        Stops the database writer thread and waits for pending writes.
+        """
+        logger.info("Shutting down thumbnail cache...")
+
+        # Stop database writer thread
+        self._db_writer_running = False
+
+        # Wait for queue to drain (max 5 seconds)
+        try:
+            self._db_write_queue.join()
+        except Exception as e:
+            logger.warning(f"Queue drain timeout: {e}")
+
+        # Wait for thread to finish
+        if self._db_writer_thread.is_alive():
+            self._db_writer_thread.join(timeout=2.0)
+
+        logger.info(f"Thumbnail cache shutdown complete. "
+                   f"Queued: {self.stats['db_writes_queued']}, "
+                   f"Completed: {self.stats['db_writes_completed']}")
 
 
 if __name__ == '__main__':
