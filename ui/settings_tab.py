@@ -1,25 +1,37 @@
 """
 Settings Tab for PyPhotoOrganizer GUI
 
-Advanced configuration management.
+Reorganized settings management with three main tabs:
+- Import Settings: Source configuration and filtering
+- Archive Settings: Organization and file management
+- System Settings: Database, performance, and global settings
 """
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QCheckBox, QSpinBox, QLineEdit, QPushButton,
                                QLabel, QListWidget, QMessageBox, QScrollArea,
                                QFormLayout, QComboBox, QTextEdit, QRadioButton,
-                               QButtonGroup, QTabWidget)
-from PySide6.QtCore import Qt
+                               QButtonGroup, QTabWidget, QTableWidget, QTableWidgetItem,
+                               QHeaderView, QAbstractItemView, QFileDialog)
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 import json
 import os
 import constants
 from config import Config
 from organization_template import OrganizationTemplate
+from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class SettingsTab(QWidget):
-    """Tab for managing application settings."""
+    """Tab for managing application settings with reorganized structure."""
+
+    # Signals
+    start_processing = Signal()
+    stop_processing = Signal()
 
     def __init__(self):
         super().__init__()
@@ -27,13 +39,14 @@ class SettingsTab(QWidget):
         self.db_metadata = None  # Will be set when database is loaded
         self.current_template = '{YYYY}/{MM}/{DD}'  # Default organization template
         self.current_filename_template = '{original_name}'  # Default filename template
+        self.last_clicked_source_row = -1  # For Shift/Ctrl selection in source table
         self.init_ui()
         self.load_from_file(show_dialog=False)  # Suppress dialog during initialization
 
     def init_ui(self):
-        """Initialize the user interface with tabbed sub-sections."""
-        # Create tab widget for sub-tabs
-        self.sub_tabs = QTabWidget()
+        """Initialize the user interface with three main tabs."""
+        # Create tab widget for main tabs
+        self.main_tabs = QTabWidget()
 
         # Stylesheet for bold GroupBox titles (used in all tabs)
         self.groupbox_style = """
@@ -54,40 +67,164 @@ class SettingsTab(QWidget):
         """
 
         # Create individual tab pages
-        general_tab = self._create_general_tab()
-        organization_tab = self._create_organization_tab()
-        filtering_tab = self._create_filtering_tab()
-        advanced_tab = self._create_advanced_tab()
+        import_tab = self._create_import_settings_tab()
+        archive_tab = self._create_archive_settings_tab()
+        system_tab = self._create_system_settings_tab()
 
         # Add tabs with icons
-        self.sub_tabs.addTab(general_tab, "⚙️ General")
-        self.sub_tabs.addTab(organization_tab, "📁 Organization")
-        self.sub_tabs.addTab(filtering_tab, "🎯 Filtering")
-        self.sub_tabs.addTab(advanced_tab, "🔧 Advanced")
+        self.main_tabs.addTab(import_tab, "📥 Import Settings")
+        self.main_tabs.addTab(archive_tab, "📦 Archive Settings")
+        self.main_tabs.addTab(system_tab, "⚙️ System Settings")
 
-        # Set tooltips for sub-tabs
-        self.sub_tabs.setTabToolTip(0, "File processing and performance settings")
-        self.sub_tabs.setTabToolTip(1, "Folder organization, file types, and renaming")
-        self.sub_tabs.setTabToolTip(2, "Photo filtering and filename pattern exclusions")
-        self.sub_tabs.setTabToolTip(3, "Advanced settings and import history retention")
+        # Set tooltips for tabs
+        self.main_tabs.setTabToolTip(0, "Source folders, file processing, and filtering settings")
+        self.main_tabs.setTabToolTip(1, "Archive location, organization, and file renaming")
+        self.main_tabs.setTabToolTip(2, "Database info, operation mode, performance, and retention")
 
         # Set main layout
         main_layout = QVBoxLayout()
-        main_layout.addWidget(self.sub_tabs)
+        main_layout.addWidget(self.main_tabs)
         self.setLayout(main_layout)
 
         # Initialize pattern count
         self.update_pattern_count()
+        self.update_ignored_dirs_count()
 
-    def _create_general_tab(self):
-        """Create the General settings tab (File Processing & Performance)."""
-        # Create scroll area for this tab
+    def _create_import_settings_tab(self):
+        """Create the Import Settings tab."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
 
-        # Main widget for scroll area
         main_widget = QWidget()
         layout = QVBoxLayout()
+
+        # Source Folders Group
+        source_group = QGroupBox("Source Folders")
+        source_group.setStyleSheet(self.groupbox_style)
+        source_layout = QVBoxLayout()
+
+        # Create table with columns: Enable, Status Icon, Path, Last Scanned, Status
+        self.source_table = QTableWidget()
+        self.source_table.setColumnCount(5)
+        self.source_table.setHorizontalHeaderLabels(["Enable", "Icon", "Source Path", "Last Scanned", "Status"])
+        self.source_table.setMinimumHeight(150)
+        self.source_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.source_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.source_table.verticalHeader().setVisible(False)
+
+        # Connect signals for Shift/Ctrl selection
+        self.source_table.itemSelectionChanged.connect(self.sync_source_checkboxes_with_selection)
+        self.source_table.itemClicked.connect(self.on_source_item_clicked)
+        self.source_table.itemDoubleClicked.connect(self.on_source_item_double_clicked)
+
+        # Set column widths
+        header = self.source_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.source_table.setColumnWidth(0, 60)
+        self.source_table.setColumnWidth(1, 50)
+        self.source_table.setMouseTracking(True)
+
+        source_layout.addWidget(self.source_table)
+
+        source_buttons = QHBoxLayout()
+        self.add_source_btn = QPushButton("Add Folder...")
+        self.add_source_btn.clicked.connect(self.add_source_folder)
+        self.remove_source_btn = QPushButton("Remove Selected")
+        self.remove_source_btn.clicked.connect(self.remove_source_folder)
+        self.clear_all_btn = QPushButton("Clear All")
+        self.clear_all_btn.clicked.connect(self.clear_all_sources)
+        self.refresh_status_btn = QPushButton("Refresh Status")
+        self.refresh_status_btn.clicked.connect(self.refresh_source_status)
+        source_buttons.addWidget(self.add_source_btn)
+        source_buttons.addWidget(self.remove_source_btn)
+        source_buttons.addWidget(self.clear_all_btn)
+        source_buttons.addWidget(self.refresh_status_btn)
+        source_buttons.addStretch()
+        source_layout.addLayout(source_buttons)
+
+        source_group.setLayout(source_layout)
+        layout.addWidget(source_group)
+
+        # Ignored Directories Group
+        ignored_dirs_group = QGroupBox("Ignored Directories (Skip During Scan)")
+        ignored_dirs_group.setStyleSheet(self.groupbox_style)
+        ignored_dirs_layout = QVBoxLayout()
+
+        ignored_dirs_desc = QLabel(
+            "Directories matching these patterns will be skipped during scanning. "
+            "This helps exclude system folders, thumbnails, and other non-photo directories."
+        )
+        ignored_dirs_desc.setWordWrap(True)
+        ignored_dirs_desc.setStyleSheet("font-style: italic; color: gray; padding: 5px;")
+        ignored_dirs_layout.addWidget(ignored_dirs_desc)
+
+        ignored_content_layout = QHBoxLayout()
+
+        list_container = QVBoxLayout()
+        list_label = QLabel("Ignored Patterns:")
+        list_label.setStyleSheet("font-weight: bold;")
+        list_container.addWidget(list_label)
+
+        self.ignored_dirs_list = QListWidget()
+        self.ignored_dirs_list.setMaximumHeight(120)
+        self.ignored_dirs_list.setToolTip("Double-click to edit, select and click Remove to delete")
+        list_container.addWidget(self.ignored_dirs_list)
+        ignored_content_layout.addLayout(list_container)
+
+        ignored_buttons = QVBoxLayout()
+        self.add_ignored_dir_input = QLineEdit()
+        self.add_ignored_dir_input.setPlaceholderText("e.g., @eaDir, thumb*, .git, /path/to/skip")
+        ignored_buttons.addWidget(self.add_ignored_dir_input)
+
+        self.add_ignored_dir_btn = QPushButton("Add Pattern")
+        self.add_ignored_dir_btn.clicked.connect(self.add_ignored_dir_pattern)
+        ignored_buttons.addWidget(self.add_ignored_dir_btn)
+
+        self.remove_ignored_dir_btn = QPushButton("Remove Selected")
+        self.remove_ignored_dir_btn.clicked.connect(self.remove_ignored_dir_pattern)
+        ignored_buttons.addWidget(self.remove_ignored_dir_btn)
+
+        self.add_preset_dirs_btn = QPushButton("Add Common Presets")
+        self.add_preset_dirs_btn.setToolTip("Add commonly ignored folders like @eaDir, .git, node_modules, etc.")
+        self.add_preset_dirs_btn.clicked.connect(self.add_preset_ignored_dirs)
+        ignored_buttons.addWidget(self.add_preset_dirs_btn)
+
+        ignored_buttons.addStretch()
+        ignored_content_layout.addLayout(ignored_buttons)
+        ignored_dirs_layout.addLayout(ignored_content_layout)
+
+        # Help text
+        help_text_widget = QWidget()
+        help_text_widget.setStyleSheet("background-color: #f9f9f9; border: 1px solid #ddd; border-radius: 3px; padding: 8px;")
+        help_text_layout = QVBoxLayout()
+        help_text_layout.setContentsMargins(5, 5, 5, 5)
+
+        help_title = QLabel("ℹ Wildcard Syntax:")
+        help_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
+        help_text_layout.addWidget(help_title)
+
+        help_examples = QLabel(
+            "• <b>*</b> = Match any characters (e.g., <i>thumb*</i> matches thumbnail, thumbs, thumb_cache)<br>"
+            "• <b>?</b> = Match single character (e.g., <i>temp?</i> matches temp1, temp2)<br>"
+            "• <b>Examples:</b> @eaDir, .git, node_modules, thumb*, /mnt/backup/old"
+        )
+        help_examples.setWordWrap(True)
+        help_examples.setStyleSheet("color: #555; font-size: 9pt;")
+        help_text_layout.addWidget(help_examples)
+
+        help_text_widget.setLayout(help_text_layout)
+        ignored_dirs_layout.addWidget(help_text_widget)
+
+        self.ignored_dirs_count_label = QLabel("Total patterns: 0")
+        self.ignored_dirs_count_label.setStyleSheet("font-style: italic; color: gray; margin-top: 5px;")
+        ignored_dirs_layout.addWidget(self.ignored_dirs_count_label)
+
+        ignored_dirs_group.setLayout(ignored_dirs_layout)
+        layout.addWidget(ignored_dirs_group)
 
         # File Processing Settings
         file_group = QGroupBox("File Processing Settings")
@@ -106,109 +243,168 @@ class SettingsTab(QWidget):
         file_group.setLayout(file_layout)
         layout.addWidget(file_group)
 
-        # Performance Settings
-        perf_group = QGroupBox("Performance Settings")
-        perf_group.setStyleSheet(self.groupbox_style)
-        perf_layout = QFormLayout()
+        # Photo Filtering Settings
+        filter_group = QGroupBox("Photo Filtering Settings")
+        filter_group.setStyleSheet(self.groupbox_style)
+        filter_layout = QFormLayout()
 
-        self.partial_hash_check = QCheckBox()
-        self.partial_hash_check.setChecked(True)
-        perf_layout.addRow("Partial hash enabled:", self.partial_hash_check)
+        self.photo_filter_check = QCheckBox()
+        self.photo_filter_check.setChecked(True)
+        filter_layout.addRow("Enable photo filter:", self.photo_filter_check)
 
-        self.partial_hash_bytes_spin = QSpinBox()
-        self.partial_hash_bytes_spin.setRange(1024, 1048576)
-        self.partial_hash_bytes_spin.setValue(constants.PARTIAL_HASH_BYTES)
-        perf_layout.addRow("Partial hash bytes:", self.partial_hash_bytes_spin)
+        self.min_file_size_spin = QSpinBox()
+        self.min_file_size_spin.setRange(1, 1000)
+        self.min_file_size_spin.setValue(constants.MIN_PHOTO_FILE_SIZE // 1024)
+        self.min_file_size_spin.setSuffix(" KB")
+        filter_layout.addRow("Min file size:", self.min_file_size_spin)
 
-        self.partial_hash_min_size_spin = QSpinBox()
-        self.partial_hash_min_size_spin.setRange(0, 10485760)
-        self.partial_hash_min_size_spin.setValue(constants.PARTIAL_HASH_MIN_FILE_SIZE)
-        perf_layout.addRow("Min file size for partial hash:", self.partial_hash_min_size_spin)
+        self.min_width_spin = QSpinBox()
+        self.min_width_spin.setRange(100, 10000)
+        self.min_width_spin.setValue(constants.MIN_PHOTO_WIDTH)
+        filter_layout.addRow("Min width:", self.min_width_spin)
 
-        perf_group.setLayout(perf_layout)
-        layout.addWidget(perf_group)
+        self.min_height_spin = QSpinBox()
+        self.min_height_spin.setRange(100, 10000)
+        self.min_height_spin.setValue(constants.MIN_PHOTO_HEIGHT)
+        filter_layout.addRow("Min height:", self.min_height_spin)
 
-        # Thumbnail Cache Settings
-        cache_group = QGroupBox("Thumbnail Cache Settings (Date Corrections Tab)")
-        cache_group.setStyleSheet(self.groupbox_style)
-        cache_layout = QFormLayout()
+        self.max_width_spin = QSpinBox()
+        self.max_width_spin.setRange(1000, 50000)
+        self.max_width_spin.setValue(constants.MAX_PHOTO_WIDTH)
+        filter_layout.addRow("Max width:", self.max_width_spin)
 
-        # Cache memory size
-        cache_memory_layout = QHBoxLayout()
-        self.cache_memory_spin = QSpinBox()
-        self.cache_memory_spin.setRange(50, 2000)  # 50MB to 2000MB (2GB)
-        self.cache_memory_spin.setValue(500)  # Default 500MB
-        self.cache_memory_spin.setSuffix(" MB")
-        self.cache_memory_spin.valueChanged.connect(self.on_cache_settings_changed)
-        cache_memory_layout.addWidget(self.cache_memory_spin)
+        self.max_height_spin = QSpinBox()
+        self.max_height_spin.setRange(1000, 50000)
+        self.max_height_spin.setValue(constants.MAX_PHOTO_HEIGHT)
+        filter_layout.addRow("Max height:", self.max_height_spin)
 
-        # Show calculated item count
-        self.cache_items_label = QLabel()
-        self.cache_items_label.setStyleSheet("color: #666; font-style: italic;")
-        cache_memory_layout.addWidget(self.cache_items_label)
-        cache_memory_layout.addStretch()
+        self.exclude_square_spin = QSpinBox()
+        self.exclude_square_spin.setRange(0, 1000)
+        self.exclude_square_spin.setValue(constants.MIN_SQUARE_SIZE)
+        filter_layout.addRow("Exclude square smaller than:", self.exclude_square_spin)
 
-        cache_layout.addRow("Cache memory size:", cache_memory_layout)
+        self.require_exif_check = QCheckBox()
+        self.require_exif_check.setChecked(False)
+        filter_layout.addRow("Require EXIF data:", self.require_exif_check)
 
-        # Worker threads
-        worker_layout = QHBoxLayout()
-        self.worker_threads_spin = QSpinBox()
-        self.worker_threads_spin.setRange(1, 16)  # 1 to 16 threads
-        self.worker_threads_spin.setValue(8)  # Default 8 threads
-        self.worker_threads_spin.setSuffix(" threads")
-        self.worker_threads_spin.valueChanged.connect(self.on_cache_settings_changed)
-        worker_layout.addWidget(self.worker_threads_spin)
+        filter_group.setLayout(filter_layout)
+        layout.addWidget(filter_group)
 
-        # Hint about CPU cores
-        import multiprocessing
-        cpu_count = multiprocessing.cpu_count()
-        cpu_hint = QLabel(f"(System has {cpu_count} CPU cores)")
-        cpu_hint.setStyleSheet("color: #666; font-style: italic;")
-        worker_layout.addWidget(cpu_hint)
-        worker_layout.addStretch()
+        # Filename Pattern Filtering
+        pattern_group = QGroupBox("Filename Pattern Filtering")
+        pattern_group.setStyleSheet(self.groupbox_style)
+        pattern_layout = QVBoxLayout()
 
-        cache_layout.addRow("Worker threads:", worker_layout)
-
-        # Help text
-        cache_help = QLabel(
-            "Cache memory determines how many thumbnails are kept in RAM for instant access.\n"
-            "Higher values = faster scrolling but more memory usage.\n"
-            "Worker threads control parallel thumbnail generation. Match your CPU cores for best performance."
+        pattern_desc = QLabel(
+            "Files containing these patterns in their filename will be filtered out.\n"
+            "Common examples: favicon, icon, logo, thumbnail, etc."
         )
-        cache_help.setWordWrap(True)
-        cache_help.setStyleSheet("color: #666; font-size: 9pt; padding: 5px;")
-        cache_layout.addRow("", cache_help)
+        pattern_desc.setWordWrap(True)
+        pattern_desc.setStyleSheet("font-style: italic; color: gray; padding: 5px;")
+        pattern_layout.addWidget(pattern_desc)
 
-        cache_group.setLayout(cache_layout)
-        layout.addWidget(cache_group)
+        self.filename_filter_check = QCheckBox("Enable filename pattern filtering")
+        self.filename_filter_check.setChecked(True)
+        self.filename_filter_check.stateChanged.connect(self.update_pattern_controls)
+        pattern_layout.addWidget(self.filename_filter_check)
 
-        # Update initial label
-        self.update_cache_items_label()
+        pattern_content_layout = QHBoxLayout()
+
+        list_container = QVBoxLayout()
+        list_label = QLabel("Excluded Patterns:")
+        list_label.setStyleSheet("font-weight: bold;")
+        list_container.addWidget(list_label)
+
+        self.pattern_list = QListWidget()
+        self.pattern_list.setMaximumHeight(150)
+        list_container.addWidget(self.pattern_list)
+        pattern_content_layout.addLayout(list_container)
+
+        pattern_buttons = QVBoxLayout()
+
+        self.add_pattern_input = QLineEdit()
+        self.add_pattern_input.setPlaceholderText("e.g., favicon, icon, thumb")
+        pattern_buttons.addWidget(self.add_pattern_input)
+
+        self.add_pattern_btn = QPushButton("Add Pattern")
+        self.add_pattern_btn.clicked.connect(self.add_pattern)
+        pattern_buttons.addWidget(self.add_pattern_btn)
+
+        self.remove_pattern_btn = QPushButton("Remove Selected")
+        self.remove_pattern_btn.clicked.connect(self.remove_pattern)
+        pattern_buttons.addWidget(self.remove_pattern_btn)
+
+        self.add_default_patterns_btn = QPushButton("Add Default Patterns")
+        self.add_default_patterns_btn.clicked.connect(self.restore_default_patterns)
+        pattern_buttons.addWidget(self.add_default_patterns_btn)
+
+        pattern_buttons.addStretch()
+        pattern_content_layout.addLayout(pattern_buttons)
+
+        pattern_layout.addLayout(pattern_content_layout)
+
+        self.pattern_count_label = QLabel()
+        self.pattern_count_label.setStyleSheet("font-style: italic; color: gray;")
+        pattern_layout.addWidget(self.pattern_count_label)
+
+        pattern_group.setLayout(pattern_layout)
+        layout.addWidget(pattern_group)
 
         layout.addStretch()
         main_widget.setLayout(layout)
         scroll.setWidget(main_widget)
         return scroll
 
-    def _create_organization_tab(self):
-        """Create the Organization settings tab (Folder structure, File types, Renaming)."""
-        # Create scroll area for this tab
+    def _create_archive_settings_tab(self):
+        """Create the Archive Settings tab."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
 
-        # Main widget for scroll area
         main_widget = QWidget()
         layout = QVBoxLayout()
+
+        # Archive Location Group
+        archive_group = QGroupBox("Archive Location")
+        archive_group.setStyleSheet(self.groupbox_style)
+        archive_layout = QVBoxLayout()
+
+        archive_info = QLabel(
+            "The archive location is where your organized photos are stored.\n"
+            "This location is permanently bound to the database."
+        )
+        archive_info.setWordWrap(True)
+        archive_info.setStyleSheet("color: #666; font-size: 11px; margin-bottom: 5px;")
+        archive_layout.addWidget(archive_info)
+
+        archive_path_layout = QHBoxLayout()
+        self.archive_path_edit = QLineEdit()
+        self.archive_path_edit.setReadOnly(True)
+        self.archive_path_edit.setPlaceholderText("Archive location from database...")
+        self.archive_path_edit.setStyleSheet("background-color: #f5f5f5;")
+        archive_path_layout.addWidget(self.archive_path_edit)
+
+        self.browse_archive_btn = QPushButton("Browse...")
+        self.browse_archive_btn.setToolTip("Archive location is managed by the database")
+        self.browse_archive_btn.clicked.connect(self.on_browse_archive_clicked)
+        archive_path_layout.addWidget(self.browse_archive_btn)
+
+        archive_layout.addLayout(archive_path_layout)
+
+        self.archive_status_label = QLabel("")
+        self.archive_status_label.setWordWrap(True)
+        self.archive_status_label.setStyleSheet("font-size: 10px; color: #666; margin-top: 5px;")
+        archive_layout.addWidget(self.archive_status_label)
+
+        archive_group.setLayout(archive_layout)
+        layout.addWidget(archive_group)
 
         # Organization Settings
         org_group = QGroupBox("Organization Settings")
         org_group.setStyleSheet(self.groupbox_style)
         org_layout = QVBoxLayout()
 
-        # Preset dropdown
         preset_layout = QFormLayout()
         self.org_preset_combo = QComboBox()
-        # Get preset names from OrganizationTemplate to ensure they match
         preset_names = OrganizationTemplate.get_preset_names()
         preset_names.append("Custom Template...")
         self.org_preset_combo.addItems(preset_names)
@@ -230,7 +426,7 @@ class SettingsTab(QWidget):
         self.custom_template_edit.textChanged.connect(self.on_custom_template_changed)
         custom_layout.addWidget(self.custom_template_edit)
 
-        # Helper buttons for placeholders (updated to new naming convention)
+        # Helper buttons
         helper_layout = QHBoxLayout()
         helper_label = QLabel("Quick Insert:")
         helper_layout.addWidget(helper_label)
@@ -276,13 +472,12 @@ class SettingsTab(QWidget):
         """)
         custom_layout.addWidget(help_text)
 
-        # Validation message
         self.template_validation_label = QLabel()
         self.template_validation_label.setWordWrap(True)
         custom_layout.addWidget(self.template_validation_label)
 
         self.custom_template_widget.setLayout(custom_layout)
-        self.custom_template_widget.hide()  # Hidden by default
+        self.custom_template_widget.hide()
         org_layout.addWidget(self.custom_template_widget)
 
         # Preview panel
@@ -312,7 +507,7 @@ class SettingsTab(QWidget):
         preview_widget.setLayout(preview_layout)
         org_layout.addWidget(preview_widget)
 
-        # Lock warning (shown when archive has files)
+        # Lock warning
         self.org_lock_warning = QLabel()
         self.org_lock_warning.setWordWrap(True)
         self.org_lock_warning.setStyleSheet("color: #d9534f; background-color: #f2dede; padding: 8px; border-radius: 3px;")
@@ -369,7 +564,7 @@ class SettingsTab(QWidget):
         separate_example.setStyleSheet("color: gray; font-size: 10px; margin-left: 20px; margin-bottom: 5px;")
         file_type_layout.addWidget(separate_example)
 
-        # Video archive location widget (shown only when "Separate archive" is selected)
+        # Video archive location widget
         self.video_archive_widget = QWidget()
         video_archive_layout = QHBoxLayout()
         video_archive_layout.setContentsMargins(20, 5, 0, 5)
@@ -388,13 +583,11 @@ class SettingsTab(QWidget):
 
         video_archive_layout.addStretch()
         self.video_archive_widget.setLayout(video_archive_layout)
-        self.video_archive_widget.hide()  # Hidden by default
+        self.video_archive_widget.hide()
         file_type_layout.addWidget(self.video_archive_widget)
 
-        # Set default
         self.file_type_combined_radio.setChecked(True)
 
-        # Connect radio buttons to check organization lock and update video archive visibility
         self.file_type_combined_radio.toggled.connect(self.on_file_type_changed)
         self.file_type_subfolder_radio.toggled.connect(self.on_file_type_changed)
         self.file_type_separate_radio.toggled.connect(self.on_file_type_changed)
@@ -402,7 +595,6 @@ class SettingsTab(QWidget):
         file_type_group.setLayout(file_type_layout)
         layout.addWidget(file_type_group)
 
-        # Update preview with default preset
         self.update_organization_preview()
 
         # File Renaming Settings
@@ -410,13 +602,11 @@ class SettingsTab(QWidget):
         rename_group.setStyleSheet(self.groupbox_style)
         rename_layout = QVBoxLayout()
 
-        # Enable/disable checkbox
         self.enable_rename_check = QCheckBox("Enable file renaming during processing")
         self.enable_rename_check.setToolTip("When enabled, files will be renamed according to the template below")
         self.enable_rename_check.stateChanged.connect(self.on_rename_enabled_changed)
         rename_layout.addWidget(self.enable_rename_check)
 
-        # Template input
         template_label = QLabel("Filename Template:")
         template_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
         rename_layout.addWidget(template_label)
@@ -449,7 +639,6 @@ class SettingsTab(QWidget):
         example_layout.addStretch()
         rename_layout.addLayout(example_layout)
 
-        # Validation message
         self.rename_validation_label = QLabel()
         self.rename_validation_label.setStyleSheet("color: red; font-style: italic;")
         self.rename_validation_label.setWordWrap(True)
@@ -480,12 +669,10 @@ class SettingsTab(QWidget):
         """)
         rename_layout.addWidget(help_text)
 
-        # Restore default button
         restore_rename_btn = QPushButton("Restore Default: {original_name}")
         restore_rename_btn.clicked.connect(self.restore_default_filename_template)
         rename_layout.addWidget(restore_rename_btn)
 
-        # Warning label for rename template changes (similar to organization template)
         self.rename_lock_warning = QLabel()
         self.rename_lock_warning.setWordWrap(True)
         self.rename_lock_warning.setStyleSheet("""
@@ -501,7 +688,6 @@ class SettingsTab(QWidget):
         self.rename_lock_warning.hide()
         rename_layout.addWidget(self.rename_lock_warning)
 
-        # Reorganize button for rename template
         self.rename_reorganize_btn = QPushButton("Reorganize Files with New Template")
         self.rename_reorganize_btn.setStyleSheet("""
             QPushButton {
@@ -527,150 +713,153 @@ class SettingsTab(QWidget):
         scroll.setWidget(main_widget)
         return scroll
 
-    def _create_filtering_tab(self):
-        """Create the Filtering settings tab (Photo Filtering & Filename Patterns)."""
-        # Create scroll area for this tab
+    def _create_system_settings_tab(self):
+        """Create the System Settings tab."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
 
-        # Main widget for scroll area
         main_widget = QWidget()
         layout = QVBoxLayout()
 
-        # Photo Filtering Settings (moved from old code)
-        filter_group = QGroupBox("Photo Filtering Settings")
-        filter_group.setStyleSheet(self.groupbox_style)
-        filter_layout = QFormLayout()
+        # Current Database Group
+        db_group = QGroupBox("Current Database Information")
+        db_group.setStyleSheet(self.groupbox_style)
+        db_layout = QFormLayout()
 
-        self.photo_filter_check = QCheckBox()
-        self.photo_filter_check.setChecked(True)
-        filter_layout.addRow("Enable photo filter:", self.photo_filter_check)
+        self.db_name_label = QLabel("No database loaded")
+        self.db_name_label.setStyleSheet("font-weight: bold;")
+        db_layout.addRow("Database Name:", self.db_name_label)
 
-        self.min_file_size_spin = QSpinBox()
-        self.min_file_size_spin.setRange(1, 1000)
-        self.min_file_size_spin.setValue(constants.MIN_PHOTO_FILE_SIZE // 1024)
-        self.min_file_size_spin.setSuffix(" KB")
-        filter_layout.addRow("Min file size:", self.min_file_size_spin)
+        self.db_file_label = QLabel("-")
+        db_layout.addRow("Database File:", self.db_file_label)
 
-        self.min_width_spin = QSpinBox()
-        self.min_width_spin.setRange(100, 10000)
-        self.min_width_spin.setValue(constants.MIN_PHOTO_WIDTH)
-        filter_layout.addRow("Min width:", self.min_width_spin)
+        self.db_created_label = QLabel("-")
+        db_layout.addRow("Created:", self.db_created_label)
 
-        self.min_height_spin = QSpinBox()
-        self.min_height_spin.setRange(100, 10000)
-        self.min_height_spin.setValue(constants.MIN_PHOTO_HEIGHT)
-        filter_layout.addRow("Min height:", self.min_height_spin)
+        self.db_last_used_label = QLabel("-")
+        db_layout.addRow("Last Used:", self.db_last_used_label)
 
-        self.max_width_spin = QSpinBox()
-        self.max_width_spin.setRange(1000, 50000)
-        self.max_width_spin.setValue(constants.MAX_PHOTO_WIDTH)
-        filter_layout.addRow("Max width:", self.max_width_spin)
+        db_group.setLayout(db_layout)
+        layout.addWidget(db_group)
 
-        self.max_height_spin = QSpinBox()
-        self.max_height_spin.setRange(1000, 50000)
-        self.max_height_spin.setValue(constants.MAX_PHOTO_HEIGHT)
-        filter_layout.addRow("Max height:", self.max_height_spin)
+        # Statistics Group
+        stats_group = QGroupBox("Current Database Statistics")
+        stats_group.setStyleSheet(self.groupbox_style)
+        stats_layout = QFormLayout()
 
-        self.exclude_square_spin = QSpinBox()
-        self.exclude_square_spin.setRange(0, 1000)
-        self.exclude_square_spin.setValue(constants.MIN_SQUARE_SIZE)
-        filter_layout.addRow("Exclude square smaller than:", self.exclude_square_spin)
+        self.total_photos_label = QLabel("0")
+        self.total_photos_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        stats_layout.addRow("Total Photos:", self.total_photos_label)
 
-        self.require_exif_check = QCheckBox()
-        self.require_exif_check.setChecked(False)
-        filter_layout.addRow("Require EXIF data:", self.require_exif_check)
+        self.schema_version_label = QLabel("-")
+        stats_layout.addRow("Schema Version:", self.schema_version_label)
 
-        filter_group.setLayout(filter_layout)
-        layout.addWidget(filter_group)
+        # Refresh button
+        self.refresh_db_stats_btn = QPushButton("Refresh Statistics")
+        self.refresh_db_stats_btn.clicked.connect(self.refresh_database_statistics)
+        stats_layout.addRow("", self.refresh_db_stats_btn)
 
-        # Filename Pattern Filtering
-        pattern_group = QGroupBox("Filename Pattern Filtering")
-        pattern_group.setStyleSheet(self.groupbox_style)
-        pattern_layout = QVBoxLayout()
+        stats_group.setLayout(stats_layout)
+        layout.addWidget(stats_group)
 
-        # Description
-        pattern_desc = QLabel(
-            "Files containing these patterns in their filename will be filtered out.\n"
-            "Common examples: favicon, icon, logo, thumbnail, etc."
+        # Operation Mode Group
+        mode_group = QGroupBox("Operation Mode")
+        mode_group.setStyleSheet(self.groupbox_style)
+        mode_layout = QVBoxLayout()
+
+        self.copy_radio = QRadioButton("Copy Files (Safe - keeps originals)")
+        self.copy_radio.setChecked(True)
+
+        self.move_radio = QRadioButton("Move Files (Destructive - deletes originals)")
+
+        self.mode_button_group = QButtonGroup()
+        self.mode_button_group.addButton(self.copy_radio)
+        self.mode_button_group.addButton(self.move_radio)
+
+        mode_layout.addWidget(self.copy_radio)
+        mode_layout.addWidget(self.move_radio)
+
+        mode_group.setLayout(mode_layout)
+        layout.addWidget(mode_group)
+
+        # Performance Settings
+        perf_group = QGroupBox("Performance Settings")
+        perf_group.setStyleSheet(self.groupbox_style)
+        perf_layout = QFormLayout()
+
+        self.partial_hash_check = QCheckBox()
+        self.partial_hash_check.setChecked(True)
+        perf_layout.addRow("Partial hash enabled:", self.partial_hash_check)
+
+        self.partial_hash_bytes_spin = QSpinBox()
+        self.partial_hash_bytes_spin.setRange(1024, 1048576)
+        self.partial_hash_bytes_spin.setValue(constants.PARTIAL_HASH_BYTES)
+        perf_layout.addRow("Partial hash bytes:", self.partial_hash_bytes_spin)
+
+        self.partial_hash_min_size_spin = QSpinBox()
+        self.partial_hash_min_size_spin.setRange(0, 10485760)
+        self.partial_hash_min_size_spin.setValue(constants.PARTIAL_HASH_MIN_FILE_SIZE)
+        perf_layout.addRow("Min file size for partial hash:", self.partial_hash_min_size_spin)
+
+        perf_group.setLayout(perf_layout)
+        layout.addWidget(perf_group)
+
+        # Thumbnail Cache Settings
+        cache_group = QGroupBox("Thumbnail Cache Settings (Date Corrections Tab)")
+        cache_group.setStyleSheet(self.groupbox_style)
+        cache_layout = QFormLayout()
+
+        cache_memory_layout = QHBoxLayout()
+        self.cache_memory_spin = QSpinBox()
+        self.cache_memory_spin.setRange(50, 2000)
+        self.cache_memory_spin.setValue(500)
+        self.cache_memory_spin.setSuffix(" MB")
+        self.cache_memory_spin.valueChanged.connect(self.on_cache_settings_changed)
+        cache_memory_layout.addWidget(self.cache_memory_spin)
+
+        self.cache_items_label = QLabel()
+        self.cache_items_label.setStyleSheet("color: #666; font-style: italic;")
+        cache_memory_layout.addWidget(self.cache_items_label)
+        cache_memory_layout.addStretch()
+
+        cache_layout.addRow("Cache memory size:", cache_memory_layout)
+
+        worker_layout = QHBoxLayout()
+        self.worker_threads_spin = QSpinBox()
+        self.worker_threads_spin.setRange(1, 16)
+        self.worker_threads_spin.setValue(8)
+        self.worker_threads_spin.setSuffix(" threads")
+        self.worker_threads_spin.valueChanged.connect(self.on_cache_settings_changed)
+        worker_layout.addWidget(self.worker_threads_spin)
+
+        import multiprocessing
+        cpu_count = multiprocessing.cpu_count()
+        cpu_hint = QLabel(f"(System has {cpu_count} CPU cores)")
+        cpu_hint.setStyleSheet("color: #666; font-style: italic;")
+        worker_layout.addWidget(cpu_hint)
+        worker_layout.addStretch()
+
+        cache_layout.addRow("Worker threads:", worker_layout)
+
+        cache_help = QLabel(
+            "Cache memory determines how many thumbnails are kept in RAM for instant access.\n"
+            "Higher values = faster scrolling but more memory usage.\n"
+            "Worker threads control parallel thumbnail generation. Match your CPU cores for best performance."
         )
-        pattern_desc.setWordWrap(True)
-        pattern_desc.setStyleSheet("font-style: italic; color: gray; padding: 5px;")
-        pattern_layout.addWidget(pattern_desc)
+        cache_help.setWordWrap(True)
+        cache_help.setStyleSheet("color: #666; font-size: 9pt; padding: 5px;")
+        cache_layout.addRow("", cache_help)
 
-        # Checkbox to enable/disable
-        self.filename_filter_check = QCheckBox("Enable filename pattern filtering")
-        self.filename_filter_check.setChecked(True)
-        self.filename_filter_check.stateChanged.connect(self.update_pattern_controls)
-        pattern_layout.addWidget(self.filename_filter_check)
+        cache_group.setLayout(cache_layout)
+        layout.addWidget(cache_group)
 
-        # Pattern list and controls
-        pattern_content_layout = QHBoxLayout()
-
-        # Left side: List widget
-        list_container = QVBoxLayout()
-        list_label = QLabel("Excluded Patterns:")
-        list_label.setStyleSheet("font-weight: bold;")
-        list_container.addWidget(list_label)
-
-        self.pattern_list = QListWidget()
-        self.pattern_list.setMaximumHeight(150)
-        list_container.addWidget(self.pattern_list)
-        pattern_content_layout.addLayout(list_container)
-
-        # Right side: Control buttons
-        pattern_buttons = QVBoxLayout()
-
-        self.add_pattern_input = QLineEdit()
-        self.add_pattern_input.setPlaceholderText("e.g., favicon, icon, thumb")
-        pattern_buttons.addWidget(self.add_pattern_input)
-
-        self.add_pattern_btn = QPushButton("Add Pattern")
-        self.add_pattern_btn.clicked.connect(self.add_pattern)
-        pattern_buttons.addWidget(self.add_pattern_btn)
-
-        self.remove_pattern_btn = QPushButton("Remove Selected")
-        self.remove_pattern_btn.clicked.connect(self.remove_pattern)
-        pattern_buttons.addWidget(self.remove_pattern_btn)
-
-        self.add_default_patterns_btn = QPushButton("Add Default Patterns")
-        self.add_default_patterns_btn.clicked.connect(self.restore_default_patterns)
-        pattern_buttons.addWidget(self.add_default_patterns_btn)
-
-        pattern_buttons.addStretch()
-        pattern_content_layout.addLayout(pattern_buttons)
-
-        pattern_layout.addLayout(pattern_content_layout)
-
-        # Pattern count label
-        self.pattern_count_label = QLabel()
-        self.pattern_count_label.setStyleSheet("font-style: italic; color: gray;")
-        pattern_layout.addWidget(self.pattern_count_label)
-
-        pattern_group.setLayout(pattern_layout)
-        layout.addWidget(pattern_group)
-
-        layout.addStretch()
-        main_widget.setLayout(layout)
-        scroll.setWidget(main_widget)
-        return scroll
-
-    def _create_advanced_tab(self):
-        """Create the Advanced settings tab (Import History Retention & Buttons)."""
-        # Create scroll area for this tab
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-
-        # Main widget for scroll area
-        main_widget = QWidget()
-        layout = QVBoxLayout()
+        self.update_cache_items_label()
 
         # Import History Retention Settings
         retention_group = QGroupBox("Import History Retention")
         retention_group.setStyleSheet(self.groupbox_style)
         retention_layout = QVBoxLayout()
 
-        # Description
         retention_desc = QLabel(
             "Configure how long import history records are kept. "
             "Older sessions and their file logs will be automatically cleaned up."
@@ -679,7 +868,6 @@ class SettingsTab(QWidget):
         retention_desc.setStyleSheet("font-style: italic; color: gray; padding: 5px;")
         retention_layout.addWidget(retention_desc)
 
-        # Retention mode
         mode_layout = QHBoxLayout()
         mode_layout.addWidget(QLabel("Retention Mode:"))
         self.retention_mode_combo = QComboBox()
@@ -689,7 +877,6 @@ class SettingsTab(QWidget):
         mode_layout.addStretch()
         retention_layout.addLayout(mode_layout)
 
-        # Session count/days input
         count_layout = QHBoxLayout()
         self.retention_count_label = QLabel("Sessions to keep:")
         count_layout.addWidget(self.retention_count_label)
@@ -700,12 +887,10 @@ class SettingsTab(QWidget):
         count_layout.addStretch()
         retention_layout.addLayout(count_layout)
 
-        # Auto-cleanup checkbox
         self.auto_cleanup_check = QCheckBox("Enable automatic cleanup on startup")
         self.auto_cleanup_check.setToolTip("When enabled, old sessions will be deleted automatically when the application starts")
         retention_layout.addWidget(self.auto_cleanup_check)
 
-        # Manual cleanup button
         cleanup_btn_layout = QHBoxLayout()
         self.cleanup_now_btn = QPushButton("Clean Up Now")
         self.cleanup_now_btn.clicked.connect(self.run_retention_cleanup)
@@ -723,7 +908,7 @@ class SettingsTab(QWidget):
         layout.addWidget(retention_group)
 
         # Global Settings Buttons
-        button_group = QGroupBox("Settings Management")
+        button_group = QGroupBox("Settings Management (Load and Save Files)")
         button_group.setStyleSheet(self.groupbox_style)
         button_layout = QHBoxLayout()
 
@@ -752,7 +937,415 @@ class SettingsTab(QWidget):
         scroll.setWidget(main_widget)
         return scroll
 
-    # Note: Old duplicate code removed - all widgets now in proper tabs above
+    # ========== Source Folders Methods ==========
+
+    def add_source_folder(self):
+        """Add a source folder."""
+        folder = QFileDialog.getExistingDirectory(self, "Select Source Folder")
+        if folder:
+            existing_paths = self.get_source_folders()
+            if folder in existing_paths:
+                QMessageBox.information(self, "Folder Already Added",
+                                       "This folder is already in the source list.")
+                return
+
+            if self.db_metadata:
+                success = self.db_metadata.add_source_directory(folder, enabled=True)
+                if not success:
+                    QMessageBox.warning(self, "Failed to Add",
+                                       "Could not add folder to database.")
+                    return
+
+            self._add_source_to_table(folder, enabled=True, last_scanned=None)
+
+    def remove_source_folder(self):
+        """Remove source folders with checked checkboxes."""
+        rows_to_remove = []
+        for row in range(self.source_table.rowCount()):
+            checkbox_widget = self.source_table.cellWidget(row, 0)
+            if checkbox_widget:
+                checkbox = checkbox_widget.findChild(QCheckBox)
+                if checkbox and checkbox.isChecked():
+                    rows_to_remove.append(row)
+
+        if not rows_to_remove:
+            QMessageBox.information(self, "No Selection",
+                                  "Please check the checkboxes for the folders you want to remove.")
+            return
+
+        reply = QMessageBox.question(
+            self, "Remove Source Folders",
+            f"Remove {len(rows_to_remove)} source folder(s) from the list?\n\n"
+            f"This will not delete any files, only remove them from the source list.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        for row in sorted(rows_to_remove, reverse=True):
+            path = self.source_table.item(row, 2).text()
+
+            if self.db_metadata:
+                self.db_metadata.remove_source_directory(path)
+
+            self.source_table.removeRow(row)
+
+    def clear_all_sources(self):
+        """Clear all source folders."""
+        if self.source_table.rowCount() == 0:
+            QMessageBox.information(self, "No Folders",
+                                  "The source folder list is already empty.")
+            return
+
+        reply = QMessageBox.question(
+            self, "Clear All Source Folders?",
+            f"Remove all {self.source_table.rowCount()} source folder(s) from the list?\n\n"
+            f"This will not delete any files, only clear the list.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            if self.db_metadata:
+                self.db_metadata.clear_all_source_directories()
+
+            self.source_table.setRowCount(0)
+
+    def _add_source_to_table(self, path: str, enabled: bool = True, last_scanned: str = None):
+        """Add a source directory to the table."""
+        row_position = self.source_table.rowCount()
+        self.source_table.insertRow(row_position)
+
+        # Column 0: Enable checkbox
+        checkbox = QCheckBox()
+        checkbox.setChecked(enabled)
+        checkbox.stateChanged.connect(lambda state, p=path: self._on_source_checkbox_changed(p, state))
+
+        checkbox_widget = QWidget()
+        checkbox_layout = QHBoxLayout(checkbox_widget)
+        checkbox_layout.addWidget(checkbox)
+        checkbox_layout.setAlignment(Qt.AlignCenter)
+        checkbox_layout.setContentsMargins(0, 0, 0, 0)
+        self.source_table.setCellWidget(row_position, 0, checkbox_widget)
+
+        # Validate path
+        is_available, status_text, status_detail = self._validate_path(path)
+
+        # Column 1: Status icon
+        icon_item = QTableWidgetItem()
+        if is_available:
+            icon_item.setText("✓")
+            icon_item.setForeground(QColor(0, 150, 0))
+        else:
+            icon_item.setText("⚠")
+            icon_item.setForeground(QColor(200, 0, 0))
+        icon_item.setTextAlignment(Qt.AlignCenter)
+        icon_item.setToolTip(status_detail)
+        icon_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        self.source_table.setItem(row_position, 1, icon_item)
+
+        # Column 2: Path
+        path_item = QTableWidgetItem(path)
+        path_item.setToolTip(status_detail)
+        path_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        self.source_table.setItem(row_position, 2, path_item)
+
+        # Column 3: Last Scanned
+        if last_scanned:
+            try:
+                dt = datetime.fromisoformat(last_scanned)
+                scanned_text = dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                scanned_text = "Unknown"
+        else:
+            scanned_text = "Never"
+        scanned_item = QTableWidgetItem(scanned_text)
+        scanned_item.setToolTip(f"Last scanned: {scanned_text}")
+        scanned_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        self.source_table.setItem(row_position, 3, scanned_item)
+
+        # Column 4: Status
+        status_item = QTableWidgetItem(status_text)
+        status_item.setToolTip(status_detail)
+        if not is_available:
+            status_item.setForeground(QColor(200, 0, 0))
+        status_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        self.source_table.setItem(row_position, 4, status_item)
+
+    def _validate_path(self, path: str) -> tuple:
+        """Validate if a path exists and is accessible."""
+        try:
+            if not os.path.exists(path):
+                if path.startswith('/run/user/') and '/gvfs/' in path:
+                    return (False, "Not Mounted",
+                           "Network share not mounted. Open the share in your file manager first.")
+                else:
+                    return (False, "Not Found",
+                           f"Path does not exist: {path}")
+
+            if not os.path.isdir(path):
+                return (False, "Not a Directory",
+                       f"Path exists but is not a directory: {path}")
+
+            if not os.access(path, os.R_OK):
+                return (False, "Permission Denied",
+                       f"Cannot read directory (permission denied): {path}")
+
+            return (True, "Available", f"Path is accessible: {path}")
+
+        except Exception as e:
+            return (False, "Error", f"Error checking path: {str(e)}")
+
+    def _on_source_checkbox_changed(self, path: str, state: int):
+        """Handle checkbox state change - update database."""
+        if self.db_metadata:
+            enabled = (state == Qt.Checked)
+            self.db_metadata.update_source_enabled(path, enabled)
+
+    def refresh_source_status(self):
+        """Refresh the status of all source directories."""
+        for row in range(self.source_table.rowCount()):
+            path = self.source_table.item(row, 2).text()
+            is_available, status_text, status_detail = self._validate_path(path)
+
+            icon_item = self.source_table.item(row, 1)
+            if is_available:
+                icon_item.setText("✓")
+                icon_item.setForeground(QColor(0, 150, 0))
+            else:
+                icon_item.setText("⚠")
+                icon_item.setForeground(QColor(200, 0, 0))
+            icon_item.setToolTip(status_detail)
+
+            status_item = self.source_table.item(row, 4)
+            status_item.setText(status_text)
+            status_item.setToolTip(status_detail)
+            if not is_available:
+                status_item.setForeground(QColor(200, 0, 0))
+            else:
+                status_item.setForeground(QColor(0, 0, 0))
+
+    def on_source_item_clicked(self, item):
+        """Handle click on source table item - support Shift/Ctrl selection."""
+        if item is None:
+            return
+
+        row = item.row()
+        column = item.column()
+
+        if column != 0:
+            self.last_clicked_source_row = row
+            return
+
+        checkbox_widget = self.source_table.cellWidget(row, 0)
+        if not checkbox_widget:
+            return
+
+        checkbox = checkbox_widget.findChild(QCheckBox)
+        if not checkbox:
+            return
+
+        from PySide6.QtWidgets import QApplication
+        modifiers = QApplication.keyboardModifiers()
+
+        if modifiers & Qt.ShiftModifier and self.last_clicked_source_row >= 0:
+            start_row = min(self.last_clicked_source_row, row)
+            end_row = max(self.last_clicked_source_row, row)
+            target_state = checkbox.isChecked()
+
+            self.source_table.blockSignals(True)
+
+            for r in range(start_row, end_row + 1):
+                self.source_table.selectRow(r)
+                cb_widget = self.source_table.cellWidget(r, 0)
+                if cb_widget:
+                    cb = cb_widget.findChild(QCheckBox)
+                    if cb:
+                        cb.setChecked(target_state)
+
+            self.source_table.blockSignals(False)
+
+        elif modifiers & Qt.ControlModifier:
+            self.last_clicked_source_row = row
+
+        else:
+            self.last_clicked_source_row = row
+
+    def on_source_item_double_clicked(self, item):
+        """Handle double-click on source table item - toggle checkbox."""
+        if item is None:
+            return
+
+        row = item.row()
+        checkbox_widget = self.source_table.cellWidget(row, 0)
+
+        if checkbox_widget:
+            checkbox = checkbox_widget.findChild(QCheckBox)
+            if checkbox:
+                checkbox.setChecked(not checkbox.isChecked())
+
+    def sync_source_checkboxes_with_selection(self):
+        """Sync checkbox states with row selection."""
+        selected_rows = set(index.row() for index in self.source_table.selectedIndexes())
+
+        self.source_table.blockSignals(True)
+
+        for row in range(self.source_table.rowCount()):
+            checkbox_widget = self.source_table.cellWidget(row, 0)
+            if checkbox_widget:
+                checkbox = checkbox_widget.findChild(QCheckBox)
+                if checkbox:
+                    is_selected = row in selected_rows
+                    if checkbox.isChecked() != is_selected:
+                        checkbox.setChecked(is_selected)
+
+        self.source_table.blockSignals(False)
+
+    def load_sources_from_database(self):
+        """Load source directories from the database."""
+        if not self.db_metadata:
+            return
+
+        self.source_table.setRowCount(0)
+
+        sources = self.db_metadata.get_all_source_directories()
+
+        for source in sources:
+            self._add_source_to_table(
+                path=source['path'],
+                enabled=source['enabled'],
+                last_scanned=source['last_scanned']
+            )
+
+    def get_source_folders(self):
+        """Get list of all source folders (regardless of enabled status)."""
+        folders = []
+        for row in range(self.source_table.rowCount()):
+            path_item = self.source_table.item(row, 2)
+            if path_item:
+                folders.append(path_item.text())
+        return folders
+
+    def get_enabled_source_folders(self):
+        """Get list of only enabled source folders."""
+        enabled_folders = []
+        for row in range(self.source_table.rowCount()):
+            checkbox_widget = self.source_table.cellWidget(row, 0)
+            if checkbox_widget:
+                checkbox = checkbox_widget.findChild(QCheckBox)
+                if checkbox and checkbox.isChecked():
+                    path_item = self.source_table.item(row, 2)
+                    if path_item:
+                        enabled_folders.append(path_item.text())
+        return enabled_folders
+
+    # ========== Ignored Directories Methods ==========
+
+    def add_ignored_dir_pattern(self):
+        """Add a new ignored directory pattern to the list."""
+        pattern = self.add_ignored_dir_input.text().strip()
+        if not pattern:
+            QMessageBox.warning(self, "Empty Pattern",
+                              "Please enter a pattern to add.")
+            return
+
+        for i in range(self.ignored_dirs_list.count()):
+            if self.ignored_dirs_list.item(i).text().lower() == pattern.lower():
+                QMessageBox.information(self, "Pattern Exists",
+                                      f"Pattern '{pattern}' already exists in the list.")
+                return
+
+        self.ignored_dirs_list.addItem(pattern)
+        self.add_ignored_dir_input.clear()
+        self.update_ignored_dirs_count()
+
+        self.save_ignored_dirs_to_database()
+
+    def remove_ignored_dir_pattern(self):
+        """Remove selected ignored directory pattern from the list."""
+        current_item = self.ignored_dirs_list.currentItem()
+        if not current_item:
+            QMessageBox.information(self, "No Selection",
+                                  "Please select a pattern to remove.")
+            return
+
+        row = self.ignored_dirs_list.row(current_item)
+        self.ignored_dirs_list.takeItem(row)
+        self.update_ignored_dirs_count()
+
+        self.save_ignored_dirs_to_database()
+
+    def add_preset_ignored_dirs(self):
+        """Add common preset patterns for ignored directories."""
+        preset_patterns = [
+            "@eaDir", ".git", ".svn", "node_modules", "venv", ".venv",
+            "__pycache__", "$RECYCLE.BIN", ".Trash-*", "Thumbs.db",
+            ".DS_Store", "__MACOSX", ".thumbnails", "*.tmp", ".cache",
+        ]
+
+        added_count = 0
+        for pattern in preset_patterns:
+            exists = False
+            for i in range(self.ignored_dirs_list.count()):
+                if self.ignored_dirs_list.item(i).text().lower() == pattern.lower():
+                    exists = True
+                    break
+
+            if not exists:
+                self.ignored_dirs_list.addItem(pattern)
+                added_count += 1
+
+        self.update_ignored_dirs_count()
+
+        if added_count > 0:
+            self.save_ignored_dirs_to_database()
+            QMessageBox.information(self, "Presets Added",
+                                   f"Added {added_count} preset patterns.\n"
+                                   f"Total patterns: {self.ignored_dirs_list.count()}")
+        else:
+            QMessageBox.information(self, "No New Presets",
+                                   "All preset patterns are already in the list.")
+
+    def update_ignored_dirs_count(self):
+        """Update the ignored directories count label."""
+        count = self.ignored_dirs_list.count()
+        self.ignored_dirs_count_label.setText(f"Total patterns: {count}")
+
+    def save_ignored_dirs_to_database(self):
+        """Save ignored directories to database."""
+        if self.db_metadata is None:
+            return
+
+        patterns = []
+        for i in range(self.ignored_dirs_list.count()):
+            patterns.append(self.ignored_dirs_list.item(i).text())
+
+        try:
+            self.db_metadata.set_ignored_directories(patterns)
+            logger.info(f"Saved {len(patterns)} ignored directory patterns to database")
+        except Exception as e:
+            logger.error(f"Failed to save ignored directories: {e}")
+            QMessageBox.critical(self, "Error",
+                               f"Failed to save ignored directories to database:\n\n{str(e)}")
+
+    def load_ignored_dirs_from_database(self):
+        """Load ignored directories from database."""
+        if self.db_metadata is None:
+            return
+
+        try:
+            patterns = self.db_metadata.get_ignored_directories()
+            self.ignored_dirs_list.clear()
+            for pattern in patterns:
+                self.ignored_dirs_list.addItem(pattern)
+            self.update_ignored_dirs_count()
+            logger.info(f"Loaded {len(patterns)} ignored directory patterns from database")
+        except Exception as e:
+            logger.error(f"Failed to load ignored directories from database: {e}")
+
+    # ========== Filename Pattern Filtering Methods ==========
 
     def update_pattern_controls(self):
         """Enable/disable pattern controls based on checkbox."""
@@ -761,7 +1354,7 @@ class SettingsTab(QWidget):
         self.add_pattern_input.setEnabled(enabled)
         self.add_pattern_btn.setEnabled(enabled)
         self.remove_pattern_btn.setEnabled(enabled)
-        self.default_patterns_btn.setEnabled(enabled)
+        self.add_default_patterns_btn.setEnabled(enabled)
 
     def add_pattern(self):
         """Add a new pattern to the list."""
@@ -771,14 +1364,12 @@ class SettingsTab(QWidget):
                               "Please enter a pattern to add.")
             return
 
-        # Check if already exists
         for i in range(self.pattern_list.count()):
             if self.pattern_list.item(i).text().lower() == pattern.lower():
                 QMessageBox.information(self, "Pattern Exists",
                                       f"Pattern '{pattern}' already exists in the list.")
                 return
 
-        # Add to list
         self.pattern_list.addItem(pattern)
         self.add_pattern_input.clear()
         self.update_pattern_count()
@@ -791,7 +1382,6 @@ class SettingsTab(QWidget):
                                   "Please select a pattern to remove.")
             return
 
-        # Remove the selected item
         row = self.pattern_list.row(current_item)
         self.pattern_list.takeItem(row)
         self.update_pattern_count()
@@ -818,62 +1408,37 @@ class SettingsTab(QWidget):
         count = self.pattern_list.count()
         self.pattern_count_label.setText(f"Total patterns: {count}")
 
-    # ========== Ignored Directories Methods ==========
+    # ========== Archive Location Methods ==========
 
-    def add_ignored_dir_pattern(self):
-        """Add a new ignored directory pattern to the list."""
-        pattern = self.add_ignored_dir_input.text().strip()
-        if not pattern:
-            QMessageBox.warning(self, "Empty Pattern",
-                              "Please enter a pattern to add.")
-            return
+    def on_browse_archive_clicked(self):
+        """Handle browse button click for archive location."""
+        archive_location = self.archive_path_edit.text()
 
-        # Check if already exists
-        for i in range(self.ignored_dirs_list.count()):
-            if self.ignored_dirs_list.item(i).text().lower() == pattern.lower():
-                QMessageBox.information(self, "Pattern Exists",
-                                      f"Pattern '{pattern}' already exists in the list.")
-                return
+        QMessageBox.information(
+            self,
+            "Archive Location Managed by Database",
+            f"The archive location is controlled by the database you selected.\n\n"
+            f"Current archive: {archive_location if archive_location else 'Not set'}\n"
+            f"Database: {self.db_name_label.text()}\n\n"
+            f"To change the archive location, you would need to migrate your archive.\n"
+            f"This feature will be available in a future update."
+        )
 
-        # Add to list
-        self.ignored_dirs_list.addItem(pattern)
-        self.add_ignored_dir_input.clear()
-
-        # Save to database
-        self.save_ignored_dirs_to_database()
-
-    def remove_ignored_dir_pattern(self):
-        """Remove selected ignored directory pattern from the list."""
-        current_item = self.ignored_dirs_list.currentItem()
-        if not current_item:
-            QMessageBox.information(self, "No Selection",
-                                  "Please select a pattern to remove.")
-            return
-
-        # Remove the selected item
-        row = self.ignored_dirs_list.row(current_item)
-        self.ignored_dirs_list.takeItem(row)
-
+    # ========== Organization Template Methods ==========
 
     def on_preset_changed(self, preset_name):
         """Handle preset selection change."""
-        # Show/hide custom template editor
         if preset_name == "Custom Template...":
             self.custom_template_widget.show()
-            # Use current custom template or default
             if not self.custom_template_edit.text():
                 self.custom_template_edit.setText(self.current_template)
         else:
             self.custom_template_widget.hide()
-            # Load template from preset
             preset = OrganizationTemplate.get_preset_by_name(preset_name)
             if preset:
                 self.current_template = preset['template']
 
-        # Update preview
         self.update_organization_preview()
-
-        # Check if organization is locked
         self.check_organization_lock()
 
     def on_custom_template_changed(self, text):
@@ -882,7 +1447,6 @@ class SettingsTab(QWidget):
             self.template_validation_label.setText("")
             return
 
-        # Validate template
         is_valid, error_msg = OrganizationTemplate.validate(text)
 
         if is_valid:
@@ -894,7 +1458,6 @@ class SettingsTab(QWidget):
             self.template_validation_label.setText(f"✗ {error_msg}")
             self.template_validation_label.setStyleSheet("color: red; font-weight: bold;")
 
-        # Check if organization is locked
         self.check_organization_lock()
 
     def insert_placeholder(self, placeholder):
@@ -903,13 +1466,11 @@ class SettingsTab(QWidget):
         current_text = self.custom_template_edit.text()
         new_text = current_text[:cursor_pos] + placeholder + current_text[cursor_pos:]
         self.custom_template_edit.setText(new_text)
-        # Move cursor after inserted placeholder
         self.custom_template_edit.setCursorPosition(cursor_pos + len(placeholder))
         self.custom_template_edit.setFocus()
 
     def update_organization_preview(self):
         """Generate and display example paths."""
-        # Validate current template
         is_valid, error_msg = OrganizationTemplate.validate(self.current_template)
 
         if not is_valid:
@@ -917,11 +1478,9 @@ class SettingsTab(QWidget):
             self.org_preview_label.setText("")
             return
 
-        # Get description
         description = OrganizationTemplate.format_description(self.current_template)
         self.org_description_label.setText(description)
 
-        # Generate examples
         examples = OrganizationTemplate.generate_examples(self.current_template)
         example_text = "\n".join(examples)
         self.org_preview_label.setText(example_text)
@@ -933,7 +1492,6 @@ class SettingsTab(QWidget):
             self.reorganize_btn.hide()
             return
 
-        # Get metadata to check if database has files
         metadata = self.db_metadata.get_metadata()
         if not metadata:
             self.org_lock_warning.hide()
@@ -944,7 +1502,6 @@ class SettingsTab(QWidget):
         current_db_template = metadata.get('organization_template', '{YYYY}/{MM}/{DD}')
         current_db_file_type_mode = metadata.get('file_type_organization', 'combined')
 
-        # Get current file type organization mode from UI
         if self.file_type_combined_radio.isChecked():
             current_file_type_mode = 'combined'
         elif self.file_type_subfolder_radio.isChecked():
@@ -952,7 +1509,6 @@ class SettingsTab(QWidget):
         else:
             current_file_type_mode = 'separate_archive'
 
-        # Check if template or file type organization has changed
         template_changed = (self.current_template != current_db_template)
         file_type_changed = (current_file_type_mode != current_db_file_type_mode)
 
@@ -975,7 +1531,6 @@ class SettingsTab(QWidget):
             self.rename_reorganize_btn.hide()
             return
 
-        # Get metadata to check if database has files
         metadata = self.db_metadata.get_metadata()
         if not metadata:
             self.rename_lock_warning.hide()
@@ -985,7 +1540,6 @@ class SettingsTab(QWidget):
         total_photos = metadata.get('total_photos', 0)
         current_db_filename_template = metadata.get('filename_template', '{original_name}')
 
-        # Check if filename template has changed
         template_changed = (self.current_filename_template != current_db_filename_template)
 
         if total_photos > 0 and template_changed:
@@ -1002,19 +1556,15 @@ class SettingsTab(QWidget):
 
     def on_file_type_changed(self):
         """Handle file type organization mode change."""
-        # Show/hide video archive location widget
         if self.file_type_separate_radio.isChecked():
             self.video_archive_widget.show()
         else:
             self.video_archive_widget.hide()
 
-        # Check organization lock
         self.check_organization_lock()
 
     def on_browse_video_archive(self):
         """Browse for video archive location."""
-        from PySide6.QtWidgets import QFileDialog
-
         folder = QFileDialog.getExistingDirectory(
             self,
             "Select Video Archive Location",
@@ -1030,7 +1580,6 @@ class SettingsTab(QWidget):
             return False
 
         try:
-            # Get current file type organization mode
             if self.file_type_combined_radio.isChecked():
                 file_type_mode = 'combined'
             elif self.file_type_subfolder_radio.isChecked():
@@ -1038,7 +1587,6 @@ class SettingsTab(QWidget):
             else:
                 file_type_mode = 'separate_archive'
 
-            # Validate video archive location if separate archive mode
             if file_type_mode == 'separate_archive':
                 video_archive_location = self.video_archive_path_edit.text().strip()
                 if not video_archive_location:
@@ -1049,16 +1597,11 @@ class SettingsTab(QWidget):
                     )
                     return False
 
-                # Save video archive location to database
                 self.db_metadata.set_video_archive(video_archive_location, enabled=True)
             else:
-                # Disable separate video archive
                 self.db_metadata.set_video_archive("", enabled=False)
 
-            # Save template to database
             self.db_metadata.set_organization_template(self.current_template)
-
-            # Save file type organization mode to database
             self.db_metadata.set_file_type_organization(file_type_mode)
 
             return True
@@ -1071,7 +1614,7 @@ class SettingsTab(QWidget):
             return False
 
     def on_reorganize_clicked(self):
-        """Show reorganization dialog (placeholder for future implementation)."""
+        """Show reorganization dialog."""
         QMessageBox.information(
             self,
             "Reorganization",
@@ -1079,351 +1622,23 @@ class SettingsTab(QWidget):
             "This will allow you to migrate your entire archive to the new folder structure."
         )
 
-    def set_database(self, db_metadata):
-        """Load organization settings from database.
-
-        Args:
-            db_metadata: DatabaseMetadata instance
-        """
-        import logging
-        logger = logging.getLogger(__name__)
-
-        logger.info(f"=" * 80)
-        logger.info(f"SETTINGS TAB: set_database() called")
-        if db_metadata:
-            logger.info(f"  Database path: '{db_metadata.database_path}'")
-        else:
-            logger.info(f"  db_metadata is None!")
-        logger.info(f"=" * 80)
-
-        self.db_metadata = db_metadata
-
-        if db_metadata is None:
-            return
-
-        # Load organization template
-        template = db_metadata.get_organization_template()
-        self.current_template = template
-
-        # Find matching preset or use custom
-        preset = OrganizationTemplate.get_preset_by_template(template)
-        if preset:
-            # Select the matching preset
-            preset_name = preset['name']
-            index = self.org_preset_combo.findText(preset_name)
-            if index >= 0:
-                self.org_preset_combo.setCurrentIndex(index)
-        else:
-            # Use custom template
-            self.org_preset_combo.setCurrentText("Custom Template...")
-            self.custom_template_edit.setText(template)
-
-        # Load file type organization mode
-        mode = db_metadata.get_file_type_organization()
-        if mode == 'combined':
-            self.file_type_combined_radio.setChecked(True)
-        elif mode == 'subfolder':
-            self.file_type_subfolder_radio.setChecked(True)
-        elif mode == 'separate_archive':
-            self.file_type_separate_radio.setChecked(True)
-
-        # Load video archive location (if separate archive mode)
-        if mode == 'separate_archive':
-            video_archive_location = db_metadata.get_video_archive_location()
-            if video_archive_location:
-                self.video_archive_path_edit.setText(video_archive_location)
-
-        # Update preview
-        self.update_organization_preview()
-
-        # Check lock status
-        self.check_organization_lock()
-
-        # Load filename rename settings
-        rename_enabled = db_metadata.is_file_rename_enabled()
-        self.enable_rename_check.setChecked(rename_enabled)
-
-        filename_template = db_metadata.get_filename_template()
-        self.current_filename_template = filename_template  # Store for comparison
-        self.filename_template_edit.setText(filename_template)
-
-        # Trigger preview update
-        self.on_filename_template_changed(filename_template)
-
-        # Load retention settings
-        self.load_retention_settings()
-
-        # Load cache settings
-        cache_memory_mb = db_metadata.get_cache_memory_mb()
-        worker_threads = db_metadata.get_cache_worker_threads()
-
-        # Block signals during loading to prevent saving during initialization
-        self.cache_memory_spin.blockSignals(True)
-        self.worker_threads_spin.blockSignals(True)
-
-        self.cache_memory_spin.setValue(cache_memory_mb)
-        self.worker_threads_spin.setValue(worker_threads)
-
-        # Unblock signals
-        self.cache_memory_spin.blockSignals(False)
-        self.worker_threads_spin.blockSignals(False)
-
-        # Update label
-        self.update_cache_items_label()
-
-        # Load ignored directories
-
-    def get_config(self):
-        """Get configuration as dictionary."""
-        # Get excluded patterns from list widget
-        excluded_patterns = []
-        if self.filename_filter_check.isChecked():
-            for i in range(self.pattern_list.count()):
-                excluded_patterns.append(self.pattern_list.item(i).text())
-
-        # Get file type organization mode
-        if self.file_type_combined_radio.isChecked():
-            file_type_mode = 'combined'
-        elif self.file_type_subfolder_radio.isChecked():
-            file_type_mode = 'subfolder'
-        else:
-            file_type_mode = 'separate_archive'
-
-        config = {
-            'include_subdirectories': self.include_subdirs_check.isChecked(),
-            'batch_size': self.batch_size_spin.value(),
-            'organization_template': self.current_template,
-            'file_type_organization': file_type_mode,
-            'partial_hash_enabled': self.partial_hash_check.isChecked(),
-            'partial_hash_bytes': self.partial_hash_bytes_spin.value(),
-            'partial_hash_min_file_size': self.partial_hash_min_size_spin.value() * 1024,
-            'photo_filter_enabled': self.photo_filter_check.isChecked(),
-            'min_file_size': self.min_file_size_spin.value() * 1024,
-            'min_width': self.min_width_spin.value(),
-            'min_height': self.min_height_spin.value(),
-            'max_width': self.max_width_spin.value(),
-            'max_height': self.max_height_spin.value(),
-            'exclude_square_smaller_than': self.exclude_square_spin.value(),
-            'require_exif': self.require_exif_check.isChecked(),
-            'database_path': constants.DEFAULT_DATABASE_NAME,
-            'file_endings': constants.DEFAULT_FILE_ENDINGS,
-            'excluded_filename_patterns': excluded_patterns,
-            'move_filtered_files': False,
-            'filtered_files_folder': "filtered_non_photos"
-        }
-        return config
-
-    def set_config(self, config):
-        """Set configuration from dictionary."""
-        self.include_subdirs_check.setChecked(config.get('include_subdirectories', True))
-        self.batch_size_spin.setValue(config.get('batch_size', constants.DEFAULT_BATCH_SIZE))
-
-        # Load organization template (with backward compatibility)
-        if 'organization_template' in config:
-            template = config['organization_template']
-        else:
-            # Legacy support: convert old group_by_year/group_by_day to template
-            group_by_year = config.get('group_by_year', True)
-            group_by_day = config.get('group_by_day', True)
-            if group_by_year and group_by_day:
-                template = '{YYYY}/{MM}/{DD}'
-            elif group_by_year:
-                template = '{YYYY}/{MM}'
-            else:
-                template = '{YYYY}/{MM}/{DD}'  # Default
-
-        self.current_template = template
-
-        # Find matching preset or use custom
-        preset = OrganizationTemplate.get_preset_by_template(template)
-        if preset:
-            preset_name = preset['name']
-            index = self.org_preset_combo.findText(preset_name)
-            if index >= 0:
-                self.org_preset_combo.setCurrentIndex(index)
-        else:
-            self.org_preset_combo.setCurrentText("Custom Template...")
-            self.custom_template_edit.setText(template)
-
-        # Load file type organization mode
-        file_type_mode = config.get('file_type_organization', 'combined')
-        if file_type_mode == 'combined':
-            self.file_type_combined_radio.setChecked(True)
-        elif file_type_mode == 'subfolder':
-            self.file_type_subfolder_radio.setChecked(True)
-        elif file_type_mode == 'separate_archive':
-            self.file_type_separate_radio.setChecked(True)
-
-        self.partial_hash_check.setChecked(config.get('partial_hash_enabled', True))
-        self.partial_hash_bytes_spin.setValue(
-            config.get('partial_hash_bytes', constants.PARTIAL_HASH_BYTES))
-        self.partial_hash_min_size_spin.setValue(
-            config.get('partial_hash_min_file_size', constants.PARTIAL_HASH_MIN_FILE_SIZE) // 1024)
-        self.photo_filter_check.setChecked(config.get('photo_filter_enabled', True))
-        self.min_file_size_spin.setValue(
-            config.get('min_file_size', constants.MIN_PHOTO_FILE_SIZE) // 1024)
-        self.min_width_spin.setValue(config.get('min_width', constants.MIN_PHOTO_WIDTH))
-        self.min_height_spin.setValue(config.get('min_height', constants.MIN_PHOTO_HEIGHT))
-        self.max_width_spin.setValue(config.get('max_width', constants.MAX_PHOTO_WIDTH))
-        self.max_height_spin.setValue(config.get('max_height', constants.MAX_PHOTO_HEIGHT))
-        self.exclude_square_spin.setValue(
-            config.get('exclude_square_smaller_than', constants.MIN_SQUARE_SIZE))
-        self.require_exif_check.setChecked(config.get('require_exif', False))
-
-        # Load excluded patterns
-        patterns = config.get('excluded_filename_patterns', constants.DEFAULT_EXCLUDED_PATTERNS)
-        self.pattern_list.clear()
-        for pattern in patterns:
-            self.pattern_list.addItem(pattern)
-
-        # Enable/disable filename filtering (default: True if patterns exist)
-        has_patterns = len(patterns) > 0
-        self.filename_filter_check.setChecked(has_patterns)
-        self.update_pattern_controls()
-        self.update_pattern_count()
-
-        # Update organization preview
-        self.update_organization_preview()
-
-    def load_from_file(self, show_dialog=True):
-        """Load settings from file.
-
-        Args:
-            show_dialog (bool): If True, show success/error dialogs. If False, load silently.
-        """
-        if not os.path.exists(self.settings_file):
-            if show_dialog:
-                QMessageBox.information(self, "No Settings File",
-                                       f"{self.settings_file} not found. Using defaults.")
-            self.restore_defaults()
-            return
-
-        try:
-            with open(self.settings_file, 'r') as f:
-                config = json.load(f)
-            self.set_config(config)
-            if show_dialog:
-                QMessageBox.information(self, "Settings Loaded",
-                                       "Settings loaded successfully from file.")
-        except Exception as e:
-            if show_dialog:
-                QMessageBox.critical(self, "Load Error",
-                                   f"Failed to load settings:\n\n{str(e)}")
-
-    def save_to_file(self):
-        """Save settings to file."""
-        try:
-            # Get current config
-            config = self.get_config()
-
-            # Load existing settings to preserve source/dest folders
-            if os.path.exists(self.settings_file):
-                with open(self.settings_file, 'r') as f:
-                    existing = json.load(f)
-                config['source_directory'] = existing.get('source_directory', [])
-                config['destination_directory'] = existing.get('destination_directory', "")
-                config['copy_files'] = existing.get('copy_files', True)
-                config['move_files'] = existing.get('move_files', False)
-
-            # Validate
-            try:
-                Config(config)
-            except Exception as e:
-                QMessageBox.critical(self, "Validation Error",
-                                   f"Invalid settings:\n\n{str(e)}")
-                return
-
-            # Save
-            with open(self.settings_file, 'w') as f:
-                json.dump(config, f, indent=2)
-
-            QMessageBox.information(self, "Settings Saved",
-                                   "Settings saved successfully to file.")
-
-        except Exception as e:
-            QMessageBox.critical(self, "Save Error",
-                               f"Failed to save settings:\n\n{str(e)}")
-
-    def restore_defaults(self):
-        """Restore default settings."""
-        config = {
-            'include_subdirectories': True,
-            'batch_size': constants.DEFAULT_BATCH_SIZE,
-            'organization_template': '{YYYY}/{MM}/{DD}',
-            'file_type_organization': 'combined',
-            'partial_hash_enabled': True,
-            'partial_hash_bytes': constants.PARTIAL_HASH_BYTES,
-            'partial_hash_min_file_size': constants.PARTIAL_HASH_MIN_FILE_SIZE,
-            'photo_filter_enabled': True,
-            'min_file_size': constants.MIN_PHOTO_FILE_SIZE,
-            'min_width': constants.MIN_PHOTO_WIDTH,
-            'min_height': constants.MIN_PHOTO_HEIGHT,
-            'max_width': constants.MAX_PHOTO_WIDTH,
-            'max_height': constants.MAX_PHOTO_HEIGHT,
-            'exclude_square_smaller_than': constants.MIN_SQUARE_SIZE,
-            'require_exif': False,
-            'excluded_filename_patterns': constants.DEFAULT_EXCLUDED_PATTERNS
-        }
-        self.set_config(config)
-        QMessageBox.information(self, "Defaults Restored",
-                               "Settings restored to default values.")
-
-    def validate_settings(self):
-        """Validate current settings."""
-        try:
-            config = self.get_config()
-
-            # Debug: Check config types
-            import logging
-            logger = logging.getLogger(__name__)
-            for key, value in config.items():
-                logger.debug(f"Config[{key}] = {type(value)}: {value if not isinstance(value, (dict, list)) or len(str(value)) < 100 else str(value)[:100]+'...'}")
-
-            # Add dummy source/dest for validation
-            config['source_directory'] = ["/dummy/path"]
-            config['destination_directory'] = "/dummy/path"
-            config['copy_files'] = True
-            config['move_files'] = False
-
-            Config(settings_dict=config)
-            QMessageBox.information(self, "Validation Successful",
-                                   "All settings are valid.")
-        except Exception as e:
-            import traceback
-            full_error = traceback.format_exc()
-            logger.error(f"Validation failed:\n{full_error}")
-            QMessageBox.critical(self, "Validation Failed",
-                               f"Invalid settings:\n\n{str(e)}")
-
     # ========== File Renaming Methods ==========
 
     def on_rename_enabled_changed(self, state):
         """Handle enable/disable file renaming checkbox change."""
-        import logging
-        logger = logging.getLogger(__name__)
-
         try:
-            logger.info(f"→ on_rename_enabled_changed called - RAW state value: {state} (type: {type(state)})")
-            logger.info(f"  Qt.Checked = {Qt.Checked}, Qt.Unchecked = {Qt.Unchecked}")
-
-            # Use isChecked() instead of comparing state - more reliable
             enabled = self.enable_rename_check.isChecked()
-            logger.info(f"  Checkbox.isChecked() = {enabled}")
-            logger.info(f"  State comparison (state == Qt.Checked) = {state == Qt.Checked}")
 
             if not self.db_metadata:
-                logger.error("✗ db_metadata is None - cannot save rename enabled state!")
                 QMessageBox.critical(self, "Error",
                                    "Database connection not initialized.\nPlease load or create a database first.")
                 return
 
-            logger.debug(f"  Calling set_file_rename_enabled({enabled})...")
             success = self.db_metadata.set_file_rename_enabled(enabled)
 
             if success:
                 status = "enabled" if enabled else "disabled"
                 logger.info(f"✓ File renaming {status} successfully")
-                print(f"File renaming {status}")
             else:
                 logger.error(f"✗ set_file_rename_enabled() returned False")
                 QMessageBox.warning(self, "Warning",
@@ -1436,31 +1651,19 @@ class SettingsTab(QWidget):
 
     def on_filename_template_changed(self, template):
         """Handle filename template text change with validation and preview."""
-        import logging
-        logger = logging.getLogger(__name__)
-
         try:
-            logger.debug(f"→ on_filename_template_changed('{template}')")
-
-            # Import here to avoid circular dependency
             from filename_template import FilenameTemplate
 
-            # Clear previous validation message
             self.rename_validation_label.clear()
 
             if not template:
-                # Empty template - show placeholder preview
-                logger.debug("  Empty template - showing placeholder")
                 self.rename_example_label.setText("IMG_1234.jpg")
                 self.rename_preview_label.setText("IMG_1234.jpg")
                 return
 
-            # Validate template
-            logger.debug(f"  Validating template...")
             is_valid, error_msg = FilenameTemplate.validate(template)
 
             if not is_valid:
-                # Show validation error
                 logger.warning(f"⚠ Template validation failed: {error_msg}")
                 self.rename_validation_label.setText(f"⚠ {error_msg}")
                 self.rename_example_label.setStyleSheet("color: red; font-weight: bold;")
@@ -1469,24 +1672,16 @@ class SettingsTab(QWidget):
                 self.rename_preview_label.setText("Error")
                 return
 
-            logger.debug(f"  ✓ Template validation passed")
-
-            # Template is valid - generate preview
             example_output = FilenameTemplate.get_example_output(template)
-            logger.debug(f"  Preview generated: '{example_output}'")
 
             self.rename_example_label.setStyleSheet("color: green; font-weight: bold;")
             self.rename_example_label.setText(example_output)
             self.rename_preview_label.setStyleSheet("color: blue; font-weight: bold;")
             self.rename_preview_label.setText(example_output)
 
-            # Store current template for comparison
             self.current_filename_template = template
-            logger.debug(f"  Stored current_filename_template = '{template}'")
 
-            # Save to database if valid
             if self.db_metadata:
-                logger.debug(f"  Saving template to database...")
                 success = self.db_metadata.set_filename_template(template)
                 if success:
                     logger.info(f"✓ Template saved to database: '{template}'")
@@ -1496,8 +1691,6 @@ class SettingsTab(QWidget):
             else:
                 logger.warning("⚠ db_metadata is None - template NOT saved to database")
 
-            # Check if reorganization is needed
-            logger.debug(f"  Checking if reorganization needed...")
             self.check_filename_rename_lock()
 
         except Exception as e:
@@ -1528,12 +1721,61 @@ class SettingsTab(QWidget):
             "This will allow you to rename all files in the archive using the new template."
         )
 
-    # ==================== Retention Settings Methods ====================
+    # ========== Database Info Methods ==========
+
+    def refresh_database_statistics(self):
+        """Refresh the database statistics display."""
+        if not self.db_metadata:
+            return
+
+        self.db_metadata.refresh_total_photos()
+        metadata = self.db_metadata.get_metadata()
+
+        if not metadata:
+            return
+
+        self.total_photos_label.setText(f"{metadata.get('total_photos', 0):,}")
+        self.schema_version_label.setText(str(metadata.get('schema_version', 1)))
+        self.db_metadata.update_last_used()
+
+    # ========== Operation Mode Methods ==========
+
+    def is_copy_mode(self):
+        """Check if copy mode is selected."""
+        return self.copy_radio.isChecked()
+
+    def is_move_mode(self):
+        """Check if move mode is selected."""
+        return self.move_radio.isChecked()
+
+    # ========== Performance Settings Methods ==========
+
+    def update_cache_items_label(self):
+        """Update the label showing calculated item count from MB."""
+        cache_memory_mb = self.cache_memory_spin.value()
+        items = int((cache_memory_mb * 1024 * 1024) / (150 * 1024))
+        self.cache_items_label.setText(f"(~{items:,} thumbnails)")
+
+    def on_cache_settings_changed(self):
+        """Handle cache settings change - update label and save to database."""
+        self.update_cache_items_label()
+
+        if self.db_metadata:
+            cache_memory_mb = self.cache_memory_spin.value()
+            worker_threads = self.worker_threads_spin.value()
+
+            self.db_metadata.set_cache_memory_mb(cache_memory_mb)
+            self.db_metadata.set_cache_worker_threads(worker_threads)
+
+            logger.info(f"Updated cache settings: {cache_memory_mb}MB memory, {worker_threads} worker threads")
+            logger.info("Note: Changes will take effect when Date Corrections tab is reopened")
+
+    # ========== Retention Settings Methods ==========
 
     def on_retention_mode_changed(self, index):
         """Handle retention mode dropdown change."""
         mode_labels = ["", "Sessions to keep:", "Days to keep:"]
-        if index == 0:  # Keep All
+        if index == 0:
             self.retention_count_label.hide()
             self.retention_count_spin.hide()
         else:
@@ -1564,11 +1806,9 @@ class SettingsTab(QWidget):
 
                 self.auto_cleanup_check.setChecked(settings.get('auto_cleanup_enabled', False))
 
-            # Trigger visibility update
             self.on_retention_mode_changed(self.retention_mode_combo.currentIndex())
 
-        except Exception as e:
-            # Silently fail - retention settings are optional
+        except Exception:
             pass
 
     def save_retention_settings(self):
@@ -1646,30 +1886,309 @@ class SettingsTab(QWidget):
             QMessageBox.critical(self, "Cleanup Failed",
                                f"Failed to run cleanup:\n\n{str(e)}")
 
-    # ========== Thumbnail Cache Settings Methods ==========
+    # ========== Settings File Management Methods ==========
 
-    def update_cache_items_label(self):
-        """Update the label showing calculated item count from MB."""
-        cache_memory_mb = self.cache_memory_spin.value()
-        # Calculate items (assuming ~150KB per thumbnail)
-        items = int((cache_memory_mb * 1024 * 1024) / (150 * 1024))
-        self.cache_items_label.setText(f"(~{items:,} thumbnails)")
+    def get_config(self):
+        """Get configuration as dictionary."""
+        excluded_patterns = []
+        if self.filename_filter_check.isChecked():
+            for i in range(self.pattern_list.count()):
+                excluded_patterns.append(self.pattern_list.item(i).text())
 
-    def on_cache_settings_changed(self):
-        """Handle cache settings change - update label and save to database."""
-        # Update item count label
+        if self.file_type_combined_radio.isChecked():
+            file_type_mode = 'combined'
+        elif self.file_type_subfolder_radio.isChecked():
+            file_type_mode = 'subfolder'
+        else:
+            file_type_mode = 'separate_archive'
+
+        config = {
+            'include_subdirectories': self.include_subdirs_check.isChecked(),
+            'batch_size': self.batch_size_spin.value(),
+            'organization_template': self.current_template,
+            'file_type_organization': file_type_mode,
+            'partial_hash_enabled': self.partial_hash_check.isChecked(),
+            'partial_hash_bytes': self.partial_hash_bytes_spin.value(),
+            'partial_hash_min_file_size': self.partial_hash_min_size_spin.value() * 1024,
+            'photo_filter_enabled': self.photo_filter_check.isChecked(),
+            'min_file_size': self.min_file_size_spin.value() * 1024,
+            'min_width': self.min_width_spin.value(),
+            'min_height': self.min_height_spin.value(),
+            'max_width': self.max_width_spin.value(),
+            'max_height': self.max_height_spin.value(),
+            'exclude_square_smaller_than': self.exclude_square_spin.value(),
+            'require_exif': self.require_exif_check.isChecked(),
+            'database_path': constants.DEFAULT_DATABASE_NAME,
+            'file_endings': constants.DEFAULT_FILE_ENDINGS,
+            'excluded_filename_patterns': excluded_patterns,
+            'move_filtered_files': False,
+            'filtered_files_folder': "filtered_non_photos"
+        }
+        return config
+
+    def set_config(self, config):
+        """Set configuration from dictionary."""
+        self.include_subdirs_check.setChecked(config.get('include_subdirectories', True))
+        self.batch_size_spin.setValue(config.get('batch_size', constants.DEFAULT_BATCH_SIZE))
+
+        if 'organization_template' in config:
+            template = config['organization_template']
+        else:
+            group_by_year = config.get('group_by_year', True)
+            group_by_day = config.get('group_by_day', True)
+            if group_by_year and group_by_day:
+                template = '{YYYY}/{MM}/{DD}'
+            elif group_by_year:
+                template = '{YYYY}/{MM}'
+            else:
+                template = '{YYYY}/{MM}/{DD}'
+
+        self.current_template = template
+
+        preset = OrganizationTemplate.get_preset_by_template(template)
+        if preset:
+            preset_name = preset['name']
+            index = self.org_preset_combo.findText(preset_name)
+            if index >= 0:
+                self.org_preset_combo.setCurrentIndex(index)
+        else:
+            self.org_preset_combo.setCurrentText("Custom Template...")
+            self.custom_template_edit.setText(template)
+
+        file_type_mode = config.get('file_type_organization', 'combined')
+        if file_type_mode == 'combined':
+            self.file_type_combined_radio.setChecked(True)
+        elif file_type_mode == 'subfolder':
+            self.file_type_subfolder_radio.setChecked(True)
+        elif file_type_mode == 'separate_archive':
+            self.file_type_separate_radio.setChecked(True)
+
+        self.partial_hash_check.setChecked(config.get('partial_hash_enabled', True))
+        self.partial_hash_bytes_spin.setValue(
+            config.get('partial_hash_bytes', constants.PARTIAL_HASH_BYTES))
+        self.partial_hash_min_size_spin.setValue(
+            config.get('partial_hash_min_file_size', constants.PARTIAL_HASH_MIN_FILE_SIZE) // 1024)
+        self.photo_filter_check.setChecked(config.get('photo_filter_enabled', True))
+        self.min_file_size_spin.setValue(
+            config.get('min_file_size', constants.MIN_PHOTO_FILE_SIZE) // 1024)
+        self.min_width_spin.setValue(config.get('min_width', constants.MIN_PHOTO_WIDTH))
+        self.min_height_spin.setValue(config.get('min_height', constants.MIN_PHOTO_HEIGHT))
+        self.max_width_spin.setValue(config.get('max_width', constants.MAX_PHOTO_WIDTH))
+        self.max_height_spin.setValue(config.get('max_height', constants.MAX_PHOTO_HEIGHT))
+        self.exclude_square_spin.setValue(
+            config.get('exclude_square_smaller_than', constants.MIN_SQUARE_SIZE))
+        self.require_exif_check.setChecked(config.get('require_exif', False))
+
+        patterns = config.get('excluded_filename_patterns', constants.DEFAULT_EXCLUDED_PATTERNS)
+        self.pattern_list.clear()
+        for pattern in patterns:
+            self.pattern_list.addItem(pattern)
+
+        has_patterns = len(patterns) > 0
+        self.filename_filter_check.setChecked(has_patterns)
+        self.update_pattern_controls()
+        self.update_pattern_count()
+
+        self.update_organization_preview()
+
+    def load_from_file(self, show_dialog=True):
+        """Load settings from file."""
+        if not os.path.exists(self.settings_file):
+            if show_dialog:
+                QMessageBox.information(self, "No Settings File",
+                                       f"{self.settings_file} not found. Using defaults.")
+            self.restore_defaults()
+            return
+
+        try:
+            with open(self.settings_file, 'r') as f:
+                config = json.load(f)
+            self.set_config(config)
+            if show_dialog:
+                QMessageBox.information(self, "Settings Loaded",
+                                       "Settings loaded successfully from file.")
+        except Exception as e:
+            if show_dialog:
+                QMessageBox.critical(self, "Load Error",
+                                   f"Failed to load settings:\n\n{str(e)}")
+
+    def save_to_file(self):
+        """Save settings to file."""
+        try:
+            config = self.get_config()
+
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r') as f:
+                    existing = json.load(f)
+                config['source_directory'] = existing.get('source_directory', [])
+                config['destination_directory'] = existing.get('destination_directory', "")
+                config['copy_files'] = existing.get('copy_files', True)
+                config['move_files'] = existing.get('move_files', False)
+
+            try:
+                Config(config)
+            except Exception as e:
+                QMessageBox.critical(self, "Validation Error",
+                                   f"Invalid settings:\n\n{str(e)}")
+                return
+
+            with open(self.settings_file, 'w') as f:
+                json.dump(config, f, indent=2)
+
+            QMessageBox.information(self, "Settings Saved",
+                                   "Settings saved successfully to file.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error",
+                               f"Failed to save settings:\n\n{str(e)}")
+
+    def restore_defaults(self):
+        """Restore default settings."""
+        config = {
+            'include_subdirectories': True,
+            'batch_size': constants.DEFAULT_BATCH_SIZE,
+            'organization_template': '{YYYY}/{MM}/{DD}',
+            'file_type_organization': 'combined',
+            'partial_hash_enabled': True,
+            'partial_hash_bytes': constants.PARTIAL_HASH_BYTES,
+            'partial_hash_min_file_size': constants.PARTIAL_HASH_MIN_FILE_SIZE,
+            'photo_filter_enabled': True,
+            'min_file_size': constants.MIN_PHOTO_FILE_SIZE,
+            'min_width': constants.MIN_PHOTO_WIDTH,
+            'min_height': constants.MIN_PHOTO_HEIGHT,
+            'max_width': constants.MAX_PHOTO_WIDTH,
+            'max_height': constants.MAX_PHOTO_HEIGHT,
+            'exclude_square_smaller_than': constants.MIN_SQUARE_SIZE,
+            'require_exif': False,
+            'excluded_filename_patterns': constants.DEFAULT_EXCLUDED_PATTERNS
+        }
+        self.set_config(config)
+        QMessageBox.information(self, "Defaults Restored",
+                               "Settings restored to default values.")
+
+    def validate_settings(self):
+        """Validate current settings."""
+        try:
+            config = self.get_config()
+
+            config['source_directory'] = ["/dummy/path"]
+            config['destination_directory'] = "/dummy/path"
+            config['copy_files'] = True
+            config['move_files'] = False
+
+            Config(settings_dict=config)
+            QMessageBox.information(self, "Validation Successful",
+                                   "All settings are valid.")
+        except Exception as e:
+            import traceback
+            full_error = traceback.format_exc()
+            logger.error(f"Validation failed:\n{full_error}")
+            QMessageBox.critical(self, "Validation Failed",
+                               f"Invalid settings:\n\n{str(e)}")
+
+    # ========== Database Integration Methods ==========
+
+    def set_database(self, db_metadata):
+        """Load settings from database."""
+        self.db_metadata = db_metadata
+
+        if db_metadata is None:
+            return
+
+        # Load archive location
+        archive_location = db_metadata.get_archive_location()
+        if archive_location:
+            self.archive_path_edit.setText(archive_location)
+            if os.path.exists(archive_location):
+                self.archive_status_label.setText("✓ Archive folder exists")
+                self.archive_status_label.setStyleSheet("font-size: 10px; color: green; margin-top: 5px;")
+            else:
+                self.archive_status_label.setText("⚠ Warning: Archive folder does not exist!")
+                self.archive_status_label.setStyleSheet("font-size: 10px; color: red; margin-top: 5px;")
+
+        # Load organization template
+        template = db_metadata.get_organization_template()
+        self.current_template = template
+
+        preset = OrganizationTemplate.get_preset_by_template(template)
+        if preset:
+            preset_name = preset['name']
+            index = self.org_preset_combo.findText(preset_name)
+            if index >= 0:
+                self.org_preset_combo.setCurrentIndex(index)
+        else:
+            self.org_preset_combo.setCurrentText("Custom Template...")
+            self.custom_template_edit.setText(template)
+
+        # Load file type organization mode
+        mode = db_metadata.get_file_type_organization()
+        if mode == 'combined':
+            self.file_type_combined_radio.setChecked(True)
+        elif mode == 'subfolder':
+            self.file_type_subfolder_radio.setChecked(True)
+        elif mode == 'separate_archive':
+            self.file_type_separate_radio.setChecked(True)
+
+        if mode == 'separate_archive':
+            video_archive_location = db_metadata.get_video_archive_location()
+            if video_archive_location:
+                self.video_archive_path_edit.setText(video_archive_location)
+
+        self.update_organization_preview()
+        self.check_organization_lock()
+
+        # Load filename rename settings
+        rename_enabled = db_metadata.is_file_rename_enabled()
+        self.enable_rename_check.setChecked(rename_enabled)
+
+        filename_template = db_metadata.get_filename_template()
+        self.current_filename_template = filename_template
+        self.filename_template_edit.setText(filename_template)
+
+        self.on_filename_template_changed(filename_template)
+
+        # Load retention settings
+        self.load_retention_settings()
+
+        # Load cache settings
+        cache_memory_mb = db_metadata.get_cache_memory_mb()
+        worker_threads = db_metadata.get_cache_worker_threads()
+
+        self.cache_memory_spin.blockSignals(True)
+        self.worker_threads_spin.blockSignals(True)
+
+        self.cache_memory_spin.setValue(cache_memory_mb)
+        self.worker_threads_spin.setValue(worker_threads)
+
+        self.cache_memory_spin.blockSignals(False)
+        self.worker_threads_spin.blockSignals(False)
+
         self.update_cache_items_label()
 
-        # Save to database if loaded
-        if self.db_metadata:
-            cache_memory_mb = self.cache_memory_spin.value()
-            worker_threads = self.worker_threads_spin.value()
+        # Load sources and ignored directories
+        self.load_sources_from_database()
+        self.load_ignored_dirs_from_database()
 
-            self.db_metadata.set_cache_memory_mb(cache_memory_mb)
-            self.db_metadata.set_cache_worker_threads(worker_threads)
+        # Load database info
+        metadata = db_metadata.get_metadata()
+        if metadata:
+            self.db_name_label.setText(metadata.get('database_name', 'Unknown'))
+            self.db_file_label.setText(os.path.basename(db_metadata.database_path))
 
-            # Log for user awareness
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.info(f"Updated cache settings: {cache_memory_mb}MB memory, {worker_threads} worker threads")
-            logger.info("Note: Changes will take effect when Date Corrections tab is reopened")
+            created_date = metadata.get('created_date', 'Unknown')
+            if created_date and created_date != 'Unknown':
+                self.db_created_label.setText(created_date[:10])
+            else:
+                self.db_created_label.setText('Unknown')
+
+            last_used = metadata.get('last_used_date', 'Never')
+            if last_used and last_used != 'Never':
+                self.db_last_used_label.setText(last_used[:10])
+            else:
+                self.db_last_used_label.setText('Never')
+
+            total_photos = metadata.get('total_photos', 0)
+            self.total_photos_label.setText(f"{total_photos:,}")
+
+            schema_version = metadata.get('schema_version', 1)
+            self.schema_version_label.setText(str(schema_version))
