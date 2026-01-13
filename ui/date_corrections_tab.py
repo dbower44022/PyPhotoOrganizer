@@ -8,7 +8,8 @@ Allows users to review, preview, and correct file dates.
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QGroupBox, QCheckBox, QMessageBox,
                                QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-                               QLineEdit, QApplication, QComboBox)
+                               QLineEdit, QApplication, QComboBox, QDialog,
+                               QTextBrowser)
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QTimer
 from PySide6.QtGui import QPixmap, QImage, QPainter, QPen, QColor
 from PIL import Image
@@ -28,6 +29,249 @@ from ui.detachable_preview_window import DetachablePreviewWindow
 from triage.thumbnail_cache import ThumbnailCache
 
 logger = logging.getLogger(__name__)
+
+
+class DateCorrectionsHelpDialog(QDialog):
+    """Help dialog showing available actions and keyboard shortcuts."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Date Corrections - Keyboard Shortcuts & Actions")
+        self.setMinimumSize(700, 600)
+
+        layout = QVBoxLayout()
+
+        # Create text browser for rich text display
+        help_text = QTextBrowser()
+        help_text.setOpenExternalLinks(False)
+        help_text.setHtml(self._get_help_html())
+        layout.addWidget(help_text)
+
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        close_btn.setDefault(True)
+        layout.addWidget(close_btn)
+
+        self.setLayout(layout)
+
+    def _get_help_html(self) -> str:
+        """Generate HTML help content."""
+        return """
+        <html>
+        <head>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 10px; }
+                h2 { color: #2c5aa0; border-bottom: 2px solid #2c5aa0; padding-bottom: 5px; }
+                h3 { color: #4a7ac4; margin-top: 15px; margin-bottom: 5px; }
+                table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+                th { background-color: #e8f0f8; text-align: left; padding: 8px; border: 1px solid #ccc; }
+                td { padding: 8px; border: 1px solid #ccc; }
+                .key {
+                    font-family: 'Courier New', monospace;
+                    background-color: #f0f0f0;
+                    padding: 2px 6px;
+                    border: 1px solid #999;
+                    border-radius: 3px;
+                    font-weight: bold;
+                }
+                .action { font-weight: bold; color: #333; }
+                .section { margin-bottom: 20px; }
+            </style>
+        </head>
+        <body>
+            <h2>Date Corrections Tab - Quick Reference</h2>
+
+            <div class="section">
+                <h3>Grid Navigation</h3>
+                <table>
+                    <tr>
+                        <th width="35%">Keyboard Shortcut</th>
+                        <th>Action</th>
+                    </tr>
+                    <tr>
+                        <td><span class="key">↑</span> <span class="key">↓</span> <span class="key">←</span> <span class="key">→</span></td>
+                        <td>Navigate between thumbnails</td>
+                    </tr>
+                    <tr>
+                        <td><span class="key">Ctrl</span> + Click</td>
+                        <td>Add/remove item to/from selection</td>
+                    </tr>
+                    <tr>
+                        <td><span class="key">Shift</span> + Click</td>
+                        <td>Select range of items</td>
+                    </tr>
+                    <tr>
+                        <td><span class="key">Ctrl</span> + <span class="key">A</span></td>
+                        <td>Select all visible items</td>
+                    </tr>
+                    <tr>
+                        <td><span class="key">Escape</span></td>
+                        <td>Clear selection</td>
+                    </tr>
+                </table>
+            </div>
+
+            <div class="section">
+                <h3>Thumbnail Size</h3>
+                <table>
+                    <tr>
+                        <th width="35%">Keyboard Shortcut</th>
+                        <th>Action</th>
+                    </tr>
+                    <tr>
+                        <td><span class="key">1</span></td>
+                        <td>Small thumbnails (150px)</td>
+                    </tr>
+                    <tr>
+                        <td><span class="key">2</span></td>
+                        <td>Medium thumbnails (200px) - Default</td>
+                    </tr>
+                    <tr>
+                        <td><span class="key">3</span></td>
+                        <td>Large thumbnails (300px)</td>
+                    </tr>
+                </table>
+            </div>
+
+            <div class="section">
+                <h3>Preview & Actions</h3>
+                <table>
+                    <tr>
+                        <th width="35%">Keyboard Shortcut</th>
+                        <th>Action</th>
+                    </tr>
+                    <tr>
+                        <td><span class="key">Space</span></td>
+                        <td>Open/focus preview window for selected item</td>
+                    </tr>
+                    <tr>
+                        <td><span class="key">Double-Click</span></td>
+                        <td>Open/focus preview window for clicked item</td>
+                    </tr>
+                </table>
+            </div>
+
+            <div class="section">
+                <h3>Preview Window (when open)</h3>
+                <table>
+                    <tr>
+                        <th width="35%">Mouse Action</th>
+                        <th>Effect</th>
+                    </tr>
+                    <tr>
+                        <td>Click and drag on image</td>
+                        <td>Select region to zoom into (rubber band zoom)</td>
+                    </tr>
+                    <tr>
+                        <td><span class="key">Double-Click</span> on image</td>
+                        <td>Reset zoom to fit-to-view</td>
+                    </tr>
+                </table>
+            </div>
+
+            <div class="section">
+                <h3>Button Actions</h3>
+                <table>
+                    <tr>
+                        <th width="35%">Button</th>
+                        <th>Description</th>
+                    </tr>
+                    <tr>
+                        <td class="action">Select All</td>
+                        <td>Select all filtered items in the grid</td>
+                    </tr>
+                    <tr>
+                        <td class="action">Deselect All</td>
+                        <td>Clear all selections</td>
+                    </tr>
+                    <tr>
+                        <td class="action">Batch Correct Selected</td>
+                        <td>Open dialog to correct dates for multiple selected files<br/>
+                        Options: Same date for all, or sequential dates (auto-increment by 1 day)</td>
+                    </tr>
+                    <tr>
+                        <td class="action">Manage Unreliable Paths...</td>
+                        <td>Add/remove folder paths that should be automatically flagged during import<br/>
+                        Example: Scanner output folders, legacy photo directories</td>
+                    </tr>
+                    <tr>
+                        <td class="action">Reorganize All Marked</td>
+                        <td>Move all corrected files to their correct date-based folders<br/>
+                        Uses current organization template and corrected dates</td>
+                    </tr>
+                    <tr>
+                        <td class="action">Open Preview Window</td>
+                        <td>Open/close the detachable preview window<br/>
+                        Window position and size are saved per database</td>
+                    </tr>
+                </table>
+            </div>
+
+            <div class="section">
+                <h3>Filters</h3>
+                <table>
+                    <tr>
+                        <th width="35%">Filter Type</th>
+                        <th>Description</th>
+                    </tr>
+                    <tr>
+                        <td class="action">Flag Reason Filters</td>
+                        <td><strong>No EXIF:</strong> Image has no EXIF metadata<br/>
+                        <strong>Year 1000:</strong> All date extraction methods failed<br/>
+                        <strong>Suspicious:</strong> Date before 1990, future date, or Unix epoch<br/>
+                        <strong>User Path:</strong> File from user-specified unreliable folder</td>
+                    </tr>
+                    <tr>
+                        <td class="action">Status Filters</td>
+                        <td><strong>Pending:</strong> Not yet corrected (default: shown)<br/>
+                        <strong>Corrected:</strong> Date corrected, waiting for reorganization (default: shown)<br/>
+                        <strong>Reorganized:</strong> File moved to correct folder (default: hidden)</td>
+                    </tr>
+                    <tr>
+                        <td class="action">Search Box</td>
+                        <td>Filter by filename, path, date, or flag reason<br/>
+                        Updates as you type (300ms debounce)</td>
+                    </tr>
+                </table>
+            </div>
+
+            <div class="section">
+                <h3>Workflow Tips</h3>
+                <ul>
+                    <li><strong>Review flagged files:</strong> Use filters to focus on specific issues (e.g., "No EXIF" files)</li>
+                    <li><strong>Batch corrections:</strong> Select multiple files from same event and correct together</li>
+                    <li><strong>Sequential dates:</strong> Use batch correct with sequential mode for vacation photos or scanned albums</li>
+                    <li><strong>Preview before correcting:</strong> Use Space or double-click to verify the correct date</li>
+                    <li><strong>Two-phase reorganization:</strong> Correct dates first, then reorganize all at once</li>
+                    <li><strong>Monitor progress:</strong> Check "Corrected" filter to see files waiting for reorganization</li>
+                </ul>
+            </div>
+
+            <div class="section">
+                <h3>Status Colors (in grid)</h3>
+                <table>
+                    <tr>
+                        <th width="35%">Color</th>
+                        <th>Meaning</th>
+                    </tr>
+                    <tr>
+                        <td style="color: #888;">Gray/No overlay</td>
+                        <td>Pending - not yet corrected</td>
+                    </tr>
+                    <tr>
+                        <td style="color: #009600; font-weight: bold;">Green overlay</td>
+                        <td>Corrected - date fixed, needs reorganization</td>
+                    </tr>
+                    <tr>
+                        <td style="color: #3296ff; font-weight: bold;">Blue overlay</td>
+                        <td>Reorganized - file moved to correct folder</td>
+                    </tr>
+                </table>
+            </div>
+        </body>
+        </html>
+        """
 
 
 class ZoomableImageViewer(QGraphicsView):
@@ -257,6 +501,12 @@ class DateCorrectionsTab(QWidget):
         self.preview_window_btn.toggled.connect(self.on_toggle_preview_window)
         toolbar_layout.addWidget(self.preview_window_btn)
 
+        # Help button
+        help_btn = QPushButton("Help")
+        help_btn.setToolTip("Show keyboard shortcuts and available actions")
+        help_btn.clicked.connect(self.show_help)
+        toolbar_layout.addWidget(help_btn)
+
         toolbar_layout.addStretch()
         layout.addLayout(toolbar_layout)
 
@@ -357,6 +607,11 @@ class DateCorrectionsTab(QWidget):
         button_layout.addStretch()
         layout.addLayout(button_layout)
 
+        # Status bar at bottom
+        self.status_label = QLabel("Total: 0 thumbnails | Selected: 0")
+        self.status_label.setStyleSheet("padding: 5px; color: #666; border-top: 1px solid #ddd;")
+        layout.addWidget(self.status_label)
+
         self.setLayout(layout)
 
     def set_database(self, db_metadata):
@@ -403,6 +658,11 @@ class DateCorrectionsTab(QWidget):
             self.grid_view = UnreliableDatesGridView(self.grid_model, self)
             self.grid_view.selection_changed.connect(self.on_grid_selection_changed)
             self.grid_view.item_activated.connect(self.on_grid_item_activated)
+
+            # Connect context menu signals
+            self.grid_view.correct_date_requested.connect(self.on_batch_correct)
+            self.grid_view.reorganize_corrected_requested.connect(self.on_reorganize_all)
+            self.grid_view.deselect_all_requested.connect(self.deselect_all)
 
             # Replace placeholder with grid view
             layout = self.layout()
@@ -611,6 +871,9 @@ class DateCorrectionsTab(QWidget):
             # Load data into model - it handles everything efficiently
             self.grid_model.load_data(records)
 
+            # Update status label with total count
+            self._update_status_label()
+
     def _get_exif_date_for_display(self, record):
         """Get EXIF date for display by reading from file."""
         # First check if file has been corrected - read from archive if available
@@ -662,6 +925,9 @@ class DateCorrectionsTab(QWidget):
             record = self.grid_model.get_record_by_hash(selected_hashes[0])
             if record:
                 self.preview_window.update_preview(record)
+
+        # Update status label with selected count
+        self._update_status_label()
 
     def on_grid_item_activated(self, record):
         """
@@ -894,6 +1160,42 @@ class DateCorrectionsTab(QWidget):
 
             # Refresh display
             self.refresh_data()
+
+    def _update_status_label(self):
+        """Update the status label with total and selected counts."""
+        try:
+            # Get total count from grid model
+            total_count = 0
+            if self.grid_model:
+                total_count = self.grid_model.rowCount()
+
+            # Get selected count from grid view
+            selected_count = 0
+            if self.grid_view:
+                selected_indices = self.grid_view.selectedIndexes()
+                selected_count = len(selected_indices)
+
+            # Update label
+            self.status_label.setText(
+                f"Total: {total_count:,} thumbnails | Selected: {selected_count:,}"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to update status label: {e}", exc_info=True)
+
+    def show_help(self):
+        """Show keyboard shortcuts and available actions help dialog."""
+        try:
+            help_dialog = DateCorrectionsHelpDialog(self)
+            self._center_dialog(help_dialog)
+            help_dialog.exec()
+        except Exception as e:
+            logger.error(f"Failed to show help dialog: {e}", exc_info=True)
+            QMessageBox.warning(
+                self,
+                "Help Error",
+                f"Failed to display help dialog: {e}"
+            )
 
     def _center_dialog(self, dialog):
         """Center a dialog on the main application window."""

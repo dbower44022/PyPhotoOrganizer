@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QCheckBox, QSpinBox, QLineEdit, QPushButton,
                                QLabel, QListWidget, QMessageBox, QScrollArea,
                                QFormLayout, QComboBox, QTextEdit, QRadioButton,
-                               QButtonGroup)
+                               QButtonGroup, QTabWidget)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 import json
@@ -76,6 +76,9 @@ class SettingsTab(QWidget):
         main_layout.addWidget(self.sub_tabs)
         self.setLayout(main_layout)
 
+        # Initialize pattern count
+        self.update_pattern_count()
+
     def _create_general_tab(self):
         """Create the General settings tab (File Processing & Performance)."""
         # Create scroll area for this tab
@@ -114,16 +117,73 @@ class SettingsTab(QWidget):
 
         self.partial_hash_bytes_spin = QSpinBox()
         self.partial_hash_bytes_spin.setRange(1024, 1048576)
-        self.partial_hash_bytes_spin.setValue(constants.DEFAULT_PARTIAL_HASH_BYTES)
+        self.partial_hash_bytes_spin.setValue(constants.PARTIAL_HASH_BYTES)
         perf_layout.addRow("Partial hash bytes:", self.partial_hash_bytes_spin)
 
         self.partial_hash_min_size_spin = QSpinBox()
         self.partial_hash_min_size_spin.setRange(0, 10485760)
-        self.partial_hash_min_size_spin.setValue(constants.DEFAULT_PARTIAL_HASH_MIN_SIZE)
+        self.partial_hash_min_size_spin.setValue(constants.PARTIAL_HASH_MIN_FILE_SIZE)
         perf_layout.addRow("Min file size for partial hash:", self.partial_hash_min_size_spin)
 
         perf_group.setLayout(perf_layout)
         layout.addWidget(perf_group)
+
+        # Thumbnail Cache Settings
+        cache_group = QGroupBox("Thumbnail Cache Settings (Date Corrections Tab)")
+        cache_group.setStyleSheet(self.groupbox_style)
+        cache_layout = QFormLayout()
+
+        # Cache memory size
+        cache_memory_layout = QHBoxLayout()
+        self.cache_memory_spin = QSpinBox()
+        self.cache_memory_spin.setRange(50, 2000)  # 50MB to 2000MB (2GB)
+        self.cache_memory_spin.setValue(500)  # Default 500MB
+        self.cache_memory_spin.setSuffix(" MB")
+        self.cache_memory_spin.valueChanged.connect(self.on_cache_settings_changed)
+        cache_memory_layout.addWidget(self.cache_memory_spin)
+
+        # Show calculated item count
+        self.cache_items_label = QLabel()
+        self.cache_items_label.setStyleSheet("color: #666; font-style: italic;")
+        cache_memory_layout.addWidget(self.cache_items_label)
+        cache_memory_layout.addStretch()
+
+        cache_layout.addRow("Cache memory size:", cache_memory_layout)
+
+        # Worker threads
+        worker_layout = QHBoxLayout()
+        self.worker_threads_spin = QSpinBox()
+        self.worker_threads_spin.setRange(1, 16)  # 1 to 16 threads
+        self.worker_threads_spin.setValue(8)  # Default 8 threads
+        self.worker_threads_spin.setSuffix(" threads")
+        self.worker_threads_spin.valueChanged.connect(self.on_cache_settings_changed)
+        worker_layout.addWidget(self.worker_threads_spin)
+
+        # Hint about CPU cores
+        import multiprocessing
+        cpu_count = multiprocessing.cpu_count()
+        cpu_hint = QLabel(f"(System has {cpu_count} CPU cores)")
+        cpu_hint.setStyleSheet("color: #666; font-style: italic;")
+        worker_layout.addWidget(cpu_hint)
+        worker_layout.addStretch()
+
+        cache_layout.addRow("Worker threads:", worker_layout)
+
+        # Help text
+        cache_help = QLabel(
+            "Cache memory determines how many thumbnails are kept in RAM for instant access.\n"
+            "Higher values = faster scrolling but more memory usage.\n"
+            "Worker threads control parallel thumbnail generation. Match your CPU cores for best performance."
+        )
+        cache_help.setWordWrap(True)
+        cache_help.setStyleSheet("color: #666; font-size: 9pt; padding: 5px;")
+        cache_layout.addRow("", cache_help)
+
+        cache_group.setLayout(cache_layout)
+        layout.addWidget(cache_group)
+
+        # Update initial label
+        self.update_cache_items_label()
 
         layout.addStretch()
         main_widget.setLayout(layout)
@@ -345,142 +405,6 @@ class SettingsTab(QWidget):
         # Update preview with default preset
         self.update_organization_preview()
 
-        # Performance Settings
-        perf_group = QGroupBox("Performance Settings")
-        perf_group.setStyleSheet(self.groupbox_style)
-        perf_layout = QFormLayout()
-
-        self.partial_hash_check = QCheckBox()
-        self.partial_hash_check.setChecked(True)
-        perf_layout.addRow("Partial hash enabled:", self.partial_hash_check)
-
-        self.partial_hash_bytes_spin = QSpinBox()
-        self.partial_hash_bytes_spin.setRange(1024, 65536)
-        self.partial_hash_bytes_spin.setValue(constants.PARTIAL_HASH_BYTES)
-        perf_layout.addRow("Partial hash bytes:", self.partial_hash_bytes_spin)
-
-        self.partial_hash_min_size_spin = QSpinBox()
-        self.partial_hash_min_size_spin.setRange(100, 10000)
-        self.partial_hash_min_size_spin.setValue(
-            constants.PARTIAL_HASH_MIN_FILE_SIZE // 1024)  # Convert to KB
-        self.partial_hash_min_size_spin.setSuffix(" KB")
-        perf_layout.addRow("Partial hash min size:", self.partial_hash_min_size_spin)
-
-        perf_group.setLayout(perf_layout)
-        layout.addWidget(perf_group)
-
-        # Photo Filtering Settings
-        filter_group = QGroupBox("Photo Filtering Settings")
-        filter_group.setStyleSheet(self.groupbox_style)
-        filter_layout = QFormLayout()
-
-        self.photo_filter_check = QCheckBox()
-        self.photo_filter_check.setChecked(True)
-        filter_layout.addRow("Enable photo filter:", self.photo_filter_check)
-
-        self.min_file_size_spin = QSpinBox()
-        self.min_file_size_spin.setRange(1, 1000)
-        self.min_file_size_spin.setValue(constants.MIN_PHOTO_FILE_SIZE // 1024)
-        self.min_file_size_spin.setSuffix(" KB")
-        filter_layout.addRow("Min file size:", self.min_file_size_spin)
-
-        self.min_width_spin = QSpinBox()
-        self.min_width_spin.setRange(100, 10000)
-        self.min_width_spin.setValue(constants.MIN_PHOTO_WIDTH)
-        filter_layout.addRow("Min width:", self.min_width_spin)
-
-        self.min_height_spin = QSpinBox()
-        self.min_height_spin.setRange(100, 10000)
-        self.min_height_spin.setValue(constants.MIN_PHOTO_HEIGHT)
-        filter_layout.addRow("Min height:", self.min_height_spin)
-
-        self.max_width_spin = QSpinBox()
-        self.max_width_spin.setRange(1000, 100000)
-        self.max_width_spin.setValue(constants.MAX_PHOTO_WIDTH)
-        filter_layout.addRow("Max width:", self.max_width_spin)
-
-        self.max_height_spin = QSpinBox()
-        self.max_height_spin.setRange(1000, 100000)
-        self.max_height_spin.setValue(constants.MAX_PHOTO_HEIGHT)
-        filter_layout.addRow("Max height:", self.max_height_spin)
-
-        self.exclude_square_spin = QSpinBox()
-        self.exclude_square_spin.setRange(100, 1000)
-        self.exclude_square_spin.setValue(constants.MIN_SQUARE_SIZE)
-        filter_layout.addRow("Exclude squares smaller than:", self.exclude_square_spin)
-
-        self.require_exif_check = QCheckBox()
-        self.require_exif_check.setChecked(False)
-        filter_layout.addRow("Require EXIF data:", self.require_exif_check)
-
-        filter_group.setLayout(filter_layout)
-        layout.addWidget(filter_group)
-
-        # Filename Pattern Filtering
-        pattern_group = QGroupBox("Filename Pattern Filtering")
-        pattern_group.setStyleSheet(self.groupbox_style)
-        pattern_layout = QVBoxLayout()
-
-        # Description
-        pattern_desc = QLabel(
-            "Files containing these patterns in their filename will be filtered out.\n"
-            "Common examples: favicon, icon, logo, thumbnail, etc."
-        )
-        pattern_desc.setWordWrap(True)
-        pattern_desc.setStyleSheet("font-style: italic; color: gray; padding: 5px;")
-        pattern_layout.addWidget(pattern_desc)
-
-        # Enable/disable checkbox
-        self.filename_filter_check = QCheckBox("Enable filename pattern filtering")
-        self.filename_filter_check.setChecked(True)
-        self.filename_filter_check.stateChanged.connect(self.update_pattern_controls)
-        pattern_layout.addWidget(self.filename_filter_check)
-
-        # Pattern list
-        pattern_list_layout = QHBoxLayout()
-
-        # List widget
-        list_container = QVBoxLayout()
-        list_container.addWidget(QLabel("Excluded Patterns:"))
-        self.pattern_list = QListWidget()
-        self.pattern_list.setMaximumHeight(150)
-        list_container.addWidget(self.pattern_list)
-        pattern_list_layout.addLayout(list_container)
-
-        # Control buttons
-        pattern_buttons = QVBoxLayout()
-
-        self.add_pattern_input = QLineEdit()
-        self.add_pattern_input.setPlaceholderText("Enter pattern to exclude...")
-        pattern_buttons.addWidget(self.add_pattern_input)
-
-        self.add_pattern_btn = QPushButton("Add Pattern")
-        self.add_pattern_btn.clicked.connect(self.add_pattern)
-        pattern_buttons.addWidget(self.add_pattern_btn)
-
-        self.remove_pattern_btn = QPushButton("Remove Selected")
-        self.remove_pattern_btn.clicked.connect(self.remove_pattern)
-        pattern_buttons.addWidget(self.remove_pattern_btn)
-
-        self.default_patterns_btn = QPushButton("Restore Default Patterns")
-        self.default_patterns_btn.clicked.connect(self.restore_default_patterns)
-        pattern_buttons.addWidget(self.default_patterns_btn)
-
-        pattern_buttons.addStretch()
-        pattern_list_layout.addLayout(pattern_buttons)
-
-        pattern_layout.addLayout(pattern_list_layout)
-
-        # Statistics label
-        self.pattern_count_label = QLabel()
-        self.pattern_count_label.setStyleSheet("font-style: italic; color: gray;")
-        pattern_layout.addWidget(self.pattern_count_label)
-
-        pattern_group.setLayout(pattern_layout)
-        layout.addWidget(pattern_group)
-
-        # Note: Ignored Directories moved to Setup tab (better UX - see input scope in one place)
-
         # File Renaming Settings
         rename_group = QGroupBox("File Renaming")
         rename_group.setStyleSheet(self.groupbox_style)
@@ -598,30 +522,150 @@ class SettingsTab(QWidget):
         rename_group.setLayout(rename_layout)
         layout.addWidget(rename_group)
 
-        # Buttons
-        button_layout = QHBoxLayout()
+        layout.addStretch()
+        main_widget.setLayout(layout)
+        scroll.setWidget(main_widget)
+        return scroll
 
-        self.load_btn = QPushButton("Load from File")
-        self.load_btn.clicked.connect(self.load_from_file)
-        button_layout.addWidget(self.load_btn)
+    def _create_filtering_tab(self):
+        """Create the Filtering settings tab (Photo Filtering & Filename Patterns)."""
+        # Create scroll area for this tab
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
 
-        self.save_btn = QPushButton("Save to File")
-        self.save_btn.clicked.connect(self.save_to_file)
-        button_layout.addWidget(self.save_btn)
+        # Main widget for scroll area
+        main_widget = QWidget()
+        layout = QVBoxLayout()
 
-        self.defaults_btn = QPushButton("Restore Defaults")
-        self.defaults_btn.clicked.connect(self.restore_defaults)
-        button_layout.addWidget(self.defaults_btn)
+        # Photo Filtering Settings (moved from old code)
+        filter_group = QGroupBox("Photo Filtering Settings")
+        filter_group.setStyleSheet(self.groupbox_style)
+        filter_layout = QFormLayout()
 
-        self.validate_btn = QPushButton("Validate Settings")
-        self.validate_btn.clicked.connect(self.validate_settings)
-        button_layout.addWidget(self.validate_btn)
+        self.photo_filter_check = QCheckBox()
+        self.photo_filter_check.setChecked(True)
+        filter_layout.addRow("Enable photo filter:", self.photo_filter_check)
 
-        button_layout.addStretch()
+        self.min_file_size_spin = QSpinBox()
+        self.min_file_size_spin.setRange(1, 1000)
+        self.min_file_size_spin.setValue(constants.MIN_PHOTO_FILE_SIZE // 1024)
+        self.min_file_size_spin.setSuffix(" KB")
+        filter_layout.addRow("Min file size:", self.min_file_size_spin)
 
-        layout.addLayout(button_layout)
+        self.min_width_spin = QSpinBox()
+        self.min_width_spin.setRange(100, 10000)
+        self.min_width_spin.setValue(constants.MIN_PHOTO_WIDTH)
+        filter_layout.addRow("Min width:", self.min_width_spin)
 
-        # Audit Retention Settings
+        self.min_height_spin = QSpinBox()
+        self.min_height_spin.setRange(100, 10000)
+        self.min_height_spin.setValue(constants.MIN_PHOTO_HEIGHT)
+        filter_layout.addRow("Min height:", self.min_height_spin)
+
+        self.max_width_spin = QSpinBox()
+        self.max_width_spin.setRange(1000, 50000)
+        self.max_width_spin.setValue(constants.MAX_PHOTO_WIDTH)
+        filter_layout.addRow("Max width:", self.max_width_spin)
+
+        self.max_height_spin = QSpinBox()
+        self.max_height_spin.setRange(1000, 50000)
+        self.max_height_spin.setValue(constants.MAX_PHOTO_HEIGHT)
+        filter_layout.addRow("Max height:", self.max_height_spin)
+
+        self.exclude_square_spin = QSpinBox()
+        self.exclude_square_spin.setRange(0, 1000)
+        self.exclude_square_spin.setValue(constants.MIN_SQUARE_SIZE)
+        filter_layout.addRow("Exclude square smaller than:", self.exclude_square_spin)
+
+        self.require_exif_check = QCheckBox()
+        self.require_exif_check.setChecked(False)
+        filter_layout.addRow("Require EXIF data:", self.require_exif_check)
+
+        filter_group.setLayout(filter_layout)
+        layout.addWidget(filter_group)
+
+        # Filename Pattern Filtering
+        pattern_group = QGroupBox("Filename Pattern Filtering")
+        pattern_group.setStyleSheet(self.groupbox_style)
+        pattern_layout = QVBoxLayout()
+
+        # Description
+        pattern_desc = QLabel(
+            "Files containing these patterns in their filename will be filtered out.\n"
+            "Common examples: favicon, icon, logo, thumbnail, etc."
+        )
+        pattern_desc.setWordWrap(True)
+        pattern_desc.setStyleSheet("font-style: italic; color: gray; padding: 5px;")
+        pattern_layout.addWidget(pattern_desc)
+
+        # Checkbox to enable/disable
+        self.filename_filter_check = QCheckBox("Enable filename pattern filtering")
+        self.filename_filter_check.setChecked(True)
+        self.filename_filter_check.stateChanged.connect(self.update_pattern_controls)
+        pattern_layout.addWidget(self.filename_filter_check)
+
+        # Pattern list and controls
+        pattern_content_layout = QHBoxLayout()
+
+        # Left side: List widget
+        list_container = QVBoxLayout()
+        list_label = QLabel("Excluded Patterns:")
+        list_label.setStyleSheet("font-weight: bold;")
+        list_container.addWidget(list_label)
+
+        self.pattern_list = QListWidget()
+        self.pattern_list.setMaximumHeight(150)
+        list_container.addWidget(self.pattern_list)
+        pattern_content_layout.addLayout(list_container)
+
+        # Right side: Control buttons
+        pattern_buttons = QVBoxLayout()
+
+        self.add_pattern_input = QLineEdit()
+        self.add_pattern_input.setPlaceholderText("e.g., favicon, icon, thumb")
+        pattern_buttons.addWidget(self.add_pattern_input)
+
+        self.add_pattern_btn = QPushButton("Add Pattern")
+        self.add_pattern_btn.clicked.connect(self.add_pattern)
+        pattern_buttons.addWidget(self.add_pattern_btn)
+
+        self.remove_pattern_btn = QPushButton("Remove Selected")
+        self.remove_pattern_btn.clicked.connect(self.remove_pattern)
+        pattern_buttons.addWidget(self.remove_pattern_btn)
+
+        self.add_default_patterns_btn = QPushButton("Add Default Patterns")
+        self.add_default_patterns_btn.clicked.connect(self.restore_default_patterns)
+        pattern_buttons.addWidget(self.add_default_patterns_btn)
+
+        pattern_buttons.addStretch()
+        pattern_content_layout.addLayout(pattern_buttons)
+
+        pattern_layout.addLayout(pattern_content_layout)
+
+        # Pattern count label
+        self.pattern_count_label = QLabel()
+        self.pattern_count_label.setStyleSheet("font-style: italic; color: gray;")
+        pattern_layout.addWidget(self.pattern_count_label)
+
+        pattern_group.setLayout(pattern_layout)
+        layout.addWidget(pattern_group)
+
+        layout.addStretch()
+        main_widget.setLayout(layout)
+        scroll.setWidget(main_widget)
+        return scroll
+
+    def _create_advanced_tab(self):
+        """Create the Advanced settings tab (Import History Retention & Buttons)."""
+        # Create scroll area for this tab
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+
+        # Main widget for scroll area
+        main_widget = QWidget()
+        layout = QVBoxLayout()
+
+        # Import History Retention Settings
         retention_group = QGroupBox("Import History Retention")
         retention_group.setStyleSheet(self.groupbox_style)
         retention_layout = QVBoxLayout()
@@ -678,19 +722,37 @@ class SettingsTab(QWidget):
         retention_group.setLayout(retention_layout)
         layout.addWidget(retention_group)
 
+        # Global Settings Buttons
+        button_group = QGroupBox("Settings Management")
+        button_group.setStyleSheet(self.groupbox_style)
+        button_layout = QHBoxLayout()
+
+        self.load_btn = QPushButton("Load from File")
+        self.load_btn.clicked.connect(self.load_from_file)
+        button_layout.addWidget(self.load_btn)
+
+        self.save_btn = QPushButton("Save to File")
+        self.save_btn.clicked.connect(self.save_to_file)
+        button_layout.addWidget(self.save_btn)
+
+        self.defaults_btn = QPushButton("Restore Defaults")
+        self.defaults_btn.clicked.connect(self.restore_defaults)
+        button_layout.addWidget(self.defaults_btn)
+
+        self.validate_btn = QPushButton("Validate Settings")
+        self.validate_btn.clicked.connect(self.validate_settings)
+        button_layout.addWidget(self.validate_btn)
+
+        button_layout.addStretch()
+        button_group.setLayout(button_layout)
+        layout.addWidget(button_group)
+
         layout.addStretch()
         main_widget.setLayout(layout)
         scroll.setWidget(main_widget)
+        return scroll
 
-        # Set scroll area as main layout
-        main_layout = QVBoxLayout()
-        main_layout.addWidget(scroll)
-        self.setLayout(main_layout)
-
-        # Initialize pattern count
-        self.update_pattern_count()
-
-        # Initialize ignored directories count
+    # Note: Old duplicate code removed - all widgets now in proper tabs above
 
     def update_pattern_controls(self):
         """Enable/disable pattern controls based on checkbox."""
@@ -1090,6 +1152,24 @@ class SettingsTab(QWidget):
 
         # Load retention settings
         self.load_retention_settings()
+
+        # Load cache settings
+        cache_memory_mb = db_metadata.get_cache_memory_mb()
+        worker_threads = db_metadata.get_cache_worker_threads()
+
+        # Block signals during loading to prevent saving during initialization
+        self.cache_memory_spin.blockSignals(True)
+        self.worker_threads_spin.blockSignals(True)
+
+        self.cache_memory_spin.setValue(cache_memory_mb)
+        self.worker_threads_spin.setValue(worker_threads)
+
+        # Unblock signals
+        self.cache_memory_spin.blockSignals(False)
+        self.worker_threads_spin.blockSignals(False)
+
+        # Update label
+        self.update_cache_items_label()
 
         # Load ignored directories
 
@@ -1565,3 +1645,31 @@ class SettingsTab(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Cleanup Failed",
                                f"Failed to run cleanup:\n\n{str(e)}")
+
+    # ========== Thumbnail Cache Settings Methods ==========
+
+    def update_cache_items_label(self):
+        """Update the label showing calculated item count from MB."""
+        cache_memory_mb = self.cache_memory_spin.value()
+        # Calculate items (assuming ~150KB per thumbnail)
+        items = int((cache_memory_mb * 1024 * 1024) / (150 * 1024))
+        self.cache_items_label.setText(f"(~{items:,} thumbnails)")
+
+    def on_cache_settings_changed(self):
+        """Handle cache settings change - update label and save to database."""
+        # Update item count label
+        self.update_cache_items_label()
+
+        # Save to database if loaded
+        if self.db_metadata:
+            cache_memory_mb = self.cache_memory_spin.value()
+            worker_threads = self.worker_threads_spin.value()
+
+            self.db_metadata.set_cache_memory_mb(cache_memory_mb)
+            self.db_metadata.set_cache_worker_threads(worker_threads)
+
+            # Log for user awareness
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"Updated cache settings: {cache_memory_mb}MB memory, {worker_threads} worker threads")
+            logger.info("Note: Changes will take effect when Date Corrections tab is reopened")

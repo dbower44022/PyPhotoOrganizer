@@ -6,9 +6,9 @@ Simplified version of triage ThumbnailGridView adapted for date corrections.
 """
 
 import logging
-from PySide6.QtWidgets import QListView, QAbstractItemView
-from PySide6.QtCore import Qt, Signal, QSize
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtWidgets import QListView, QAbstractItemView, QMenu
+from PySide6.QtCore import Qt, Signal, QSize, QPoint
+from PySide6.QtGui import QKeyEvent, QAction
 
 from ui.unreliable_dates_delegate import UnreliableDatesDelegate
 
@@ -34,6 +34,9 @@ class UnreliableDatesGridView(QListView):
     # Signals
     selection_changed = Signal(list)  # List of selected file hashes
     item_activated = Signal(dict)  # Double-click on record
+    correct_date_requested = Signal()  # Context menu: Correct Date
+    reorganize_corrected_requested = Signal()  # Context menu: Reorganize Corrected
+    deselect_all_requested = Signal()  # Context menu: Deselect All
 
     def __init__(self, model, parent=None):
         """
@@ -69,6 +72,10 @@ class UnreliableDatesGridView(QListView):
 
         # Prefetch on scroll
         self.verticalScrollBar().valueChanged.connect(self._on_scroll)
+
+        # Enable context menu
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
 
         logger.info("UnreliableDatesGridView initialized")
 
@@ -267,3 +274,41 @@ class UnreliableDatesGridView(QListView):
                 records.append(record)
 
         return records
+
+    def _show_context_menu(self, position: QPoint):
+        """
+        Show context menu at the given position.
+
+        Args:
+            position: Position where right-click occurred (widget coordinates)
+        """
+        try:
+            # Check if there are any selected items
+            selected_indices = self.selectedIndexes()
+            has_selection = len(selected_indices) > 0
+
+            # Create context menu
+            menu = QMenu(self)
+
+            # Action 1: Correct Date
+            correct_action = QAction("Correct Date", self)
+            correct_action.setEnabled(has_selection)
+            correct_action.triggered.connect(lambda: self.correct_date_requested.emit())
+            menu.addAction(correct_action)
+
+            # Action 2: Reorganize Corrected
+            reorganize_action = QAction("Reorganize Corrected", self)
+            reorganize_action.triggered.connect(lambda: self.reorganize_corrected_requested.emit())
+            menu.addAction(reorganize_action)
+
+            # Action 3: Deselect All
+            deselect_action = QAction("Deselect All", self)
+            deselect_action.setEnabled(has_selection)
+            deselect_action.triggered.connect(lambda: self.deselect_all_requested.emit())
+            menu.addAction(deselect_action)
+
+            # Show menu at cursor position (convert to global coordinates)
+            menu.exec(self.mapToGlobal(position))
+
+        except Exception as e:
+            logger.error(f"Error showing context menu: {e}", exc_info=True)

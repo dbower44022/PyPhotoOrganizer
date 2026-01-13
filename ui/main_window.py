@@ -11,12 +11,12 @@ from PySide6.QtGui import QAction, QScreen
 import sys
 from datetime import datetime
 
-from ui.setup_tab import SetupTab
+from ui.import_settings_tab import ImportSettingsTab
+from ui.archive_settings_tab import ArchiveSettingsTab
+from ui.system_settings_tab import SystemSettingsTab
 from ui.progress_tab import ProgressTab
 from ui.results_tab import ResultsTab
 from ui.logs_tab import LogsTab
-from ui.settings_tab import SettingsTab
-from ui.database_tab import DatabaseTab
 from ui.filtered_files_tab import FilteredFilesTab
 from ui.date_corrections_tab import DateCorrectionsTab
 from ui.import_history_tab import ImportHistoryTab
@@ -73,28 +73,28 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
 
         # Create tabs
-        self.setup_tab = SetupTab()
+        self.import_settings_tab = ImportSettingsTab()
+        self.archive_settings_tab = ArchiveSettingsTab()
+        self.system_settings_tab = SystemSettingsTab()
         self.progress_tab = ProgressTab()
         self.results_tab = ResultsTab()
         self.filtered_files_tab = FilteredFilesTab()
         self.logs_tab = LogsTab()
-        self.settings_tab = SettingsTab()
-        self.database_tab = DatabaseTab()
         self.date_corrections_tab = DateCorrectionsTab()
         self.import_history_tab = ImportHistoryTab()
 
         # Add tabs in workflow order
-        # Tab 0: Database (must be first - required before anything else)
-        self.tabs.addTab(self.database_tab, "📊 Database")
-        self.tabs.setTabToolTip(0, "Select or create a database (required first step)")
+        # Tab 0: Import Settings (source folders, filtering, Start/Stop buttons)
+        self.tabs.addTab(self.import_settings_tab, "📥 Import Settings")
+        self.tabs.setTabToolTip(0, "Choose source folders, configure filtering, and start/stop processing")
 
-        # Tab 1: Sources (define input scope)
-        self.tabs.addTab(self.setup_tab, "📂 Sources")
-        self.tabs.setTabToolTip(1, "Choose source folders, set ignored patterns, and configure operation mode")
+        # Tab 1: Archive Settings (organization, file type, renaming)
+        self.tabs.addTab(self.archive_settings_tab, "📦 Archive Settings")
+        self.tabs.setTabToolTip(1, "Configure archive location, organization templates, and file renaming")
 
-        # Tab 2: Settings (define processing behavior)
-        self.tabs.addTab(self.settings_tab, "⚙️ Settings")
-        self.tabs.setTabToolTip(2, "Configure organization templates, filtering rules, and file renaming")
+        # Tab 2: System Settings (database, operation mode, performance)
+        self.tabs.addTab(self.system_settings_tab, "⚙️ System Settings")
+        self.tabs.setTabToolTip(2, "Database information, operation mode, performance, and retention settings")
 
         # Tab 3: Progress (active during processing)
         self.tabs.addTab(self.progress_tab, "▶️ Progress")
@@ -121,14 +121,9 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.logs_tab, "📋 Logs")
         self.tabs.setTabToolTip(8, "View detailed application logs for troubleshooting")
 
-        # Initially disable Sources and Settings until database is selected
-        self.tabs.setTabEnabled(1, False)  # Sources
-        self.tabs.setTabEnabled(2, False)  # Settings
-
         # Connect signals
-        self.setup_tab.start_clicked.connect(self.start_processing)
-        self.setup_tab.stop_clicked.connect(self.stop_processing)
-        self.database_tab.database_changed.connect(self.on_database_changed)
+        self.import_settings_tab.start_clicked.connect(self.start_processing)
+        self.import_settings_tab.stop_clicked.connect(self.stop_processing)
 
     def _create_menu_bar(self):
         """Create the menu bar."""
@@ -164,16 +159,16 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Error", "No database selected")
                 return
 
-            # Get configuration from settings tab
-            config = self.settings_tab.get_config()
+            # Get configuration from import settings tab
+            config = self.import_settings_tab.get_config()
 
-            # Update config with folder selections from setup tab (only enabled ones)
-            source_folders = self.setup_tab.get_enabled_source_folders()
+            # Get folder selections from import settings tab (only enabled ones)
+            source_folders = self.import_settings_tab.get_enabled_source_folders()
 
             # Debug logging
             import logging
             logger = logging.getLogger(__name__)
-            logger.info(f"Enabled source folders from setup tab: {source_folders}")
+            logger.info(f"Enabled source folders from import settings tab: {source_folders}")
 
             # Get destination from database
             destination_folder = self.database_metadata.get_archive_location()
@@ -182,13 +177,14 @@ class MainWindow(QMainWindow):
             if not source_folders:
                 QMessageBox.warning(self, "Error",
                                   "Please select at least one source folder.\n\n"
+                                  "Go to Import Settings tab and add your source folders.\n"
                                   "Make sure the checkbox next to the source folder is checked!")
                 return
 
             if not destination_folder:
                 QMessageBox.warning(self, "Error",
                                   "No archive location configured for this database.\n\n"
-                                  "This should not happen. Please check the Database tab.")
+                                  "This should not happen. Please check the System Settings tab.")
                 return
 
             config['source_directory'] = source_folders
@@ -201,21 +197,25 @@ class MainWindow(QMainWindow):
             logger.info(f"  config['database_path'] = '{config['database_path']}'")
             logger.info(f"=" * 80)
 
-            config['copy_files'] = self.setup_tab.is_copy_mode()
-            config['move_files'] = self.setup_tab.is_move_mode()
+            config['copy_files'] = self.system_settings_tab.is_copy_mode()
+            config['move_files'] = self.system_settings_tab.is_move_mode()
 
             # Get ignored directories from database
             ignored_dirs = self.database_metadata.get_ignored_directories()
             config['ignored_directories'] = ignored_dirs
             logger.info(f"Ignored directories: {ignored_dirs}")
 
+            # Add system performance settings
+            perf_config = self.system_settings_tab.get_config()
+            config.update(perf_config)
+
             # Save organization settings to database before processing
-            if not self.settings_tab.save_organization_to_database():
+            if not self.archive_settings_tab.save_organization_to_database():
                 return  # Error dialog already shown
 
             # Validate operation mode
             if not config['copy_files'] and not config['move_files']:
-                QMessageBox.warning(self, "Error", "Please select Copy or Move mode")
+                QMessageBox.warning(self, "Error", "Please select Copy or Move mode in System Settings tab")
                 return
 
             # Show warning for move mode
@@ -246,7 +246,7 @@ class MainWindow(QMainWindow):
             self.worker.start()
 
             # Update UI state
-            self.setup_tab.set_controls_enabled(False)
+            self.import_settings_tab.set_controls_enabled(False)
             self.status_bar.showMessage("Processing...")
 
         except Exception as e:
@@ -267,23 +267,23 @@ class MainWindow(QMainWindow):
     def processing_completed(self, results):
         """Handle processing completion."""
         # Re-enable controls
-        self.setup_tab.set_controls_enabled(True)
+        self.import_settings_tab.set_controls_enabled(True)
         self.status_bar.showMessage("Processing complete")
 
         # Refresh database photo count from UniquePhotos table
         if self.database_metadata:
             self.database_metadata.refresh_total_photos()
-            # Refresh the database tab display to show updated count
-            self.database_tab.refresh_database_info()
+            # Refresh the system settings tab display to show updated count
+            self.system_settings_tab.set_database(self.database_metadata)
 
             # Update last_scanned timestamp for all processed source directories
-            source_folders = self.setup_tab.get_enabled_source_folders()
+            source_folders = self.import_settings_tab.get_enabled_source_folders()
             current_time = datetime.now().isoformat()
             for folder in source_folders:
                 self.database_metadata.update_source_last_scanned(folder, current_time)
 
-            # Refresh the setup tab to show updated last_scanned times
-            self.setup_tab.load_sources_from_database()
+            # Refresh the import settings tab to show updated last_scanned times
+            self.import_settings_tab.load_sources_from_database()
 
         # Update results tab
         self.results_tab.display_results(results)
@@ -314,7 +314,7 @@ class MainWindow(QMainWindow):
     def processing_error(self, error_msg):
         """Handle processing error."""
         # Re-enable controls
-        self.setup_tab.set_controls_enabled(True)
+        self.import_settings_tab.set_controls_enabled(True)
         self.status_bar.showMessage("Error occurred")
 
         # Show error message
@@ -357,21 +357,14 @@ class MainWindow(QMainWindow):
         # Ensure all required tables exist (handles old databases)
         self.database_metadata.ensure_all_tables()
 
-        # Update database tab
-        self.database_tab.set_database(database_path)
+        # Update import settings tab with database (loads source directories)
+        self.import_settings_tab.set_database(self.database_metadata)
 
-        # Get archive location from database
-        archive_location = self.database_metadata.get_archive_location()
+        # Update archive settings tab with database (loads organization template, file renaming)
+        self.archive_settings_tab.set_database(self.database_metadata)
 
-        # Update setup tab with archive location
-        if archive_location:
-            self.setup_tab.set_destination_folder(archive_location)
-
-        # Load source directories from database
-        self.setup_tab.set_database(self.database_metadata)
-
-        # Update settings tab with database (loads organization template)
-        self.settings_tab.set_database(self.database_metadata)
+        # Update system settings tab with database (loads database info, cache settings, retention)
+        self.system_settings_tab.set_database(self.database_metadata)
 
         # Update date corrections tab with database
         self.date_corrections_tab.set_database(self.database_metadata)
@@ -387,14 +380,6 @@ class MainWindow(QMainWindow):
 
         # Update status bar
         self.status_bar.showMessage(f"Database loaded: {db_name}")
-
-        # Enable Sources and Settings tabs now that database is loaded
-        self.tabs.setTabEnabled(1, True)  # Sources tab
-        self.tabs.setTabEnabled(2, True)  # Settings tab
-
-    def on_database_changed(self, new_database_path):
-        """Handle database change from Database tab."""
-        self.set_database(new_database_path)
 
     def restore_window_geometry(self):
         """
