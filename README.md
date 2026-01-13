@@ -124,17 +124,25 @@ python main_gui.py
 4. Click "Create Database" or "Open Database"
 
 **Processing Workflow:**
-1. **Setup Tab**:
+1. **Import Settings Tab**:
    - Add source folders (stored persistently in database)
    - Enable/disable sources with checkboxes for selective processing
    - View status and last scanned timestamp for each source
-   - View archive location (managed by database)
-   - Select Copy or Move mode
-2. **Settings Tab** (optional):
-   - Adjust batch size, filtering, and organization settings
+   - Configure ignored directories with wildcard patterns
+   - Adjust file processing settings (subdirectories, batch size)
+   - Set photo filtering criteria (dimensions, file size, EXIF)
    - Customize filename pattern exclusions
-   - Configure photo filtering criteria
-3. **Setup Tab**: Click "Start Processing"
+   - Click "Start Processing" button
+2. **Archive Settings Tab** (optional):
+   - Configure organization template (folder structure)
+   - Set file type organization mode (combined/subfolder/separate)
+   - Enable and configure file renaming with templates
+3. **System Settings Tab** (optional):
+   - View database information and statistics
+   - Select Copy or Move mode
+   - Configure performance settings (partial hash)
+   - Set thumbnail cache size
+   - Manage import history retention
 4. **Progress Tab**:
    - Monitor real-time progress with time estimates
    - View processing rates and stage information
@@ -151,10 +159,6 @@ python main_gui.py
    - Review detailed processing logs
    - Filter by level, search, time range
    - View statistics and export logs
-8. **Database Tab**:
-   - View database metadata
-   - See archive location and statistics
-   - Manage database settings
 
 **Option B: Command Line Interface**
 
@@ -236,25 +240,70 @@ Organizing files: 100%|████████| 850/850 [02:15<00:00, 6.3file/s
 - **Export**: Export logs to CSV or TXT
 - **Clear**: Clear log file with confirmation
 
-### 6. Settings Tab
+### 6. Import Settings Tab (NEW in v2.4)
+- **Source Folders**: Add/remove source directories with enable/disable checkboxes
+  - View last scanned timestamp for each source
+  - Persistent storage in database
+- **Ignored Directories**: Configure directories to skip with wildcard patterns (*, ?)
+  - Add/remove patterns
+  - Preset patterns available (thumbnails, cache, temp folders)
 - **File Processing**: Include subdirectories, batch size
-- **Organization**: Group by year, group by day, folder structure preview
-- **File Renaming**: Enable/disable file renaming, customizable filename template with live preview
+- **Photo Filtering**: Size, dimensions, square detection, EXIF requirements
+  - Min/max file size, width, height
+  - Exclude small squares (icons)
+  - Require EXIF data option
+- **Filename Patterns**: Customizable list of excluded patterns
+  - Default patterns: favicon, icon, logo, thumb, button, badge, sprite
+- **Start/Stop Buttons**: Large, styled buttons to control processing
+
+### 7. Archive Settings Tab (NEW in v2.4)
+- **Archive Location**: Display-only field showing archive folder (managed by database)
+- **Organization Settings**:
+  - Preset folder structures (By Day, By Month, By Year, etc.)
+  - Custom template editor with live preview
+  - Template variables: {year}, {month}, {day}, {month_name}, {month_sname}, {day_name}, {day_sname}
+  - Quick-insert buttons for common patterns
+  - Reorganization warning for existing archives
+- **File Type Organization**:
+  - Same folders as photos (combined)
+  - Separate subfolder under date folder (Photos/, Videos/)
+  - Completely separate archive location (different paths)
+- **File Renaming**: Enable/disable file renaming with customizable templates
   - Template Variables: {year}, {month}, {day}, {hour}, {minute}, {second}, {original_name}, {original_name_no_ext}, {ext}, {folder_name}, {parent_folder_name}, {counter}, {counter:04d}
   - Example: `{year}{month}{day}_{original_name_no_ext}` → `20260104_IMG_1234.jpg`
   - Security validation prevents dangerous characters and path traversal
-- **Performance**: Partial hashing configuration
-- **Photo Filtering**: Size, dimensions, square detection, EXIF requirements
-- **Filename Patterns**: Customizable list of excluded patterns
-- **Actions**: Load, Save, Restore Defaults, Validate
+  - Live preview with example output
 
-### 7. Database Tab
-- **Metadata**: Database name, description, creation date
-- **Archive Location**: Permanent binding to archive folder
-- **Statistics**: Total photos, last used date
-- **Actions**: Change database (with dialogs)
+### 8. System Settings Tab (NEW in v2.4)
+- **Current Database Information**:
+  - Database name, file path, created date, last used date
+- **Current Database Statistics**:
+  - Total photos count
+  - Schema version
+  - Refresh button
+- **Operation Mode**:
+  - Copy Files (Safe - keeps originals)
+  - Move Files (Destructive - deletes originals)
+- **Performance Settings**:
+  - Partial hash enabled/disabled
+  - Partial hash bytes (1KB - 1MB)
+  - Min file size for partial hash
+- **Thumbnail Cache Settings**:
+  - Cache memory size (50-2000 MB)
+  - Worker threads (1-16)
+  - Live calculation of thumbnail count
+- **Import History Retention**:
+  - Retention mode (Keep All, Keep Last N Sessions, Keep Last N Days)
+  - Session/days count
+  - Auto-cleanup on startup
+  - Manual cleanup button
+- **Settings Management**:
+  - Load from File
+  - Save to File
+  - Restore Defaults
+  - Validate Settings
 
-### 8. Date Corrections Tab (NEW in v2.2)
+### 9. Date Corrections Tab (NEW in v2.2)
 - **Files Table**: Sortable grid showing all files with unreliable dates
   - Columns: Checkbox, Filename, Source Location, Archive Location, Detected Date, EXIF Date, File Date, Flag Reason, Status
   - Filter by flag reason (No EXIF, Year 1000, Suspicious, User-Specified)
@@ -503,15 +552,17 @@ PyPhotoOrganizer/
 ├── DuplicateFileDetection.py   # Core duplicate detection
 ├── photo_filter.py             # Photo filtering logic
 ├── database_metadata.py        # Database metadata management
-├── ui/                         # GUI components (9 files, ~2500 lines)
+├── ui/                         # GUI components (~3000 lines)
 │   ├── main_window.py          # Main window with tab management
-│   ├── setup_tab.py            # Source/destination/operation mode
+│   ├── import_settings_tab.py  # Source folders, filtering, Start/Stop (NEW v2.4)
+│   ├── archive_settings_tab.py # Organization, file types, renaming (NEW v2.4)
+│   ├── system_settings_tab.py  # Database, operation mode, performance (NEW v2.4)
 │   ├── progress_tab.py         # Real-time progress with EMA estimates
 │   ├── results_tab.py          # Statistics and export
 │   ├── filtered_files_tab.py   # Filtered files review with preview
 │   ├── logs_tab.py             # Advanced log viewer (571 lines)
-│   ├── settings_tab.py         # Settings editor with pattern management
-│   ├── database_tab.py         # Database metadata viewer
+│   ├── date_corrections_tab.py # Unreliable date correction (v2.2)
+│   ├── import_history_tab.py   # Import session history and reprocessing (v2.3)
 │   ├── database_selector_dialog.py  # Startup database selector
 │   ├── create_database_dialog.py    # Database creation wizard
 │   └── worker.py               # Background processing thread

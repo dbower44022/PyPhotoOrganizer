@@ -5,6 +5,61 @@ All notable changes to PyPhotoOrganizer will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-01-12
+
+### Changed - UI Reorganization
+
+**Three-Tab Settings Structure:**
+Reorganized settings into three focused top-level tabs for better usability and discoverability:
+
+**📥 Import Settings Tab** (NEW - replaces Sources tab):
+- Source folders management (add/remove, enable/disable checkboxes)
+- Ignored directories configuration with wildcard patterns
+- File processing settings (subdirectories, batch size)
+- Photo filtering settings (dimensions, file size, EXIF requirements)
+- Filename pattern filtering (exclude icons, thumbs, etc.)
+- **Start/Stop processing buttons** (moved from Sources tab)
+
+**📦 Archive Settings Tab** (NEW - extracted from Settings tab):
+- Archive location display (read-only from database)
+- Organization template configuration (presets + custom with live preview)
+- File type organization (combined/subfolder/separate for videos)
+- File renaming settings (enable checkbox, template editor, live preview)
+
+**⚙️ System Settings Tab** (NEW - combines Database + Settings tab features):
+- Database information and statistics (from old Database tab)
+- Operation mode selection (Copy vs Move)
+- Performance settings (partial hash configuration)
+- Thumbnail cache settings (memory size, worker threads)
+- Import history retention (mode, count, cleanup)
+- Settings file management (Load/Save/Restore/Validate)
+
+**Benefits:**
+- Clearer workflow: Import → Archive → System
+- Related settings grouped logically
+- Better discoverability - settings are where users expect them
+- Eliminated redundancy from Database/Sources/Settings tabs
+- Consistent naming with clear icons
+
+**Files Modified:**
+- `ui/main_window.py` - Updated to use new three-tab structure
+- `ui/import_settings_tab.py` - NEW (~850 lines)
+- `ui/archive_settings_tab.py` - NEW (~900 lines)
+- `ui/system_settings_tab.py` - NEW (~700 lines)
+
+**Deprecated:**
+- `ui/setup_tab.py` - Replaced by import_settings_tab.py
+- `ui/settings_tab.py` - Split into archive_settings_tab.py and system_settings_tab.py
+- `ui/database_tab.py` - Merged into system_settings_tab.py
+
+**Documentation Updated:**
+- CLAUDE.md - GUI Modules section updated
+- README.md - Processing workflow and tab descriptions updated
+- QUICKREF.md - Workflow and tab quick reference updated
+- ARCHITECTURE.md - UI file structure updated
+
+---
+
 ## [2.3.1] - 2026-01-06
 
 ### Added - Database Reliability Improvements

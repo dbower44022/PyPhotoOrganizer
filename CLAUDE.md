@@ -153,13 +153,29 @@ python TestRoutines.py
 
 **GUI Modules** (ui/ directory):
 - `main_window.py`: Main application window with tab-based interface
-- `setup_tab.py`: Source directory selection and processing controls
+- **`import_settings_tab.py`** (NEW in v2.4): Import settings and processing controls
+  - Source directory selection and management
+  - Ignored directories configuration
+  - File processing settings (subdirectories, batch size)
+  - Photo filtering settings (dimensions, file size, EXIF)
+  - Filename pattern filtering
+  - Start/Stop processing buttons
+- **`archive_settings_tab.py`** (NEW in v2.4): Archive organization and file renaming
+  - Archive location display (read-only from database)
+  - Organization template configuration (folder structure presets + custom)
+  - File type organization (combined/subfolder/separate for videos)
+  - File renaming settings with template editor
+- **`system_settings_tab.py`** (NEW in v2.4): System-level settings
+  - Database information and statistics
+  - Operation mode (Copy vs Move)
+  - Performance settings (partial hash configuration)
+  - Thumbnail cache settings
+  - Import history retention
+  - Settings file management (Load/Save/Restore/Validate)
 - `progress_tab.py`: Real-time processing progress display
 - `results_tab.py`: Processing results summary
 - `filtered_files_tab.py`: Files filtered by photo filter
 - `logs_tab.py`: Application log viewer
-- `settings_tab.py`: Organization template and settings configuration
-- `database_tab.py`: Database selection, creation, and metadata management
 - **`date_corrections_tab.py`** (NEW in v2.2): Date correction interface
   - Grid view with sortable columns and filtering
   - Image preview panel
@@ -556,7 +572,7 @@ Existing databases are automatically migrated when opened:
 ```
 
 **Integration Points**:
-1. **Settings Tab** (`ui/settings_tab.py`):
+1. **Archive Settings Tab** (`ui/archive_settings_tab.py`):
    - Checkbox to enable/disable feature
    - Template input with live preview
    - Validation feedback
@@ -664,7 +680,7 @@ CREATE TABLE FileRenameHistory (
 ```
 
 **Integration Points**:
-1. **Settings Tab** (`ui/settings_tab.py`):
+1. **Archive Settings Tab** (`ui/archive_settings_tab.py`):
    - Preset dropdown with common templates
    - Custom template editor with quick-insert buttons
    - Live preview showing example folder paths
@@ -1202,7 +1218,7 @@ self.on_selection_changed()
 
 **Files Implementing This Pattern:**
 - `ui/date_corrections_tab.py`: QTableWidgetItem checkboxes (lines 283-742)
-- `ui/setup_tab.py`: QCheckBox widgets (lines 42-629)
+- `ui/import_settings_tab.py`: QCheckBox widgets (source folder enable/disable checkboxes)
 - `ui/date_correction_dialog.py`: Dialog centering (lines 481-500)
 
 ### File Type Verification
@@ -1838,7 +1854,7 @@ CREATE INDEX idx_dupmap_duplicate_path ON DuplicateMapping(duplicate_source_path
 
 - Auto-refresh on tab display
 
-**Settings Tab** (retention settings):
+**System Settings Tab** (retention settings):
 - Retention mode: Keep All, Keep Last N Sessions, Keep Last N Days
 - Session/days count spinner
 - Auto-cleanup on startup checkbox
