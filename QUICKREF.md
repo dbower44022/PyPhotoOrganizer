@@ -31,9 +31,9 @@ python main_gui.py
 ```
 
 **Workflow:**
-1. **Setup Tab** → Add source folders → Select destination
-2. **Settings Tab** (optional) → Adjust configuration
-3. **Setup Tab** → Click "Start Processing"
+1. **Import Settings Tab** → Add source folders → Configure filtering → Click "Start Processing"
+2. **Archive Settings Tab** (optional) → Configure organization template → Set file renaming
+3. **System Settings Tab** (optional) → Select Copy/Move mode → Adjust performance
 4. **Progress Tab** → Monitor real-time progress
 5. **Results Tab** → View statistics and export
 
@@ -459,15 +459,25 @@ Everything else uses defaults from `constants.py`.
 - **Auto-scroll**: Follow latest logs
 - **Refresh**: Reload from log files
 
-### Settings Tab
-- **Load/Save**: Manage settings.json
-- **Restore Defaults**: Reset to defaults
-- **File Renaming**: Template-based filename customization
-- **Retention Settings**: Audit history cleanup
+### Import Settings Tab (v2.4+)
+- **Source Folders**: Add/remove/enable/disable source directories
+- **Ignored Directories**: Configure wildcard patterns
+- **Photo Filtering**: Size, dimensions, EXIF requirements
+- **Filename Patterns**: Exclude specific filename patterns
+- **Start/Stop**: Processing control buttons
 
-### Database Tab
-- **Metadata**: View name, archive location, statistics
-- **Change Database**: Switch to different database
+### Archive Settings Tab (v2.4+)
+- **Organization Template**: Configure folder structure
+- **File Type Organization**: Combined/subfolder/separate for videos
+- **File Renaming**: Template-based filename customization with live preview
+
+### System Settings Tab (v2.4+)
+- **Database Info**: View name, archive location, statistics
+- **Operation Mode**: Copy vs Move selection
+- **Performance**: Partial hash configuration
+- **Thumbnail Cache**: Memory size and worker threads
+- **Retention Settings**: Import history cleanup
+- **Settings Management**: Load/Save/Restore/Validate
 
 ### Date Corrections Tab (v2.2+)
 - **Filter**: By flag reason (no_exif, suspicious, etc.)

@@ -898,16 +898,22 @@ Uses **Exponential Moving Average** (EMA):
 ```
 ui/
 ├── __init__.py
-├── main_window.py    (212 lines) - Main application
-├── setup_tab.py      (161 lines) - Folder selection
-├── progress_tab.py   (246 lines) - Progress visualization
-├── results_tab.py    (192 lines) - Results display
-├── logs_tab.py       (192 lines) - Log viewer
-├── settings_tab.py   (301 lines) - Settings editor
-└── worker.py         (186 lines) - Background processing
+├── main_window.py              (490 lines) - Main application window
+├── import_settings_tab.py      (850 lines) - Source folders, filtering, Start/Stop (v2.4)
+├── archive_settings_tab.py     (900 lines) - Organization, file types, renaming (v2.4)
+├── system_settings_tab.py      (700 lines) - Database, operation mode, performance (v2.4)
+├── progress_tab.py             (246 lines) - Progress visualization
+├── results_tab.py              (192 lines) - Results display
+├── filtered_files_tab.py       (450 lines) - Filtered files review
+├── logs_tab.py                 (571 lines) - Advanced log viewer
+├── date_corrections_tab.py     (750 lines) - Unreliable date correction (v2.2)
+├── import_history_tab.py       (850 lines) - Import session history (v2.3)
+├── database_selector_dialog.py (350 lines) - Database selection dialog
+├── create_database_dialog.py   (280 lines) - Database creation wizard
+└── worker.py                   (400 lines) - Background processing thread
 ```
 
-**Total**: ~2,500+ lines of GUI code, fully isolated from business logic.
+**Total**: ~7,000+ lines of GUI code, fully isolated from business logic.
 
 ---
 
