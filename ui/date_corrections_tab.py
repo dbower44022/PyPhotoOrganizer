@@ -9,10 +9,10 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QGroupBox, QCheckBox, QMessageBox,
                                QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
                                QLineEdit, QApplication, QComboBox, QDialog,
-                               QTextBrowser)
+                               QTextBrowser, QAbstractItemView, QProgressDialog)
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QTimer
 from PySide6.QtGui import QPixmap, QImage, QPainter, QPen, QColor
-from PIL import Image
+from PIL import Image, ImageOps
 import os
 import logging
 from typing import List, Dict, Any, Optional
@@ -318,6 +318,11 @@ class ZoomableImageViewer(QGraphicsView):
             # Load image with PIL (handles various formats)
             pil_img = Image.open(file_path)
 
+            # Apply EXIF orientation tag to display image correctly
+            # Many cameras/phones save images in a default orientation and use EXIF
+            # orientation tag to indicate how the image should be displayed
+            pil_img = ImageOps.exif_transpose(pil_img)
+
             # Convert to RGB if necessary
             if pil_img.mode != 'RGB':
                 pil_img = pil_img.convert('RGB')
@@ -590,6 +595,16 @@ class DateCorrectionsTab(QWidget):
         self.batch_correct_btn.clicked.connect(self.on_batch_correct)
         selection_layout.addWidget(self.batch_correct_btn)
 
+        self.rotate_btn = QPushButton("Rotate Selected...")
+        self.rotate_btn.clicked.connect(self.on_rotate_selected)
+        self.rotate_btn.setEnabled(False)
+        selection_layout.addWidget(self.rotate_btn)
+
+        self.delete_btn = QPushButton("Delete Selected...")
+        self.delete_btn.clicked.connect(self.on_delete_selected)
+        self.delete_btn.setEnabled(False)
+        selection_layout.addWidget(self.delete_btn)
+
         selection_layout.addStretch()
         layout.addLayout(selection_layout)
 
@@ -599,6 +614,10 @@ class DateCorrectionsTab(QWidget):
         self.manage_paths_btn = QPushButton("Manage Unreliable Paths...")
         self.manage_paths_btn.clicked.connect(self.on_manage_paths)
         button_layout.addWidget(self.manage_paths_btn)
+
+        self.view_deleted_btn = QPushButton("View Deleted Files...")
+        self.view_deleted_btn.clicked.connect(self.on_view_deleted_files)
+        button_layout.addWidget(self.view_deleted_btn)
 
         self.reorganize_btn = QPushButton("Reorganize All Marked")
         self.reorganize_btn.clicked.connect(self.on_reorganize_all)
@@ -663,6 +682,9 @@ class DateCorrectionsTab(QWidget):
             self.grid_view.correct_date_requested.connect(self.on_batch_correct)
             self.grid_view.reorganize_corrected_requested.connect(self.on_reorganize_all)
             self.grid_view.deselect_all_requested.connect(self.deselect_all)
+            self.grid_view.rotate_requested.connect(self.on_rotate_selected)
+            self.grid_view.delete_requested.connect(self.on_delete_selected)
+            self.grid_view.refresh_thumbnail_requested.connect(self.on_refresh_thumbnail)
 
             # Replace placeholder with grid view
             layout = self.layout()
@@ -915,11 +937,17 @@ class DateCorrectionsTab(QWidget):
 
     def on_grid_selection_changed(self, selected_hashes):
         """
-        Handle grid selection change - update preview window.
+        Handle grid selection change - update preview window and button states.
 
         Args:
             selected_hashes: List of selected file hashes
         """
+        has_selection = len(selected_hashes) > 0
+
+        # Enable/disable action buttons based on selection
+        self.rotate_btn.setEnabled(has_selection)
+        self.delete_btn.setEnabled(has_selection)
+
         if self.preview_window and selected_hashes:
             # Update preview with first selected item
             record = self.grid_model.get_record_by_hash(selected_hashes[0])
@@ -1160,6 +1188,211 @@ class DateCorrectionsTab(QWidget):
 
             # Refresh display
             self.refresh_data()
+
+    def on_rotate_selected(self):
+        """Handle rotation of selected images."""
+        selected_records = self.get_selected_records()
+
+        if not selected_records:
+            QMessageBox.warning(self, "No Selection",
+                              "Please select one or more files to rotate.")
+            return
+
+        # Validate all files have archive paths
+        missing_archive = [r for r in selected_records if not r.get('archive_path')]
+        if missing_archive:
+            QMessageBox.warning(self, "Invalid Selection",
+                              f"{len(missing_archive)} file(s) have no archive path.")
+            return
+
+        # Store original hashes to invalidate thumbnails after rotation
+        original_hashes = [r.get('file_hash') for r in selected_records if r.get('file_hash')]
+
+        # CRITICAL: Store first selected item's file_hash to restore scroll position after refresh
+        # After rotation, hash changes, so we need to store the archive_path instead
+        first_selected_path = selected_records[0].get('archive_path') if selected_records else None
+
+        # Open rotation dialog
+        from ui.rotate_image_dialog import RotateImageDialog
+        dialog = RotateImageDialog(self, selected_records, self.db_metadata, logger)
+        self._center_dialog(dialog)
+
+        if dialog.exec():
+            # Invalidate old thumbnail cache entries (hash changed after rotation)
+            if self.thumbnail_cache:
+                for old_hash in original_hashes:
+                    self.thumbnail_cache.invalidate_hash(old_hash)
+                logger.info(f"Invalidated {len(original_hashes)} old thumbnail cache entries")
+
+            # Refresh data
+            self.refresh_data()
+
+            # Restore scroll position to show rotated item
+            if first_selected_path and self.grid_view and self.grid_model:
+                # Find the item by archive_path (path doesn't change, only hash changes)
+                for row in range(self.grid_model.rowCount()):
+                    record = self.grid_model.get_record(row)
+                    if record and record.get('archive_path') == first_selected_path:
+                        # Scroll to this item and select it
+                        index = self.grid_model.index(row, 0)
+                        self.grid_view.scrollTo(index, QAbstractItemView.PositionAtCenter)
+                        self.grid_view.setCurrentIndex(index)
+                        logger.info(f"Restored scroll position to row {row} after rotation")
+                        break
+
+    def on_delete_selected(self):
+        """Handle deletion of selected images to Delete Vault."""
+        selected_records = self.get_selected_records()
+
+        if not selected_records:
+            QMessageBox.warning(self, "No Selection",
+                              "Please select one or more files to delete.")
+            return
+
+        # Check Delete Vault is configured
+        delete_vault = self.db_metadata.get_delete_vault_location()
+        if not delete_vault or not os.path.exists(delete_vault):
+            QMessageBox.critical(self, "Delete Vault Not Configured",
+                               "Please configure the Delete Vault location in System Settings.")
+            return
+
+        # Confirmation dialog with risk assessment
+        count = len(selected_records)
+        reply = QMessageBox.question(
+            self, "Confirm Deletion",
+            f"Delete {count} file(s) to Delete Vault?\n\n"
+            f"Files will be moved to: {delete_vault}\n"
+            f"You can restore them later from the Deleted Files dialog.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Create and start deletion worker
+        from ui.delete_worker import DeleteWorker
+
+        self.delete_worker = DeleteWorker(
+            selected_records,
+            delete_vault,
+            self.db_metadata.database_path,
+            logger
+        )
+
+        # Show progress dialog
+        progress_dialog = QProgressDialog(
+            "Deleting files...", "Cancel", 0, count, self
+        )
+        progress_dialog.setWindowModality(Qt.WindowModal)
+        progress_dialog.setMinimumDuration(0)
+
+        self.delete_worker.progress.connect(
+            lambda cur, total, fname: progress_dialog.setValue(cur)
+        )
+        self.delete_worker.finished.connect(
+            lambda results: self._on_delete_finished(results, progress_dialog)
+        )
+
+        self.delete_worker.start()
+
+    def _on_delete_finished(self, results, progress_dialog):
+        """Handle deletion completion."""
+        progress_dialog.close()
+
+        success_count = results.get('success', 0)
+        errors = results.get('errors', [])
+
+        if errors:
+            error_msg = "\n".join([f"- {e}" for e in errors[:10]])
+            QMessageBox.warning(
+                self, "Deletion Complete with Errors",
+                f"Successfully deleted: {success_count}\n"
+                f"Failed: {len(errors)}\n\n"
+                f"First errors:\n{error_msg}"
+            )
+
+        self.refresh_data()
+
+    def on_view_deleted_files(self):
+        """Open dialog to view and restore deleted files."""
+        # Check Delete Vault is configured
+        delete_vault = self.db_metadata.get_delete_vault_location()
+        if not delete_vault:
+            QMessageBox.information(
+                self, "No Delete Vault",
+                "Delete Vault is not configured. No files have been deleted yet."
+            )
+            return
+
+        from ui.deleted_files_dialog import DeletedFilesDialog
+        dialog = DeletedFilesDialog(self, self.db_metadata, logger)
+        self._center_dialog(dialog)
+        dialog.exec()
+
+        # Refresh in case files were restored
+        self.refresh_data()
+
+    def on_refresh_thumbnail(self):
+        """Manually refresh thumbnails for selected images."""
+        selected_records = self.get_selected_records()
+
+        if not selected_records:
+            QMessageBox.warning(self, "No Selection",
+                              "Please select one or more files to refresh thumbnails.")
+            return
+
+        if not self.thumbnail_cache:
+            QMessageBox.warning(self, "Cache Not Available",
+                              "Thumbnail cache is not initialized.")
+            return
+
+        try:
+            # Store first selected item's hash to restore scroll position after refresh
+            first_selected_hash = selected_records[0].get('file_hash') if selected_records else None
+
+            # Invalidate cache entries for all selected files
+            invalidated_count = 0
+            for record in selected_records:
+                file_hash = record.get('file_hash')
+                if file_hash:
+                    self.thumbnail_cache.invalidate_hash(file_hash)
+                    invalidated_count += 1
+
+            logger.info(f"Invalidated {invalidated_count} thumbnail cache entries")
+
+            # Force grid to refresh - this will trigger regeneration of thumbnails
+            if self.grid_model:
+                # Use beginResetModel/endResetModel to force complete view refresh
+                self.grid_model.beginResetModel()
+                self.grid_model.endResetModel()
+
+            # Restore scroll position to show refreshed item
+            if first_selected_hash and self.grid_view and self.grid_model:
+                # Find the item by file_hash (hash doesn't change for refresh)
+                for row in range(self.grid_model.rowCount()):
+                    record = self.grid_model.get_record(row)
+                    if record and record.get('file_hash') == first_selected_hash:
+                        # Scroll to this item and select it
+                        index = self.grid_model.index(row, 0)
+                        self.grid_view.scrollTo(index, QAbstractItemView.PositionAtCenter)
+                        self.grid_view.setCurrentIndex(index)
+                        logger.info(f"Restored scroll position to row {row} after thumbnail refresh")
+                        break
+
+            # Show confirmation
+            QMessageBox.information(
+                self, "Thumbnails Refreshed",
+                f"Invalidated {invalidated_count} thumbnail(s).\n"
+                f"Thumbnails will be regenerated in the background."
+            )
+
+        except Exception as e:
+            logger.error(f"Error refreshing thumbnails: {e}", exc_info=True)
+            QMessageBox.critical(
+                self, "Refresh Failed",
+                f"Failed to refresh thumbnails: {str(e)}"
+            )
 
     def _update_status_label(self):
         """Update the status label with total and selected counts."""

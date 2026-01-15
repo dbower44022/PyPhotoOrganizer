@@ -87,6 +87,9 @@ class ThumbnailCache(QObject):
         self.disk_size_bytes = disk_size_gb * 1024 * 1024 * 1024
         self.triage_db = TriageDatabase(db_path)
 
+        # Ensure triage tables exist and are up-to-date
+        self.triage_db.ensure_triage_tables()
+
         # L3: Background thumbnail generation
         self.thread_pool = QThreadPool.globalInstance()
         self.thread_pool.setMaxThreadCount(worker_threads)
@@ -410,6 +413,30 @@ class ThumbnailCache(QObject):
         count = len(self.memory_cache)
         self.memory_cache.clear()
         logger.info(f"Cleared {count} thumbnails from memory cache")
+
+    def invalidate_hash(self, file_hash: str):
+        """
+        Invalidate all cached thumbnails for a specific file hash.
+
+        Used when file is modified (rotated, edited) and hash changes.
+        Removes thumbnails from both memory and disk cache.
+
+        Args:
+            file_hash: SHA-256 hash to invalidate
+        """
+        # Remove from memory cache (all sizes)
+        memory_removed = 0
+        keys_to_remove = [key for key in self.memory_cache.keys() if key.startswith(f"{file_hash}_")]
+        for key in keys_to_remove:
+            del self.memory_cache[key]
+            memory_removed += 1
+
+        # Remove from disk cache database and files
+        disk_removed = self.triage_db.delete_thumbnails_for_hash(file_hash)
+
+        if memory_removed > 0 or disk_removed > 0:
+            logger.info(f"Invalidated thumbnails for hash {file_hash[:8]}... "
+                       f"(memory: {memory_removed}, disk: {disk_removed})")
 
     def cancel_all_generation(self):
         """

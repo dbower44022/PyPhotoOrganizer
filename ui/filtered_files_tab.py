@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap, QImage
 import os
 from pathlib import Path
-from PIL import Image
+from PIL import Image, ImageOps
 import subprocess
 
 
@@ -387,6 +387,9 @@ class FilteredFilesTab(QWidget):
         try:
             # Try to load image with PIL
             img = Image.open(file_path)
+
+            # Apply EXIF orientation tag to display image correctly
+            img = ImageOps.exif_transpose(img)
 
             # Convert to RGB if necessary
             if img.mode != 'RGB':

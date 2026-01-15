@@ -26,6 +26,7 @@ class DatabaseMetadata:
             description TEXT,
             archive_location TEXT NOT NULL,
             video_archive_location TEXT,
+            prior_revision_archive_location TEXT,
             separate_video_archive INTEGER DEFAULT 0,
             created_date TEXT NOT NULL,
             last_used_date TEXT,
@@ -68,7 +69,7 @@ class DatabaseMetadata:
             corrected_date TEXT,
             correction_timestamp TEXT,
             needs_reorganization INTEGER DEFAULT 0,
-            FOREIGN KEY (file_hash) REFERENCES UniquePhotos(hash)
+            FOREIGN KEY (file_hash) REFERENCES UniquePhotos(file_hash)
         );
     """
 
@@ -96,6 +97,23 @@ class DatabaseMetadata:
         );
     """
 
+    DELETED_FILES_TABLE_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS DeletedFiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_hash TEXT NOT NULL,
+            original_archive_path TEXT NOT NULL,
+            delete_vault_path TEXT NOT NULL,
+            deletion_timestamp TEXT NOT NULL,
+            deletion_reason TEXT,
+            deleted_by_session TEXT,
+            file_size INTEGER,
+            creation_date TEXT,
+            is_restored INTEGER DEFAULT 0,
+            restore_timestamp TEXT,
+            FOREIGN KEY (file_hash) REFERENCES UniquePhotos(file_hash)
+        );
+    """
+
     def __init__(self, database_path: str):
         """
         Initialize database metadata manager.
@@ -109,6 +127,7 @@ class DatabaseMetadata:
         self._ensure_unreliable_dates_table()
         self._ensure_file_rename_history_table()
         self._ensure_thumbnail_cache_table()
+        self._ensure_deleted_files_table()
 
     def _get_connection(self) -> sqlite3.Connection:
         """
@@ -139,6 +158,11 @@ class DatabaseMetadata:
                 if 'video_archive_location' not in columns:
                     logger.info("Upgrading database: adding video_archive_location column")
                     cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN video_archive_location TEXT")
+
+                # Add prior_revision_archive_location column if missing
+                if 'prior_revision_archive_location' not in columns:
+                    logger.info("Upgrading database: adding prior_revision_archive_location column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN prior_revision_archive_location TEXT")
 
                 # Add separate_video_archive column if missing
                 if 'separate_video_archive' not in columns:
@@ -211,6 +235,11 @@ class DatabaseMetadata:
                     logger.info("Upgrading database: adding cache_worker_threads column")
                     cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN cache_worker_threads INTEGER DEFAULT 8")
 
+                # Add delete_vault_location column if missing
+                if 'delete_vault_location' not in columns:
+                    logger.info("Upgrading database: adding delete_vault_location column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN delete_vault_location TEXT")
+
                 conn.commit()
                 logger.debug(f"Metadata table ensured in {self.database_path}")
 
@@ -251,6 +280,10 @@ class DatabaseMetadata:
                 if 'original_archive_path' not in columns:
                     logger.info("Upgrading database: adding original_archive_path column to UnreliableDates")
                     cursor.execute("ALTER TABLE UnreliableDates ADD COLUMN original_archive_path TEXT")
+
+                # Create indexes for performance
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_unreliable_hash ON UnreliableDates(file_hash)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_unreliable_needs_reorg ON UnreliableDates(needs_reorganization)")
 
                 conn.commit()
                 logger.debug(f"UnreliableDates table ensured in {self.database_path}")
@@ -310,6 +343,27 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to create ThumbnailCache table: {e}")
+            raise
+
+    def _ensure_deleted_files_table(self):
+        """Ensure the DeletedFiles table exists in the database."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Create table if it doesn't exist
+                cursor.execute(self.DELETED_FILES_TABLE_SCHEMA)
+
+                # Create indexes for performance
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_deleted_hash ON DeletedFiles(file_hash)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_deleted_restored ON DeletedFiles(is_restored)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_deleted_timestamp ON DeletedFiles(deletion_timestamp)")
+
+                conn.commit()
+                logger.debug(f"DeletedFiles table ensured in {self.database_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to create DeletedFiles table: {e}")
             raise
 
     def ensure_all_tables(self):
@@ -395,7 +449,7 @@ class DatabaseMetadata:
                            separate_video_archive, created_date, last_used_date, schema_version, total_photos,
                            organization_template, file_type_organization, enable_file_rename, filename_template,
                            thumbnail_size, thumbnail_cache_dir, preview_window_geometry, preview_window_visible,
-                           cache_memory_mb, cache_worker_threads
+                           cache_memory_mb, cache_worker_threads, prior_revision_archive_location
                     FROM DatabaseMetadata WHERE id = 1
                 """)
 
@@ -420,7 +474,8 @@ class DatabaseMetadata:
                         'preview_window_geometry': row[15] if len(row) > 15 else None,
                         'preview_window_visible': row[16] if len(row) > 16 else 1,
                         'cache_memory_mb': row[17] if len(row) > 17 else 500,
-                        'cache_worker_threads': row[18] if len(row) > 18 else 8
+                        'cache_worker_threads': row[18] if len(row) > 18 else 8,
+                        'prior_revision_archive_location': row[19] if len(row) > 19 else None
                     }
                 return None
 
@@ -494,6 +549,84 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to set video archive: {e}")
+            return False
+
+    def get_prior_revision_archive_location(self) -> Optional[str]:
+        """
+        Get the Prior Revision Archive location.
+
+        The Prior Revision Archive stores files that have been superseded by revisions
+        (e.g., original photos before rotation). This keeps the main archive clean
+        with only current revisions while preserving full history.
+
+        Returns:
+            str: Path to prior revision archive, or None if not configured
+        """
+        try:
+            metadata = self.get_metadata()
+            if metadata and 'prior_revision_archive_location' in metadata:
+                location = metadata['prior_revision_archive_location']
+                return location if location else None
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get prior revision archive location: {e}")
+            return None
+
+    def set_prior_revision_archive_location(self, path: str) -> bool:
+        """
+        Set the Prior Revision Archive location.
+
+        Args:
+            path: Path to prior revision archive directory
+
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Validate path exists and is writable
+            if not path:
+                # Allow clearing the location
+                with self._get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        UPDATE DatabaseMetadata
+                        SET prior_revision_archive_location = NULL
+                        WHERE id = 1
+                    """)
+                    conn.commit()
+                logger.info("Prior revision archive location cleared")
+                return True
+
+            if not os.path.exists(path):
+                raise ValueError(f"Path does not exist: {path}")
+            if not os.path.isdir(path):
+                raise ValueError(f"Path is not a directory: {path}")
+            if not os.access(path, os.W_OK):
+                raise ValueError(f"Path is not writable: {path}")
+
+            # Check it's not the same as main archive
+            archive_base = self.get_archive_location()
+            if archive_base and os.path.realpath(path) == os.path.realpath(archive_base):
+                raise ValueError("Prior Revision Archive cannot be the same as main archive")
+
+            # Check it's not inside main archive
+            if archive_base and os.path.realpath(path).startswith(os.path.realpath(archive_base) + os.sep):
+                raise ValueError("Prior Revision Archive cannot be inside main archive")
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET prior_revision_archive_location = ?
+                    WHERE id = 1
+                """, (path,))
+                conn.commit()
+
+            logger.info(f"Prior revision archive location set: {path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to set prior revision archive location: {e}")
             return False
 
     def update_last_used(self):
@@ -1879,6 +2012,329 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to remove ignored directory: {e}")
+            return False
+
+    def sync_versions_to_hash_history(self):
+        """
+        One-time sync: Add all existing FileVersions hashes to FileHashHistory.
+        Called automatically on first access after migration.
+        Safe to run multiple times (uses INSERT OR IGNORE).
+
+        Returns:
+            int: Number of version hashes synced
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            # Check if sync needed (if FileVersions has records but some aren't in history)
+            cursor.execute("""
+                SELECT COUNT(*) FROM FileVersions v
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM FileHashHistory h
+                    WHERE h.historical_hash = v.file_hash
+                )
+            """)
+
+            missing_count = cursor.fetchone()[0]
+
+            if missing_count == 0:
+                logger.info("All version hashes already in FileHashHistory")
+                conn.close()
+                return 0
+
+            logger.info(f"Syncing {missing_count} version hashes to FileHashHistory...")
+
+            # Insert missing version hashes
+            cursor.execute("""
+                INSERT OR IGNORE INTO FileHashHistory
+                    (current_file_hash, historical_hash, created_date, reason)
+                SELECT
+                    v.original_hash,
+                    v.file_hash,
+                    v.created_timestamp,
+                    'sync_' || COALESCE(v.modification_type, 'version')
+                FROM FileVersions v
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM FileHashHistory h
+                    WHERE h.historical_hash = v.file_hash
+                )
+            """)
+
+            synced = cursor.rowcount
+            conn.commit()
+            conn.close()
+
+            logger.info(f"✓ Synced {synced} version hashes to FileHashHistory")
+            return synced
+
+        except Exception as e:
+            logger.error(f"Failed to sync versions to hash history: {e}")
+            return 0
+
+    # ========== Deletion Tracking Methods ==========
+
+    def get_delete_vault_location(self) -> str:
+        """
+        Get the configured Delete Vault location.
+
+        Returns:
+            str: Path to Delete Vault, or None if not configured
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT delete_vault_location
+                FROM DatabaseMetadata
+                WHERE id = 1
+            """)
+
+            result = cursor.fetchone()
+            conn.close()
+
+            vault_path = result[0] if result and result[0] else None
+            if vault_path:
+                logger.debug(f"ℹ Delete Vault location retrieved: {vault_path}")
+            else:
+                logger.debug("ℹ Delete Vault location not configured")
+
+            return vault_path
+
+        except Exception as e:
+            logger.error(f"✗ Failed to get Delete Vault location from database: {e}", exc_info=True)
+            logger.error(f"  Database path: {self.database_path}")
+            return None
+
+    def set_delete_vault_location(self, path: str) -> bool:
+        """
+        Save the Delete Vault location to database.
+        Validates that the directory exists.
+
+        Args:
+            path: Path to Delete Vault directory
+
+        Returns:
+            bool: True if saved successfully, False otherwise
+        """
+        logger.info(f"{'='*80}")
+        logger.info(f"SETTING DELETE VAULT LOCATION")
+        logger.info(f"  Path: {path}")
+        logger.info(f"  Database: {self.database_path}")
+        logger.info(f"{'-'*60}")
+
+        try:
+            # Validate path exists
+            if not os.path.exists(path):
+                logger.error(f"✗ Delete Vault path does not exist: {path}")
+                logger.error(f"  Validation failed: Directory not found")
+                return False
+
+            if not os.path.isdir(path):
+                logger.error(f"✗ Delete Vault path is not a directory: {path}")
+                logger.error(f"  Validation failed: Path is not a directory")
+                return False
+
+            # Check if writable
+            if not os.access(path, os.W_OK):
+                logger.error(f"✗ Delete Vault path is not writable: {path}")
+                logger.error(f"  Validation failed: Permission denied")
+                return False
+
+            logger.info(f"  ✓ Path validation passed")
+
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            logger.info(f"  Updating DatabaseMetadata table...")
+
+            cursor.execute("""
+                UPDATE DatabaseMetadata
+                SET delete_vault_location = ?
+                WHERE id = 1
+            """, (path,))
+
+            rows_affected = cursor.rowcount
+            logger.info(f"  Rows updated: {rows_affected}")
+
+            conn.commit()
+            conn.close()
+
+            logger.info(f"✓ Delete Vault location saved successfully")
+            logger.info(f"  Location: {path}")
+            logger.info(f"{'='*80}")
+            return True
+
+        except Exception as e:
+            logger.error(f"{'='*80}")
+            logger.error(f"✗ FAILED TO SET DELETE VAULT LOCATION")
+            logger.error(f"  Path: {path}")
+            logger.error(f"  Database: {self.database_path}")
+            logger.error(f"  Error: {e}", exc_info=True)
+            logger.error(f"{'='*80}")
+            return False
+
+    def get_deleted_files(self, include_restored=False) -> List[Dict]:
+        """
+        Query all deleted files from DeletedFiles table.
+
+        Args:
+            include_restored: If True, include restored files. If False, only show non-restored.
+
+        Returns:
+            List of dictionaries with deleted file records
+        """
+        try:
+            conn = self._get_connection()
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            if include_restored:
+                cursor.execute("""
+                    SELECT * FROM DeletedFiles
+                    ORDER BY deletion_timestamp DESC
+                """)
+            else:
+                cursor.execute("""
+                    SELECT * FROM DeletedFiles
+                    WHERE is_restored = 0
+                    ORDER BY deletion_timestamp DESC
+                """)
+
+            results = [dict(row) for row in cursor.fetchall()]
+            conn.close()
+
+            return results
+
+        except Exception as e:
+            logger.error(f"Failed to get deleted files: {e}")
+            return []
+
+    def mark_file_as_deleted(self, file_hash: str, original_path: str,
+                           vault_path: str, reason: str) -> bool:
+        """
+        Insert a record into DeletedFiles table.
+
+        Args:
+            file_hash: SHA-256 hash of the file
+            original_path: Original archive path before deletion
+            vault_path: Path in Delete Vault
+            reason: Deletion reason ('user_deleted', 'batch_deleted', etc.)
+
+        Returns:
+            bool: True if inserted successfully, False otherwise
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            # Get file info from UniquePhotos if available
+            cursor.execute("""
+                SELECT file_size, create_year, create_month, create_day
+                FROM UniquePhotos
+                WHERE file_hash = ?
+            """, (file_hash,))
+
+            photo_info = cursor.fetchone()
+            file_size = photo_info[0] if photo_info else None
+            creation_date = None
+            if photo_info and photo_info[1] and photo_info[2] and photo_info[3]:
+                # Convert month/day to int for formatting (they're stored as TEXT in database)
+                creation_date = f"{photo_info[1]}-{int(photo_info[2]):02d}-{int(photo_info[3]):02d}"
+
+            # Insert deletion record
+            now = datetime.now().isoformat()
+            cursor.execute("""
+                INSERT INTO DeletedFiles
+                    (file_hash, original_archive_path, delete_vault_path,
+                     deletion_timestamp, deletion_reason, file_size, creation_date,
+                     is_restored)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+            """, (file_hash, original_path, vault_path, now, reason, file_size, creation_date))
+
+            conn.commit()
+            conn.close()
+
+            logger.info(f"✓ Marked file as deleted: {os.path.basename(original_path)}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to mark file as deleted: {e}", exc_info=True)
+            return False
+
+    def mark_file_as_restored(self, file_hash: str) -> bool:
+        """
+        Mark a deleted file as restored.
+        Sets is_restored=1 and updates restore_timestamp.
+
+        Args:
+            file_hash: SHA-256 hash of the file
+
+        Returns:
+            bool: True if updated successfully, False otherwise
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            now = datetime.now().isoformat()
+            cursor.execute("""
+                UPDATE DeletedFiles
+                SET is_restored = 1,
+                    restore_timestamp = ?
+                WHERE file_hash = ?
+                  AND is_restored = 0
+            """, (now, file_hash))
+
+            updated_count = cursor.rowcount
+            conn.commit()
+            conn.close()
+
+            if updated_count > 0:
+                logger.info(f"✓ Marked file as restored: {file_hash[:16]}...")
+                return True
+            else:
+                logger.warning(f"No non-restored deletion record found for hash: {file_hash[:16]}...")
+                return False
+
+        except Exception as e:
+            logger.error(f"Failed to mark file as restored: {e}")
+            return False
+
+    def delete_deleted_file_record(self, file_hash: str) -> bool:
+        """
+        Permanently delete a record from DeletedFiles table.
+        Used when permanently deleting files from Delete Vault.
+
+        Args:
+            file_hash: SHA-256 hash of the file
+
+        Returns:
+            bool: True if deleted successfully, False otherwise
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                DELETE FROM DeletedFiles
+                WHERE file_hash = ?
+            """, (file_hash,))
+
+            deleted_count = cursor.rowcount
+            conn.commit()
+            conn.close()
+
+            if deleted_count > 0:
+                logger.info(f"✓ Deleted record from DeletedFiles: {file_hash[:16]}...")
+                return True
+            else:
+                logger.warning(f"No deletion record found for hash: {file_hash[:16]}...")
+                return False
+
+        except Exception as e:
+            logger.error(f"Failed to delete DeletedFiles record: {e}")
             return False
 
     # ========== Static Methods ==========

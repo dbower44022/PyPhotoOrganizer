@@ -164,3 +164,9 @@ PhotoDB_FullTestArchiveDB.db
 # SQLite temporary files
 *.db-shm
 *.db-wal
+
+DuplicateFileDetection_app_error.log.1
+
+DuplicateFileDetection_app_error.log.2
+
+DuplicateFileDetection_app_error.log.3

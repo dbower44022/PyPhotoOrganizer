@@ -222,17 +222,15 @@ def verify_exif_write(file_path, expected_year, expected_month, expected_day):
 
 def update_file_hash_after_modification(database_path, old_hash, file_path, reason='exif_edit'):
     """
-    Recalculate file hash after modification (e.g., EXIF write) and update database.
+    Recalculate file hash after EXIF modification and create revision record (Schema v5).
 
     This function:
     1. Calculates the new hash of the modified file
-    2. Adds the new hash to FileHashHistory
-    3. Updates UniquePhotos.file_hash to the new value
-    4. Updates related tables (UnreliableDates)
+    2. Creates a new revision record in UniquePhotos with revised_photo=old_hash
+    3. Updates related tables (UnreliableDates)
 
-    The old hash is preserved in FileHashHistory for duplicate detection.
-    A file processed before EXIF modification will still be detected as a duplicate
-    after modification because we check all historical hashes.
+    The original file becomes the parent, and the EXIF-modified file becomes a revision.
+    Duplicate detection works automatically via primary key lookup in UniquePhotos.
 
     Args:
         database_path: Path to the database file
@@ -245,7 +243,7 @@ def update_file_hash_after_modification(database_path, old_hash, file_path, reas
     """
     try:
         # Import here to avoid circular imports
-        from DuplicateFileDetection import hash_file, PhotoDatabase
+        from DuplicateFileDetection import hash_file, hash_file_partial, PhotoDatabase
 
         # Verify file exists
         if not os.path.exists(file_path):
@@ -259,19 +257,68 @@ def update_file_hash_after_modification(database_path, old_hash, file_path, reas
             logger.info(f"Hash unchanged after modification: {file_path}")
             return old_hash
 
-        # Update database
-        with PhotoDatabase(database_path) as db:
-            success = db.add_hash_to_history(old_hash, new_hash, reason)
+        logger.info(f"Hash changed after EXIF modification: {old_hash[:16]}... -> {new_hash[:16]}...")
 
-            if success:
-                logger.info(f"✓ Hash history updated: {old_hash[:16]}... -> {new_hash[:16]}... (reason: {reason})")
-                return new_hash
-            else:
-                logger.error(f"✗ Failed to update hash history for {file_path}")
+        # Get original file metadata from database
+        with PhotoDatabase(database_path) as db:
+            cursor = db.get_cursor()
+            cursor.execute("""
+                SELECT create_datetime, create_year, create_month, create_day, file_size
+                FROM UniquePhotos
+                WHERE file_hash = ?
+            """, (old_hash,))
+
+            result = cursor.fetchone()
+            if not result:
+                logger.error(f"Original file not found in database: {old_hash[:16]}...")
                 return None
 
+            create_datetime, create_year, create_month, create_day, _ = result
+
+            # Calculate new file size and partial hash
+            file_size = os.path.getsize(file_path)
+            partial_hash = None
+            partial_hash_bytes = None
+            if file_size >= 1048576:  # 1MB threshold
+                partial_hash_bytes = 16384
+                partial_hash = hash_file_partial(file_path, partial_hash_bytes)
+
+            # Create revision record (new file with revised_photo=old_hash)
+            success = db.create_revision(
+                new_file_hash=new_hash,
+                parent_hash=old_hash,
+                revision_reason=reason,
+                file_path=file_path,
+                file_size=file_size,
+                create_datetime=create_datetime,
+                create_year=create_year,
+                create_month=create_month,
+                create_day=create_day,
+                partial_hash=partial_hash,
+                partial_hash_bytes=partial_hash_bytes
+            )
+
+            if not success:
+                logger.error(f"✗ Failed to create revision record for {file_path}")
+                return None
+
+            logger.info(f"✓ Created revision record: {new_hash[:16]}... (parent: {old_hash[:16]}..., reason: {reason})")
+
+            # Update UnreliableDates table with new hash
+            cursor.execute("""
+                UPDATE UnreliableDates
+                SET file_hash = ?
+                WHERE file_hash = ?
+            """, (new_hash, old_hash))
+
+            if cursor.rowcount > 0:
+                logger.info(f"✓ Updated {cursor.rowcount} UnreliableDates record(s) with new hash")
+
+            logger.info(f"✓ Duplicate detection enabled via UniquePhotos primary key")
+            return new_hash
+
     except Exception as e:
-        logger.error(f"Failed to update file hash after modification: {e}")
+        logger.error(f"Failed to update file hash after modification: {e}", exc_info=True)
         return None
 
 

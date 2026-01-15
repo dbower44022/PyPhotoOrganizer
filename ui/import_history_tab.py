@@ -22,6 +22,7 @@ from PySide6.QtCore import (
     QTimer, QSize, QRectF
 )
 from PySide6.QtGui import QColor, QBrush, QPixmap, QImage, QPainter, QPen
+from PIL import Image, ImageOps
 import os
 import logging
 from datetime import datetime
@@ -453,7 +454,27 @@ class ImagePreviewWidget(QGraphicsView):
             return
 
         try:
-            pixmap = QPixmap(file_path)
+            # Use PIL to load image and apply EXIF orientation
+            # Many cameras/phones save images in a default orientation and use EXIF
+            # orientation tag to indicate how the image should be displayed
+            pil_img = Image.open(file_path)
+            pil_img = ImageOps.exif_transpose(pil_img)
+
+            # Convert to RGB if necessary
+            if pil_img.mode not in ('RGB', 'L'):
+                pil_img = pil_img.convert('RGB')
+
+            # Convert PIL image to QPixmap
+            if pil_img.mode == 'RGB':
+                img_data = pil_img.tobytes('raw', 'RGB')
+                qimage = QImage(img_data, pil_img.width, pil_img.height,
+                              pil_img.width * 3, QImage.Format_RGB888)
+            else:  # Grayscale
+                img_data = pil_img.tobytes('raw', 'L')
+                qimage = QImage(img_data, pil_img.width, pil_img.height,
+                              pil_img.width, QImage.Format_Grayscale8)
+
+            pixmap = QPixmap.fromImage(qimage)
             if pixmap.isNull():
                 self._show_placeholder("Failed to load image")
                 return

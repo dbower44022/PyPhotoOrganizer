@@ -162,10 +162,19 @@ class DetachablePreviewWindow(QMainWindow):
             self.current_record = record
 
             # Update image
+            # CRITICAL: Prefer archive_path over source_path because:
+            # 1. Rotations/modifications happen on archive files (never modify source files)
+            # 2. Archive file reflects current state after any rotations/corrections
+            # 3. Source files remain pristine and unmodified
+            archive_path = record.get('archive_path', '')
             source_path = record.get('source_path', '')
-            if source_path and os.path.exists(source_path):
+
+            # Prefer archive if available, fallback to source
+            preview_path = archive_path if (archive_path and os.path.exists(archive_path)) else source_path
+
+            if preview_path and os.path.exists(preview_path):
                 if hasattr(self.viewer, 'load_image'):
-                    self.viewer.load_image(source_path)
+                    self.viewer.load_image(preview_path)
             else:
                 if hasattr(self.viewer, 'clear'):
                     self.viewer.clear()

@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QCheckBox, QSpinBox, QPushButton,
                                QLabel, QMessageBox, QScrollArea,
                                QFormLayout, QComboBox, QRadioButton,
-                               QButtonGroup)
+                               QButtonGroup, QLineEdit, QFileDialog)
 from PySide6.QtCore import Qt
 import json
 import os
@@ -197,6 +197,34 @@ class SystemSettingsTab(QWidget):
 
         self.update_cache_items_label()
 
+        # Delete Vault Configuration
+        vault_group = QGroupBox("Delete Vault Configuration")
+        vault_group.setStyleSheet(self.groupbox_style)
+        vault_layout = QFormLayout()
+
+        vault_desc = QLabel(
+            "Configure a location where deleted files will be moved before permanent deletion.\n"
+            "Deleted files can be restored from the Delete Vault through the Date Corrections tab."
+        )
+        vault_desc.setWordWrap(True)
+        vault_desc.setStyleSheet("font-style: italic; color: gray; padding: 5px;")
+        vault_layout.addRow("", vault_desc)
+
+        vault_path_layout = QHBoxLayout()
+        self.vault_path_edit = QLineEdit()
+        self.vault_path_edit.setReadOnly(True)
+        self.vault_path_edit.setPlaceholderText("Not configured")
+        vault_path_layout.addWidget(self.vault_path_edit)
+
+        self.vault_browse_btn = QPushButton("Browse...")
+        self.vault_browse_btn.clicked.connect(self.on_browse_delete_vault)
+        vault_path_layout.addWidget(self.vault_browse_btn)
+
+        vault_layout.addRow("Delete Vault Location:", vault_path_layout)
+
+        vault_group.setLayout(vault_layout)
+        layout.addWidget(vault_group)
+
         # Import History Retention Settings
         retention_group = QGroupBox("Import History Retention")
         retention_group.setStyleSheet(self.groupbox_style)
@@ -330,6 +358,14 @@ class SystemSettingsTab(QWidget):
 
         self.update_cache_items_label()
 
+        # Load Delete Vault location
+        vault_path = db_metadata.get_delete_vault_location()
+        if vault_path:
+            self.vault_path_edit.setText(vault_path)
+        else:
+            self.vault_path_edit.clear()
+            self.vault_path_edit.setPlaceholderText("Not configured")
+
         # Load retention settings
         self.load_retention_settings()
 
@@ -379,6 +415,102 @@ class SystemSettingsTab(QWidget):
 
             logger.info(f"Updated cache settings: {cache_memory_mb}MB memory, {worker_threads} worker threads")
             logger.info("Note: Changes will take effect when Date Corrections tab is reopened")
+
+    # ========== Delete Vault Configuration Methods ==========
+
+    def on_browse_delete_vault(self):
+        """Open directory browser for Delete Vault location and auto-save."""
+        from PySide6.QtWidgets import QFileDialog
+
+        logger.info(f"{'='*80}")
+        logger.info(f"DELETE VAULT LOCATION SELECTION STARTED")
+        logger.info(f"{'-'*60}")
+
+        if not self.db_metadata:
+            logger.error(f"✗ No database loaded")
+            logger.error(f"  Cannot configure Delete Vault without active database")
+            QMessageBox.warning(
+                self,
+                "No Database",
+                "No database is currently loaded."
+            )
+            return
+
+        current_path = self.vault_path_edit.text()
+        if not current_path or current_path == "Not configured":
+            current_path = os.path.expanduser("~")
+
+        logger.info(f"  Opening directory browser...")
+        logger.info(f"  Starting path: {current_path}")
+
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Delete Vault Directory",
+            current_path,
+            QFileDialog.ShowDirsOnly
+        )
+
+        if directory:
+            logger.info(f"  User selected directory: {directory}")
+
+            # Validate path
+            if not os.path.exists(directory):
+                logger.error(f"✗ Selected directory does not exist: {directory}")
+                logger.error(f"  Validation failed: Directory not found")
+                QMessageBox.critical(
+                    self,
+                    "Invalid Path",
+                    f"The selected directory does not exist:\n{directory}"
+                )
+                logger.info(f"{'='*80}")
+                return
+
+            if not os.path.isdir(directory):
+                logger.error(f"✗ Selected path is not a directory: {directory}")
+                logger.error(f"  Validation failed: Not a directory")
+                QMessageBox.critical(
+                    self,
+                    "Invalid Path",
+                    f"The selected path is not a directory:\n{directory}"
+                )
+                logger.info(f"{'='*80}")
+                return
+
+            if not os.access(directory, os.W_OK):
+                logger.error(f"✗ Selected directory is not writable: {directory}")
+                logger.error(f"  Validation failed: Permission denied")
+                QMessageBox.critical(
+                    self,
+                    "Permission Denied",
+                    f"The selected directory is not writable:\n{directory}"
+                )
+                logger.info(f"{'='*80}")
+                return
+
+            logger.info(f"  ✓ Directory validation passed")
+            logger.info(f"  Saving to database...")
+
+            # Auto-save to database
+            success = self.db_metadata.set_delete_vault_location(directory)
+
+            if success:
+                self.vault_path_edit.setText(directory)
+                logger.info(f"✓ Delete Vault location saved and UI updated successfully")
+                logger.info(f"  Location: {directory}")
+                logger.info(f"{'='*80}")
+            else:
+                logger.error(f"✗ Failed to save Delete Vault location to database")
+                logger.error(f"  Directory: {directory}")
+                logger.error(f"  Check detailed logs above for specific error")
+                QMessageBox.critical(
+                    self,
+                    "Error",
+                    "Failed to save Delete Vault location. Check logs for details."
+                )
+                logger.info(f"{'='*80}")
+        else:
+            logger.info(f"  User cancelled directory selection")
+            logger.info(f"{'='*80}")
 
     # ========== Retention Settings Methods ==========
 

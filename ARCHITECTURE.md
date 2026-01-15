@@ -2,8 +2,8 @@
 
 > Technical design, architecture, and implementation details
 
-**Last Updated:** 2026-01-06
-**Version:** 2.3.1
+**Last Updated:** 2026-01-14
+**Version:** 3.0.0
 
 ---
 
@@ -382,23 +382,77 @@ safe_get_file_size(file_path)
    └─> Commit every batch_size files
 
 6. FILE ORGANIZATION (unique files only)
-   ├─> Extract creation date:
-   │    ├─> Try EXIF DateTimeOriginal
-   │    └─> Fallback to file system date
+   ├─> Extract creation date with reliability check:
+   │    ├─> Try EXIF DateTimeOriginal (most reliable)
+   │    ├─> Try IPTC Date Created (fallback)
+   │    ├─> Try video metadata (ffprobe/mutagen/QuickTime atoms)
+   │    ├─> Fallback to file system date
+   │    └─> Returns: (year, month, day, date_source, is_reliable)
+   │
+   ├─> UNRELIABLE DATE DETECTION:
+   │    ├─> IF no EXIF data: flag_reason = 'no_exif'
+   │    ├─> IF year = 1000 (all methods failed): flag_reason = 'year_1000'
+   │    ├─> IF suspicious date (< 1990, > current+1, 1970-01-01): flag_reason = 'suspicious'
+   │    ├─> IF source path matches user-specified unreliable paths: flag_reason = 'user_specified'
+   │    └─> IF flagged: Add to unreliable_dates_to_insert list (archive_path=NULL initially)
    │
    ├─> Build destination path:
-   │    └─> YYYY/MM/DD/filename.ext
+   │    └─> YYYY/MM/DD/filename.ext (using organization template)
    │
    ├─> Check if file exists at destination:
    │    ├─> IF exists and identical: Skip
    │    └─> IF exists and different: Generate unique name
    │
-   ├─> Copy or move file to destination
+   ├─> Copy or move file to destination (target_path)
+   │
+   ├─> UPDATE DATABASE with archive path:
+   │    ├─> Update UniquePhotos.file_name = target_path
+   │    ├─> IF file in unreliable_dates_to_insert:
+   │    │    └─> Update UnreliableDates.archive_path = target_path
+   │    │         (Replaces NULL with actual archive location)
+   │    └─> Record rename history if filename template used
    │
    └─> IF HEIC file:
         └─> Convert to JPEG
 
-7. COMPLETION
+7. UNRELIABLE DATE CORRECTION WORKFLOW (Post-Import, User-Driven)
+   ├─> User opens Date Corrections tab
+   │    └─> Loads all records from UnreliableDates table
+   │
+   ├─> User filters by flag_reason and/or status:
+   │    ├─> Flag reasons: no_exif, year_1000, suspicious, user_specified
+   │    └─> Statuses: Pending, Corrected, Reorganized
+   │
+   ├─> User selects file(s) and corrects date:
+   │    ├─> Single file: Opens DateCorrectionDialog
+   │    └─> Batch: Opens DateCorrectionDialog with sequential date option
+   │
+   ├─> Date correction applied:
+   │    ├─> Update UnreliableDates.corrected_date = new_date
+   │    ├─> Update UnreliableDates.needs_reorganization = 1
+   │    ├─> IF "Write EXIF" enabled:
+   │    │    ├─> Write EXIF to ARCHIVE file only (source NEVER modified)
+   │    │    ├─> Recalculate file hash (changed due to EXIF write)
+   │    │    ├─> Update UniquePhotos.file_hash = new_hash
+   │    │    ├─> Update UnreliableDates.file_hash = new_hash
+   │    │    └─> Add old_hash and new_hash to FileHashHistory
+   │    │         (Preserves duplicate detection for both hashes)
+   │    └─> Status changes to "Corrected" (green)
+   │
+   └─> User clicks "Reorganize All Marked":
+        ├─> For each file with needs_reorganization=1:
+        │    ├─> Calculate new archive path using corrected date + organization template
+        │    ├─> COPY file to new location (copy-verify-delete pattern)
+        │    ├─> Verify copy succeeded (exists + size match)
+        │    ├─> DELETE old file
+        │    ├─> Clean up empty directories
+        │    ├─> Update UnreliableDates.archive_path = new_path
+        │    ├─> Save original_archive_path = old_path (audit trail)
+        │    ├─> Update UniquePhotos.file_name = new_path
+        │    └─> Set needs_reorganization = 0
+        └─> Status changes to "Reorganized" (blue)
+
+8. COMPLETION
    ├─> Final database commit
    ├─> Close database connection
    ├─> Log summary statistics
@@ -446,7 +500,7 @@ CREATE TABLE UniquePhotos (
     partial_hash TEXT,                    -- First 16KB SHA-256 hash
     partial_hash_bytes INTEGER,           -- Bytes used for partial hash
     file_size INTEGER,                    -- File size in bytes
-    file_name TEXT NOT NULL,              -- Full file path
+    file_name TEXT NOT NULL,              -- Full file path (archive location)
     create_datetime TEXT,                 -- ISO 8601 timestamp
     create_year TEXT,                     -- YYYY
     create_month TEXT,                    -- MM (zero-padded)
@@ -459,6 +513,35 @@ CREATE INDEX idx_file_size ON UniquePhotos(file_size);
 CREATE INDEX idx_date ON UniquePhotos(create_year, create_month, create_day);
 CREATE INDEX idx_file_name ON UniquePhotos(file_name);
 ```
+
+**Table: UnreliableDates** (v2.2+)
+```sql
+CREATE TABLE UnreliableDates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash TEXT NOT NULL,              -- Links to UniquePhotos
+    source_path TEXT NOT NULL,            -- Original source location
+    archive_path TEXT,                    -- Archive location (initially NULL, updated after organization)
+    original_archive_path TEXT,           -- Path before reorganization (audit trail)
+    original_date TEXT,                   -- YYYY-MM-DD originally detected
+    date_source TEXT,                     -- 'exif', 'iptc', 'video_metadata', 'os_metadata', 'fallback'
+    flag_reason TEXT NOT NULL,            -- 'no_exif', 'year_1000', 'suspicious', 'user_specified'
+    corrected_date TEXT,                  -- YYYY-MM-DD user-corrected date
+    correction_timestamp TEXT,            -- When user corrected the date
+    needs_reorganization INTEGER DEFAULT 0, -- 1 = needs to be moved to correct date folder
+    FOREIGN KEY (file_hash) REFERENCES UniquePhotos(file_hash)
+);
+
+CREATE INDEX idx_unreliable_hash ON UnreliableDates(file_hash);
+CREATE INDEX idx_unreliable_flag ON UnreliableDates(flag_reason);
+CREATE INDEX idx_unreliable_needs_reorg ON UnreliableDates(needs_reorganization);
+```
+
+**Key Points:**
+- Created during import with `archive_path=NULL`
+- Updated with actual archive path after file organization completes
+- Enables persistent tracking of files needing date correction
+- Status derived from: `corrected_date` (NULL/set) + `needs_reorganization` (0/1)
+- Audit trail via `original_archive_path` (shows file location before reorganization)
 
 ### Index Strategy
 
@@ -985,13 +1068,649 @@ Identify files with unreliable date information and provide tools to correct the
 - Prevents accidental corruption of original photos
 - Source may be on read-only media or shared drives
 
-### Unreliable Date Detection
+### Unreliable Date Detection (Automatic During Import)
 
-During processing, dates are flagged as unreliable when:
-1. **No EXIF Data** (`flag_reason='no_exif'`): Image has no EXIF metadata
-2. **Year 1000 Fallback** (`flag_reason='year_1000'`): All extraction methods failed
-3. **Suspicious Date** (`flag_reason='suspicious'`): Year < 1990, > current+1, or 1970-01-01
-4. **User-Specified Path** (`flag_reason='user_specified'`): File from configured unreliable source
+During file processing (`find_duplicates()` in DuplicateFileDetection.py), dates are automatically flagged as unreliable:
+
+1. **No EXIF Data** (`flag_reason='no_exif'`)
+   - Image has no EXIF metadata
+   - Date extracted from file system timestamps only
+   - Common for: Screenshots, web downloads, scanned images
+
+2. **Year 1000 Fallback** (`flag_reason='year_1000'`)
+   - All date extraction methods failed
+   - Default date of 1000-01-01 assigned
+   - File will be organized into `1000/01/01/` folder
+
+3. **Suspicious Date** (`flag_reason='suspicious'`)
+   - Year < 1990 (before consumer digital cameras existed)
+   - Year > current year + 1 (future date)
+   - Date is exactly 1970-01-01 (Unix epoch, common OS default)
+   - Indicates incorrect date metadata
+
+4. **User-Specified Path** (`flag_reason='user_specified'`)
+   - File source path matches user-configured unreliable paths
+   - Useful for: Scanned photo folders, phone backup folders with wrong dates
+   - Configured via "Manage Unreliable Paths" dialog
+
+**Detection Flow:**
+```python
+# In DuplicateFileDetection.py (lines 1780-1815)
+year, month, day, date_source, is_reliable = get_creation_date(filename)
+
+if not is_reliable:
+    flag_reason = None
+
+    # Check flag conditions
+    if date_source == 'os_metadata':
+        flag_reason = 'no_exif'
+    elif year == '1000':
+        flag_reason = 'year_1000'
+    elif int(year) < 1990 or int(year) > current_year + 1:
+        flag_reason = 'suspicious'
+
+    # Check user-specified paths
+    for user_path in user_specified_paths:
+        if filename.startswith(user_path):
+            flag_reason = 'user_specified'
+            break
+
+    # Add to unreliable dates batch for database insertion
+    unreliable_dates_to_insert.append({
+        'file_hash': file_hash,
+        'source_path': filename,
+        'archive_path': None,  # Updated after file organization
+        'original_date': f"{year}-{month}-{day}",
+        'date_source': date_source,
+        'flag_reason': flag_reason
+    })
+```
+
+**Important:** Files with unreliable dates are **still copied to the archive** - they're not skipped. They're just flagged for later correction.
+
+### Date Correction Workflow (User-Driven Post-Import)
+
+**Three-Stage Process:**
+
+#### Stage 1: Review and Correction
+1. User opens **Date Corrections** tab
+2. System loads all `UnreliableDates` records from database
+3. User filters by:
+   - **Flag reason**: no_exif, year_1000, suspicious, user_specified
+   - **Status**: Pending, Corrected, Reorganized
+4. User selects one or more files
+5. User clicks "Correct Date..." or "Batch Correct"
+6. Date correction dialog opens:
+   - **Single file mode**: One date picker
+   - **Batch mode**: Same date OR sequential dates (auto-increment by 1 day)
+
+#### Stage 2: Apply Correction
+1. User enters correct date (year, month, day)
+2. User chooses options:
+   - **Write EXIF to archive file**: Updates EXIF metadata (default: enabled)
+   - **Mark for reorganization**: Flag file to be moved to correct date folder (default: enabled)
+3. User clicks "Apply"
+
+**Database Updates:**
+```sql
+-- Update corrected date and set reorganization flag
+UPDATE UnreliableDates
+SET corrected_date = '1995-07-15',
+    correction_timestamp = datetime('now'),
+    needs_reorganization = 1
+WHERE file_hash = ?
+```
+
+**If EXIF Write Enabled (Archive Files Only):**
+```python
+# In date_correction_dialog.py
+archive_path = record.get('archive_path')  # NEVER use source_path!
+
+if archive_path and os.path.exists(archive_path):
+    # Write EXIF to archive file
+    success = write_exif_date(archive_path, year, month, day)
+
+    if success:
+        # Recalculate hash (file bytes changed due to EXIF write)
+        new_hash = hash_file(archive_path)
+
+        # Update UniquePhotos with new hash
+        UPDATE UniquePhotos SET file_hash = new_hash WHERE file_hash = old_hash
+
+        # Update UnreliableDates with new hash
+        UPDATE UnreliableDates SET file_hash = new_hash WHERE file_hash = old_hash
+
+        # Add both hashes to FileHashHistory (preserves duplicate detection)
+        INSERT INTO FileHashHistory (current_file_hash, historical_hash, reason)
+        VALUES (new_hash, old_hash, 'date_correction'),
+               (new_hash, new_hash, 'date_correction')
+```
+
+**Status After Correction:**
+- `corrected_date`: Set to user-entered date
+- `needs_reorganization`: 1 (true)
+- **Visual Status**: "Corrected: 1995-07-15" (displayed in green)
+
+#### Stage 3: Reorganization
+1. User clicks **"Reorganize All Marked"** button
+2. System counts files with `needs_reorganization=1`
+3. User confirms operation
+4. `ReorganizeWorker` (QThread) processes each file:
+
+**Reorganization Process (Per File):**
+```python
+# In reorganize_worker.py
+for file in files_to_reorganize:
+    # 1. Calculate new path using corrected date + organization template
+    new_date = datetime(year, month, day)
+    folder_path = OrganizationTemplate.parse(template, new_date)
+    new_archive_path = os.path.join(archive_base, folder_path, filename)
+
+    # 2. Copy-Verify-Delete Pattern (CRITICAL for data safety)
+    shutil.copy2(old_archive_path, new_archive_path)
+
+    # 3. Verify copy succeeded
+    if not os.path.exists(new_archive_path):
+        raise Exception("File not found after copy")
+    if os.path.getsize(new_archive_path) != os.path.getsize(old_archive_path):
+        raise Exception("Size mismatch after copy")
+
+    # 4. Delete old file (only after verification)
+    os.remove(old_archive_path)
+
+    # 5. Clean up empty directories
+    cleanup_empty_dirs(old_archive_path, archive_base)
+
+    # 6. Update database
+    UPDATE UnreliableDates
+    SET archive_path = new_archive_path,
+        original_archive_path = old_archive_path,  -- Audit trail
+        needs_reorganization = 0
+    WHERE file_hash = file_hash
+
+    UPDATE UniquePhotos
+    SET file_name = new_archive_path
+    WHERE file_hash = file_hash
+```
+
+**Status After Reorganization:**
+- `archive_path`: Updated to new location
+- `original_archive_path`: Saved for audit trail
+- `needs_reorganization`: 0 (false)
+- **Visual Status**: "Reorganized: 1995-07-15" (displayed in blue)
+
+### Critical Architectural Rules
+
+1. **Source Files Are NEVER Modified**
+   - EXIF writes go ONLY to `archive_path`
+   - Source files (`source_path`) remain pristine
+   - Prevents accidental corruption of originals
+   - Sources may be on read-only media or shared drives
+
+2. **Copy-Verify-Delete Pattern**
+   - ALWAYS copy first, verify, then delete
+   - Never move directly (risk of data loss)
+   - Verify both existence and file size match
+
+3. **Database Synchronization**
+   - `archive_path=NULL` during import (will be updated)
+   - Updated to actual path after file organization completes
+   - `sync_archive_paths_from_unique_photos()` repairs NULL/incorrect paths
+
+4. **Hash History Preservation**
+   - EXIF writes change file hash
+   - Both old and new hashes added to `FileHashHistory`
+   - Ensures duplicate detection works for both versions
+
+---
+
+## Image Rotation System (v2.4)
+
+### Purpose
+
+Allow users to rotate images in the Date Corrections tab while preserving the original file in version storage. Rotated images replace the archive file, and the new hash is tracked for duplicate detection.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              Date Corrections Tab (UI)                       │
+│  User selects image(s) → Right-click → "Rotate Image..."    │
+└─────────────────────────┬───────────────────────────────────┘
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Rotation Dialog                                 │
+│  - Angle selection: 90° CW, 90° CCW, 180°                  │
+│  - Progress bar during operation                             │
+└─────────────────────────┬───────────────────────────────────┘
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│              RotateWorker (QThread)                          │
+│  Background worker processes each file:                      │
+│  1. Validate archive_path (SOURCE FILE PROTECTION)          │
+│  2. Save original as v0 (if not already saved)              │
+│  3. Rotate image using ImageModifier                         │
+│  4. Replace archive file with rotated version                │
+│  5. Calculate new hash                                       │
+│  6. Create version record in FileVersions                    │
+│  7. Update hashes in database tables                         │
+│  8. Invalidate thumbnail cache                               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Critical Safety Check: Source File Protection
+
+**BEFORE any rotation operation**, the system validates the file is in the archive:
+
+```python
+# In rotate_worker.py (lines 109-121)
+archive_path_normalized = os.path.realpath(archive_path)
+archive_base_normalized = os.path.realpath(self.archive_base)
+
+if not archive_path_normalized.startswith(archive_base_normalized):
+    raise ValueError(
+        f"CRITICAL: Attempted to rotate source file!\n"
+        f"File path: {archive_path}\n"
+        f"Archive base: {self.archive_base}\n"
+        f"Source files must NEVER be modified."
+    )
+```
+
+**Why This Is Critical:**
+- Database corruption could cause `archive_path` to contain source paths
+- Without validation, system would attempt to modify read-only source files
+- Protection prevents catastrophic data loss
+
+### Rotation Workflow (Per File)
+
+```python
+# 1. VALIDATE FILE LOCATION
+if not archive_path.startswith(archive_base):
+    raise ValueError("Cannot rotate source file!")
+
+# 2. CALCULATE ORIGINAL HASH
+original_hash = hash_file(archive_path)
+
+# 3. SAVE ORIGINAL VERSION (v0) if not already saved
+if not version_exists(original_hash, version=0):
+    version_mgr.save_original_version(archive_path, original_hash)
+    # Creates: .pyphotoorg_versions/by_hash/ab/abc123...ef_v0.jpg
+
+# 4. ROTATE IMAGE
+success, rotated_path, error = ImageModifier.rotate_image(
+    archive_path,
+    angle=90,
+    expand=True  # Expand canvas to fit rotated image
+)
+
+# 5. REPLACE ARCHIVE FILE (with backup)
+backup_path = archive_path + ".bak"
+shutil.copy(archive_path, backup_path)  # Create backup
+
+try:
+    shutil.copy(rotated_path, archive_path)  # Replace with rotated
+
+    # Verify replacement
+    if os.path.getsize(archive_path) != os.path.getsize(rotated_path):
+        raise Exception("Size mismatch after replacement")
+
+    os.remove(backup_path)  # Remove backup on success
+except Exception:
+    shutil.copy(backup_path, archive_path)  # Restore from backup
+    os.remove(backup_path)
+    raise
+
+# 6. CALCULATE NEW HASH
+new_hash = hash_file(archive_path)
+
+# 7. CREATE VERSION RECORD
+version_id = version_mgr.create_new_version(
+    parent_version_id=f"{original_hash}_v0",
+    modified_file_path=rotated_path,
+    modification_type='rotation',
+    params={'angle': 90, 'expand': True},
+    session_id=session_id
+)
+# Creates: .pyphotoorg_versions/by_hash/cd/cdef567...89_v1.jpg
+
+# 8. UPDATE DATABASE TABLES
+# 8a. Update UniquePhotos with new hash
+UPDATE UniquePhotos SET file_hash = new_hash WHERE file_hash = original_hash
+
+# 8b. Update UnreliableDates with new hash (CRITICAL for thumbnail display)
+UPDATE UnreliableDates SET file_hash = new_hash WHERE file_hash = original_hash
+
+# 8c. Add new hash to FileHashHistory (for duplicate detection)
+db.add_version_hash_to_history(
+    original_hash=original_hash,
+    version_hash=new_hash,
+    reason='version_rotation'
+)
+
+# 9. INVALIDATE THUMBNAIL CACHE
+thumbnail_cache.invalidate_hash(original_hash)
+# Deletes cached thumbnails for old hash from memory and disk
+```
+
+### Key Features
+
+1. **Version Preservation**: Original stored in `.pyphotoorg_versions/` before modification
+2. **Backup-Replace Pattern**: Creates backup before replacing, restores on failure
+3. **Hash Tracking**: All version hashes added to `FileHashHistory` for duplicate detection
+4. **Thumbnail Invalidation**: Old thumbnails removed from cache automatically
+5. **Scroll Position Preservation**: UI scrolls to show rotated image after refresh
+
+### Database Updates
+
+```sql
+-- UniquePhotos: Update to new hash
+UPDATE UniquePhotos
+SET file_hash = 'def456...'
+WHERE file_hash = 'abc123...';
+
+-- UnreliableDates: Update to new hash (if file was flagged)
+UPDATE UnreliableDates
+SET file_hash = 'def456...'
+WHERE file_hash = 'abc123...';
+
+-- FileHashHistory: Add both hashes for duplicate detection
+INSERT INTO FileHashHistory (current_file_hash, historical_hash, reason)
+VALUES ('def456...', 'abc123...', 'version_rotation'),
+       ('def456...', 'def456...', 'version_rotation');
+
+-- FileVersions: Create version record
+INSERT INTO FileVersions (
+    version_id, file_hash, parent_version_id, original_hash,
+    version_number, storage_path, is_active, modification_type, modification_params
+) VALUES (
+    'def456..._v1', 'def456...', 'abc123..._v0', 'abc123...',
+    1, '.pyphotoorg_versions/by_hash/de/def456..._v1.jpg', 1, 'rotation', '{"angle": 90}'
+);
+
+-- Mark v0 as inactive
+UPDATE FileVersions SET is_active = 0 WHERE version_id = 'abc123..._v0';
+```
+
+### Error Handling
+
+| Error Scenario | Handling |
+|----------------|----------|
+| Source file path | **Rejected** - Critical error, operation aborted |
+| File not found | Error logged, skip to next file |
+| Rotation fails | Restore from backup, error logged |
+| Backup creation fails | Use `shutil.copy()` fallback (mounted filesystems) |
+| Size mismatch | Restore from backup, raise exception |
+| Database update fails | Warning logged, file still rotated successfully |
+
+### Performance Considerations
+
+- **Backup Size**: Temporary backup ~same size as original (deleted after success)
+- **Version Storage**: v0 and v1 stored permanently in `.pyphotoorg_versions/`
+- **Hash Calculation**: Two full file hashes per rotation (original + rotated)
+- **Thumbnail Generation**: New thumbnail generated on next view
+
+---
+
+## File Deletion System (Delete Vault) (v2.4)
+
+### Purpose
+
+Safely move files from the archive to a configurable Delete Vault with full restore capability. Provides "soft delete" functionality with audit trail.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              Date Corrections Tab (UI)                       │
+│  User selects file(s) → Right-click → "Delete to Vault..." │
+└─────────────────────────┬───────────────────────────────────┘
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Confirmation Dialog                             │
+│  "Delete X file(s) to Delete Vault?"                        │
+│  "You can restore them later from Deleted Files dialog."    │
+└─────────────────────────┬───────────────────────────────────┘
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│              DeleteWorker (QThread)                          │
+│  Background worker processes each file:                      │
+│  1. Validate archive_path (SOURCE FILE PROTECTION)          │
+│  2. Calculate Delete Vault path (preserve structure)        │
+│  3. Copy file to Delete Vault                               │
+│  4. Verify copy (exists + size match)                       │
+│  5. Delete from archive                                      │
+│  6. Clean up empty directories                              │
+│  7. Record in DeletedFiles table                            │
+│  8. Remove from UnreliableDates table                       │
+└─────────────────────────────────────────────────────────────┘
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Deleted Files Dialog (Restore UI)               │
+│  - Grid showing all deleted files                           │
+│  - Filter: Show All / Recently Deleted / Restored          │
+│  - Actions: Restore Selected, Permanently Delete           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Delete Vault Configuration
+
+**Location**: User-configurable per database
+
+```python
+# Stored in DatabaseMetadata table
+ALTER TABLE DatabaseMetadata ADD COLUMN delete_vault_location TEXT;
+
+# Set via System Settings tab
+db_metadata.set_delete_vault_location('/path/to/delete_vault/')
+```
+
+**Folder Structure**: Preserves original archive hierarchy
+
+```
+Delete Vault:
+  /path/to/delete_vault/
+  └── 2024/
+      └── 01/
+          └── 15/
+              └── photo.jpg
+
+Original Archive:
+  /path/to/archive/
+  └── 2024/
+      └── 01/
+          └── 15/
+              └── photo.jpg  (deleted)
+```
+
+### Critical Safety Check: Source File Protection
+
+**BEFORE any deletion operation**, the system validates the file is in the archive:
+
+```python
+# In delete_worker.py (lines 108-120)
+archive_path_normalized = os.path.realpath(archive_path)
+archive_base_normalized = os.path.realpath(archive_base)
+
+if not archive_path_normalized.startswith(archive_base_normalized):
+    raise ValueError(
+        f"CRITICAL: Attempted to delete source file!\n"
+        f"File path: {archive_path}\n"
+        f"Archive base: {archive_base}\n"
+        f"Source files must NEVER be modified."
+    )
+```
+
+### Deletion Workflow (Per File)
+
+```python
+# 1. VALIDATE FILE LOCATION
+if not archive_path.startswith(archive_base):
+    raise ValueError("Cannot delete source file!")
+
+# 2. CALCULATE DELETE VAULT PATH (preserve structure)
+relative_path = os.path.relpath(archive_path, archive_base)
+vault_path = os.path.join(delete_vault_path, relative_path)
+# Example: archive/2024/01/15/photo.jpg → vault/2024/01/15/photo.jpg
+
+vault_dir = os.path.dirname(vault_path)
+os.makedirs(vault_dir, exist_ok=True)
+
+# 3. HANDLE COLLISIONS (if file already exists in vault)
+if os.path.exists(vault_path):
+    base, ext = os.path.splitext(vault_path)
+    counter = 1
+    while os.path.exists(f"{base}_{counter}{ext}"):
+        counter += 1
+    vault_path = f"{base}_{counter}{ext}"
+
+# 4. COPY TO DELETE VAULT
+old_size = os.path.getsize(archive_path)
+shutil.copy2(archive_path, vault_path)
+
+# 5. VERIFY COPY
+if not os.path.exists(vault_path):
+    raise Exception("File not found in vault after copy")
+if os.path.getsize(vault_path) != old_size:
+    raise Exception(f"Size mismatch: {old_size} != {os.path.getsize(vault_path)}")
+
+# 6. DELETE FROM ARCHIVE (only after verification)
+os.remove(archive_path)
+
+# 7. CLEAN UP EMPTY DIRECTORIES
+cleanup_empty_dirs(archive_path, archive_base)
+
+# 8. RECORD IN DeletedFiles TABLE
+db_metadata.mark_file_as_deleted(
+    file_hash=file_hash,
+    original_path=archive_path,
+    vault_path=vault_path,
+    reason='user_deleted'
+)
+
+# 9. REMOVE FROM UnreliableDates TABLE (file no longer in archive)
+with PhotoDatabase(db_path) as db:
+    cursor = db.get_cursor()
+    cursor.execute("DELETE FROM UnreliableDates WHERE file_hash = ?", (file_hash,))
+```
+
+### DeletedFiles Database Table
+
+```sql
+CREATE TABLE DeletedFiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash TEXT NOT NULL,
+    original_archive_path TEXT NOT NULL,  -- Path in archive before deletion
+    delete_vault_path TEXT NOT NULL,      -- Current path in Delete Vault
+    deletion_timestamp TEXT NOT NULL,
+    deletion_reason TEXT,                 -- 'user_deleted', 'batch_deleted'
+    deleted_by_session TEXT,              -- Session ID for tracking
+    file_size INTEGER,
+    creation_date TEXT,                   -- YYYY-MM-DD format
+    is_restored INTEGER DEFAULT 0,        -- 0 = in vault, 1 = restored
+    restore_timestamp TEXT,
+    FOREIGN KEY (file_hash) REFERENCES UniquePhotos(file_hash)
+);
+
+CREATE INDEX idx_deleted_hash ON DeletedFiles(file_hash);
+CREATE INDEX idx_deleted_restored ON DeletedFiles(is_restored);
+CREATE INDEX idx_deleted_timestamp ON DeletedFiles(deletion_timestamp);
+```
+
+### Restore Workflow
+
+```python
+# In restore_worker.py
+for record in deleted_records:
+    vault_path = record['delete_vault_path']
+    original_path = record['original_archive_path']
+
+    # 1. VERIFY FILE IN VAULT
+    if not os.path.exists(vault_path):
+        raise FileNotFoundError(f"File not found in vault: {vault_path}")
+
+    # 2. CREATE DESTINATION DIRECTORY
+    original_dir = os.path.dirname(original_path)
+    os.makedirs(original_dir, exist_ok=True)
+
+    # 3. HANDLE COLLISIONS (file may have been re-imported)
+    restore_path = original_path
+    if os.path.exists(restore_path):
+        base, ext = os.path.splitext(restore_path)
+        counter = 1
+        while os.path.exists(f"{base}_restored_{counter}{ext}"):
+            counter += 1
+        restore_path = f"{base}_restored_{counter}{ext}"
+
+    # 4. COPY FROM VAULT TO ARCHIVE
+    vault_size = os.path.getsize(vault_path)
+    shutil.copy2(vault_path, restore_path)
+
+    # 5. VERIFY COPY
+    if os.path.getsize(restore_path) != vault_size:
+        raise Exception(f"Size mismatch: {vault_size} != {os.path.getsize(restore_path)}")
+
+    # 6. DELETE FROM VAULT (only after verification)
+    os.remove(vault_path)
+    cleanup_empty_dirs(vault_path, delete_vault_base)
+
+    # 7. UPDATE DATABASE
+    db_metadata.mark_file_as_restored(file_hash)
+
+    # 8. UPDATE UniquePhotos with restored path
+    with PhotoDatabase(db_path) as db:
+        db.restore_photo(file_hash, restore_path)
+```
+
+### Key Features
+
+1. **Copy-Verify-Delete Pattern**: Never destructive, always verifiable
+2. **Structure Preservation**: Maintains folder hierarchy in Delete Vault
+3. **Collision Handling**: Automatic unique filename generation
+4. **Audit Trail**: Complete deletion/restore history in database
+5. **Empty Directory Cleanup**: Removes empty folders after operations
+6. **Full Restore Support**: Files can be restored to original or new location
+
+### Database Operations
+
+```sql
+-- Mark as deleted
+INSERT INTO DeletedFiles (
+    file_hash, original_archive_path, delete_vault_path,
+    deletion_timestamp, deletion_reason, file_size, creation_date
+) VALUES (?, ?, ?, datetime('now'), 'user_deleted', ?, ?);
+
+-- Remove from UnreliableDates (no longer in active archive)
+DELETE FROM UnreliableDates WHERE file_hash = ?;
+
+-- Mark as restored
+UPDATE DeletedFiles
+SET is_restored = 1,
+    restore_timestamp = datetime('now')
+WHERE file_hash = ?;
+
+-- Update UniquePhotos with restored path
+UPDATE UniquePhotos
+SET file_name = ?
+WHERE file_hash = ?;
+```
+
+### Error Handling
+
+| Error Scenario | Handling |
+|----------------|----------|
+| Source file path | **Rejected** - Critical error, operation aborted |
+| Delete Vault not configured | Error dialog, operation prevented |
+| Delete Vault not writable | Error logged, operation fails |
+| File not found in archive | Error logged, skip to next file |
+| Copy verification fails | Exception raised, archive file preserved |
+| Vault file missing during restore | Error logged, skip to next file |
+
+### Important Notes
+
+1. **UnreliableDates Removal**: Deleted files are removed from UnreliableDates table because they're no longer in the active archive
+2. **Restore Does NOT Re-Add**: Restored files do NOT automatically reappear in UnreliableDates - users must re-import if correction needed
+3. **Permanent Delete**: Deleted files dialog offers "Permanently Delete" option to remove from vault entirely (irreversible)
+4. **Session Tracking**: Deletion operations logged in audit trail with session IDs
 
 ---
 
@@ -1127,6 +1846,362 @@ Settings stored in `AuditRetentionSettings` table:
 - **sessions**: Keep last N sessions
 - **days**: Keep last N days
 - **none**: Keep all (no automatic cleanup)
+
+---
+
+## File Version Management Architecture (v2.4)
+
+### Purpose
+
+Track multiple file variations (rotated, cropped, color-corrected) while maintaining duplicate detection across all versions. Enables users to modify photos without creating duplicates during re-import.
+
+### Problem Statement
+
+**Challenge**: When a photo is modified (rotated, color-corrected), its SHA-256 hash changes. Re-importing the modified file would create a duplicate in the archive.
+
+**Example**:
+```
+1. Import vacation.jpg (hash: AAA) → stored in archive
+2. Rotate 90° externally (hash changes to: BBB)
+3. Re-import vacation.jpg → BBB ≠ AAA → Duplicate created ✗
+```
+
+**Solution**: Link all versions (AAA, BBB) to the same original photo so any version is detected as a duplicate.
+
+### Architecture Components
+
+#### 1. FileVersions Table (Version Storage)
+
+```sql
+CREATE TABLE FileVersions (
+    version_id TEXT PRIMARY KEY,          -- {hash}_v{number}
+    file_hash TEXT NOT NULL,              -- SHA-256 of this version
+    parent_version_id TEXT,               -- Parent version (NULL for v0)
+    original_hash TEXT NOT NULL,          -- Links all versions together
+    version_number INTEGER NOT NULL,      -- 0, 1, 2, ...
+    storage_path TEXT NOT NULL,           -- Physical file location
+    is_active INTEGER DEFAULT 1,          -- 1 = current, 0 = old
+    modification_session_id TEXT,         -- Batch tracking
+    modification_type TEXT,               -- 'rotation', 'crop', etc.
+    modification_params TEXT,             -- JSON parameters
+    file_size INTEGER,
+    image_width INTEGER,
+    image_height INTEGER,
+    image_format TEXT,
+    created_timestamp TEXT NOT NULL,
+    FOREIGN KEY (parent_version_id) REFERENCES FileVersions(version_id),
+    FOREIGN KEY (original_hash) REFERENCES UniquePhotos(original_hash)
+)
+```
+
+**Key Concepts**:
+- **version_id**: Unique identifier combining hash + version number
+- **original_hash**: All versions point to same original (star topology, not linear)
+- **is_active**: Only one version marked active at a time
+- **Parent-child**: Tracks modification sequence for undo capability
+
+#### 2. FileHashHistory Integration (Duplicate Detection Bridge)
+
+**The Key Innovation**: When a version is created, its hash is automatically added to `FileHashHistory`:
+
+```python
+# In VersionManager.create_new_version()
+vm.create_new_version(...)  # Creates version in FileVersions
+
+# NEW in v2.4: Automatically adds hash to FileHashHistory
+with PhotoDatabase(db_path) as db:
+    db.add_version_hash_to_history(
+        original_hash=original_hash,   # Links to original
+        version_hash=new_hash,         # New version hash
+        reason='version_rotation'
+    )
+```
+
+**Result**: `find_duplicates()` checks `FileHashHistory`, which now contains all version hashes.
+
+#### 3. Star Topology vs. Linear Chain
+
+**Star Topology** (v2.4 Implementation):
+```
+          original (AAA)
+         /      |      \
+       v1     v2      v3
+      (BBB)  (CCC)   (DDD)
+```
+
+All versions point to `original_hash=AAA`. In `FileHashHistory`:
+```
+current_file_hash | historical_hash | reason
+------------------|-----------------|-----------------
+AAA               | AAA             | version_original
+AAA               | BBB             | version_rotation
+AAA               | CCC             | version_crop
+AAA               | DDD             | version_color_adjust
+```
+
+**Advantage**: Easier to query all versions of a photo (WHERE original_hash = AAA).
+
+**Linear Chain** (Alternative, not used):
+```
+original (AAA) → v1 (BBB) → v2 (CCC) → v3 (DDD)
+```
+
+**Disadvantage**: Requires recursive queries to find all versions.
+
+#### 4. Storage Architecture
+
+**Physical Storage**:
+```
+<archive>/
+├── 2024/01/15/
+│   └── photo.jpg                    ← Original in archive (UniquePhotos)
+└── .pyphotoorg_versions/            ← Hidden version storage
+    └── by_hash/
+        └── ab/                       ← First 2 chars of hash (sharding)
+            ├── abcd1234...ef_v0.jpg  ← v0 (original snapshot)
+            ├── xyz9876...ab_v1.jpg   ← v1 (rotated)
+            └── qrs5432...cd_v2.jpg   ← v2 (cropped)
+```
+
+**Benefits**:
+- Hidden folder (`.pyphotoorg_versions`) doesn't clutter archive
+- Hash-based sharding prevents too many files in one directory
+- Version number in filename enables easy identification
+
+#### 5. Data Flow: Version Creation
+
+```
+User Request: Rotate photo 90°
+    ↓
+1. VersionManager.save_original_version(archive_file)
+   - Calculate hash of archive file: AAA
+   - Copy to .pyphotoorg_versions/by_hash/aa/AAA_v0.jpg
+   - Insert into FileVersions (version_number=0)
+   - Add AAA to FileHashHistory (reason='version_original')
+    ↓
+2. ImageModifier.rotate_image(archive_file, 90°)
+   - Rotate and save to temp file
+   - Returns: (True, /tmp/rotated.jpg, None)
+    ↓
+3. VersionManager.create_new_version(v0_id, /tmp/rotated.jpg, ...)
+   - Calculate hash of rotated file: BBB
+   - Copy to .pyphotoorg_versions/by_hash/bb/BBB_v1.jpg
+   - Mark v0 as inactive (is_active=0)
+   - Insert v1 into FileVersions (is_active=1)
+   - Add BBB to FileHashHistory (reason='version_rotation')
+    ↓
+Result: Both AAA and BBB in FileHashHistory → both detected as duplicates
+```
+
+#### 6. Duplicate Detection with Versions
+
+**Modified find_duplicates() Integration**:
+
+```python
+# In find_duplicates() (DuplicateFileDetection.py)
+with PhotoDatabase(db_path) as db:
+    # Load all historical hashes (includes version hashes)
+    historical_hashes = db.get_all_historical_hashes()  # Returns {AAA, BBB, CCC, ...}
+
+# For each file being imported
+for file in file_list:
+    file_hash = hash_file(file)
+
+    # Check both current and historical hashes
+    if file_hash in current_hashes or file_hash in historical_hashes:
+        duplicates.append(file)  # Detected as duplicate ✓
+    else:
+        originals.append(file)   # Unique file
+```
+
+**No Changes Needed**: Existing duplicate detection logic automatically works with version hashes.
+
+#### 7. Database Migration (Schema v3)
+
+**Migration Script**: `migrations/add_modifications_support.py`
+
+**Automatic Trigger**: When `VersionManager` is initialized, it calls `_ensure_migration()`.
+
+**Changes**:
+1. Creates `FileVersions` table
+2. Creates `ModificationSession` table (batch tracking)
+3. Creates `ModificationLog` table (per-file audit)
+4. Adds `version_id` column to `FileHashHistory`
+5. Creates 13 indexes for performance
+6. Updates `schema_version` to 3
+
+**Idempotent**: Safe to run multiple times (checks `schema_version` first).
+
+### API Architecture
+
+#### ImageModifier Class (Static Methods)
+
+```python
+class ImageModifier:
+    @staticmethod
+    def rotate_image(input, angle, expand, output) -> (bool, str, str)
+    @staticmethod
+    def crop_image(input, box, output) -> (bool, str, str)
+    @staticmethod
+    def resize_image(input, width, height, maintain_aspect, output) -> (bool, str, str)
+    @staticmethod
+    def adjust_color(input, brightness, contrast, saturation, output) -> (bool, str, str)
+    @staticmethod
+    def convert_format(input, target_format, quality, output) -> (bool, str, str)
+```
+
+**Design Choice**: Static methods (no state) for simple, reusable transformations.
+
+#### VersionManager Class (Stateful)
+
+```python
+class VersionManager:
+    def __init__(database_path, archive_base):
+        # Initializes version storage
+        # Runs database migration automatically
+
+    def save_original_version(archive_file_path) -> version_id
+    def create_new_version(parent_id, modified_file, type, params, session) -> version_id
+    def get_version_history(original_hash) -> List[Dict]
+    def restore_version(version_id, target_path) -> bool
+```
+
+**Design Choice**: Stateful (holds DB path, archive base) for complex version management.
+
+### Performance Considerations
+
+#### 1. Hash Prefix Sharding
+
+Versions stored in subdirectories by first 2 characters of hash:
+- Prevents 10,000+ files in single directory
+- Filesystem performance degrades with many files in one folder
+- 256 possible prefixes (00-FF) distribute load evenly
+
+#### 2. Indexes
+
+**Critical Indexes** (created by migration):
+```sql
+CREATE INDEX idx_fileversions_hash ON FileVersions(file_hash);
+CREATE INDEX idx_fileversions_original ON FileVersions(original_hash);
+CREATE INDEX idx_fileversions_active ON FileVersions(is_active);
+```
+
+**Query Performance**:
+- Get all versions: `WHERE original_hash = ?` → O(1) with index
+- Get active version: `WHERE original_hash = ? AND is_active = 1` → O(1)
+- Find by hash: `WHERE file_hash = ?` → O(1)
+
+#### 3. Historical Hash Loading
+
+```python
+# Loads ALL historical hashes into memory (one-time per session)
+historical_hashes = db.get_all_historical_hashes()  # Returns set
+```
+
+**Trade-off**:
+- **Memory**: ~50 bytes per hash × 100,000 hashes = ~5 MB
+- **Speed**: O(1) hash lookup vs. O(log N) database query per file
+- **Verdict**: Memory usage is acceptable for massive speed improvement
+
+### Security Architecture
+
+#### 1. Source File Protection
+
+**CRITICAL PRINCIPLE**: Source files are NEVER modified.
+
+```python
+# In ImageModifier
+def rotate_image(input_path, ...):
+    # NEVER writes to input_path
+    # Always creates new output file
+    if not output_path:
+        output_path = f"{input_path}_rotated{ext}"
+```
+
+**Enforcement**:
+- All modifications work on copies
+- Versions created from archive files (not sources)
+- Archive files can be modified (they're our managed copies)
+
+#### 2. Path Traversal Prevention
+
+```python
+# In VersionManager._get_version_path()
+hash_prefix = file_hash[:2]
+storage_path = os.path.join(
+    self.version_storage,
+    hash_prefix,
+    f"{file_hash}_v{version_number}{ext}"
+)
+# Result: .pyphotoorg_versions/by_hash/ab/abc123...ef_v1.jpg
+```
+
+No user input in path construction → prevents `../../../etc/passwd` attacks.
+
+### Backward Compatibility
+
+#### 1. Schema Versioning
+
+```python
+# In DatabaseMetadata table
+schema_version INTEGER DEFAULT 1
+```
+
+**Version History**:
+- v1: Original schema (UniquePhotos)
+- v2: Added date correction tables
+- v3: Added version management tables
+
+**Migration Path**: v1 → v3 automatically upgrades v2 changes too.
+
+#### 2. Existing Hash History
+
+**EXIF modifications** continue to work:
+- `add_hash_to_history()`: Updates `UniquePhotos.file_hash` (in-place modification)
+- `add_version_hash_to_history()`: Only updates `FileHashHistory` (versions separate)
+
+Both coexist peacefully in same `FileHashHistory` table.
+
+#### 3. Syncing Existing Versions
+
+For databases with versions created before v2.4:
+
+```python
+db_meta.sync_versions_to_hash_history()
+# Finds versions in FileVersions not in FileHashHistory
+# Inserts missing hashes with reason='sync_<type>'
+```
+
+Makes old versions visible to duplicate detection.
+
+### Future Architecture Considerations
+
+**v2.5 Planned Enhancements**:
+
+1. **GUI Integration**:
+   - Image Editor tab with all modification operations
+   - Version history timeline viewer
+   - Drag-and-drop interface
+
+2. **Version Diff/Comparison**:
+   - Side-by-side visual comparison
+   - Highlight differences between versions
+   - Metadata comparison table
+
+3. **Undo Capability**:
+   - `ModificationSession` tracks batches
+   - `ModificationLog` records operations
+   - Reverse operations to undo changes
+
+4. **Version Pruning**:
+   - Auto-delete old inactive versions
+   - Keep only last N versions
+   - Configurable retention policy
+
+5. **Cloud Storage Integration**:
+   - Store versions in cloud (S3, Google Cloud)
+   - Archive stays local
+   - Reduces local storage requirements
 
 ---
 
