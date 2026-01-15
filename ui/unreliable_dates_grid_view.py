@@ -37,6 +37,9 @@ class UnreliableDatesGridView(QListView):
     correct_date_requested = Signal()  # Context menu: Correct Date
     reorganize_corrected_requested = Signal()  # Context menu: Reorganize Corrected
     deselect_all_requested = Signal()  # Context menu: Deselect All
+    rotate_requested = Signal()  # Context menu: Rotate Image
+    delete_requested = Signal()  # Context menu: Delete to Vault
+    refresh_thumbnail_requested = Signal()  # Context menu: Refresh Thumbnail
 
     def __init__(self, model, parent=None):
         """
@@ -301,7 +304,31 @@ class UnreliableDatesGridView(QListView):
             reorganize_action.triggered.connect(lambda: self.reorganize_corrected_requested.emit())
             menu.addAction(reorganize_action)
 
-            # Action 3: Deselect All
+            menu.addSeparator()
+
+            # Action 3: Rotate Image
+            rotate_action = QAction("Rotate Image...", self)
+            rotate_action.setEnabled(has_selection)
+            rotate_action.triggered.connect(lambda: self.rotate_requested.emit())
+            menu.addAction(rotate_action)
+
+            # Action 4: Delete to Vault
+            delete_action = QAction("Delete to Vault...", self)
+            delete_action.setEnabled(has_selection)
+            delete_action.triggered.connect(lambda: self.delete_requested.emit())
+            menu.addAction(delete_action)
+
+            menu.addSeparator()
+
+            # Action 5: Refresh Thumbnail
+            refresh_thumbnail_action = QAction("Refresh Thumbnail", self)
+            refresh_thumbnail_action.setEnabled(has_selection)
+            refresh_thumbnail_action.triggered.connect(lambda: self.refresh_thumbnail_requested.emit())
+            menu.addAction(refresh_thumbnail_action)
+
+            menu.addSeparator()
+
+            # Action 6: Deselect All
             deselect_action = QAction("Deselect All", self)
             deselect_action.setEnabled(has_selection)
             deselect_action.triggered.connect(lambda: self.deselect_all_requested.emit())

@@ -2,8 +2,8 @@
 
 > Complete reference for all PyPhotoOrganizer settings
 
-**Last Updated:** 2026-01-06
-**Version:** 2.3.1
+**Last Updated:** 2026-01-14
+**Version:** 3.0.0
 
 ---
 

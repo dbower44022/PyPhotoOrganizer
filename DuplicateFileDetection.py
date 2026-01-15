@@ -108,115 +108,76 @@ class PhotoDatabase:
 
     def initialize_database(self):
         """
-        Create the UniquePhotos and FileHashHistory tables if they don't exist.
+        Create the UniquePhotos table if it doesn't exist (Schema v5).
         This should be called after entering the context.
 
-        Schema includes:
-        UniquePhotos:
-        - file_hash: Full SHA-256 hash (PRIMARY KEY) - current hash after any modifications
-        - partial_hash: Hash of first N bytes (for quick lookup)
+        Schema v5 - UniquePhotos (Unified Design):
+        - file_hash: SHA-256 hash of THIS file (PRIMARY KEY)
+        - partial_hash: Hash of first N bytes (for quick comparison)
         - partial_hash_bytes: Number of bytes used for partial hash
         - file_size: File size in bytes
-        - file_name: Full path to file
+        - file_name: Current location (archive or version storage)
+        - source_path: Original import source (NULL for revisions)
+        - revised_photo: Parent file hash (NULL if original import)
+        - revision_reason: Why revision was created ('rotation', 'crop', 'exif_edit', etc.)
+        - revision_timestamp: When revision was created
         - create_datetime, create_year, create_month, create_day: File metadata
-        - original_hash: Original hash when first imported (for reference)
 
-        FileHashHistory:
-        - Tracks all hash versions for a file (many-to-one relationship)
-        - Enables duplicate detection even after EXIF modifications
+        Duplicate Detection (v5):
+        - Simple primary key lookup: SELECT file_hash FROM UniquePhotos WHERE file_hash = ?
+        - O(1) performance via indexed hash
+        - No separate FileHashHistory table needed
         """
         try:
-            # Create table with partial hash support
+            # Create UniquePhotos table with revision tracking (v5 schema)
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS UniquePhotos (
                     file_hash TEXT PRIMARY KEY,
                     partial_hash TEXT,
                     partial_hash_bytes INTEGER,
-                    file_size INTEGER,
+                    file_size INTEGER NOT NULL,
                     file_name TEXT NOT NULL,
+                    source_path TEXT,
+                    revised_photo TEXT,
+                    revision_reason TEXT,
+                    revision_timestamp TEXT,
                     create_datetime TEXT,
                     create_year TEXT,
                     create_month TEXT,
-                    create_day TEXT
+                    create_day TEXT,
+                    FOREIGN KEY (revised_photo) REFERENCES UniquePhotos(file_hash),
+                    CHECK (revised_photo IS NULL OR revision_reason IS NOT NULL)
                 )
             ''')
 
-            # Create index on partial_hash for fast lookups
+            # Create indexes for UniquePhotos
             self.cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_partial_hash
+                CREATE INDEX IF NOT EXISTS idx_unique_partial_hash
                 ON UniquePhotos(partial_hash)
             ''')
 
-            # Create index on file_size for optimization decisions
             self.cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_file_size
-                ON UniquePhotos(file_size)
+                CREATE INDEX IF NOT EXISTS idx_unique_revised
+                ON UniquePhotos(revised_photo)
             ''')
 
-            # Create composite index on date fields for date-based queries
             self.cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_date
+                CREATE INDEX IF NOT EXISTS idx_unique_source
+                ON UniquePhotos(source_path)
+            ''')
+
+            self.cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_unique_year
+                ON UniquePhotos(create_year)
+            ''')
+
+            self.cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_unique_date
                 ON UniquePhotos(create_year, create_month, create_day)
             ''')
 
-            # Create index on file_name for path lookups
-            self.cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_file_name
-                ON UniquePhotos(file_name)
-            ''')
-
-            # Add original_hash column if it doesn't exist (for migration)
-            try:
-                self.cursor.execute('ALTER TABLE UniquePhotos ADD COLUMN original_hash TEXT')
-                logger.info("Added original_hash column to UniquePhotos")
-            except sqlite3.OperationalError:
-                # Column already exists
-                pass
-
-            # Create FileHashHistory table for tracking all hash versions
-            # This enables duplicate detection after EXIF modifications
-            self.cursor.execute('''
-                CREATE TABLE IF NOT EXISTS FileHashHistory (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    current_file_hash TEXT NOT NULL,
-                    historical_hash TEXT NOT NULL,
-                    created_date TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    FOREIGN KEY (current_file_hash) REFERENCES UniquePhotos(file_hash)
-                )
-            ''')
-
-            # Critical index for fast duplicate detection via historical hashes
-            self.cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_historical_hash
-                ON FileHashHistory(historical_hash)
-            ''')
-
-            # Index on current_file_hash for looking up history of a specific file
-            self.cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_current_file_hash
-                ON FileHashHistory(current_file_hash)
-            ''')
-
-            # Migration: Populate FileHashHistory from existing UniquePhotos records
-            # This ensures existing databases are upgraded with hash history
-            self.cursor.execute('SELECT COUNT(*) FROM FileHashHistory')
-            history_count = self.cursor.fetchone()[0]
-
-            self.cursor.execute('SELECT COUNT(*) FROM UniquePhotos')
-            photos_count = self.cursor.fetchone()[0]
-
-            if history_count == 0 and photos_count > 0:
-                logger.info(f"Migrating {photos_count} existing records to FileHashHistory...")
-                self.cursor.execute('''
-                    INSERT INTO FileHashHistory (current_file_hash, historical_hash, created_date, reason)
-                    SELECT file_hash, file_hash, datetime('now'), 'migration'
-                    FROM UniquePhotos
-                ''')
-                logger.info(f"✓ Migrated {photos_count} records to FileHashHistory")
-
             self.conn.commit()
-            logger.info("Database tables and indexes initialized successfully")
+            logger.info("Database tables and indexes initialized successfully (Schema v5)")
         except Exception as e:
             logger.exception(f"Failed to initialize database tables: {e}")
             raise
@@ -238,13 +199,13 @@ class PhotoDatabase:
             raise
 
     def insert_unique_photo(self, file_hash, file_path, create_datetime, create_year, create_month, create_day,
-                           partial_hash=None, partial_hash_bytes=None, file_size=None):
+                           partial_hash=None, partial_hash_bytes=None, file_size=None, source_path=None):
         """
-        Insert a new unique photo record into the database and create initial hash history entry.
+        Insert a new unique photo record into the database (Schema v5).
 
         Parameters:
             file_hash (str): SHA-256 hash of the full file
-            file_path (str): Full path to the file
+            file_path (str): Full path to the file (archive location)
             create_datetime (str): Creation date in YYYY-MM-DD format
             create_year (str): Year as string
             create_month (str): Month as zero-padded string
@@ -252,27 +213,22 @@ class PhotoDatabase:
             partial_hash (str, optional): SHA-256 hash of first N bytes
             partial_hash_bytes (int, optional): Number of bytes used for partial hash
             file_size (int, optional): File size in bytes
+            source_path (str, optional): Original import source location
         """
         try:
-            # Insert into UniquePhotos with original_hash set to file_hash
+            # Insert into UniquePhotos (v5 schema)
+            # revised_photo=NULL, revision_reason=NULL (this is an original import, not a revision)
             self.cursor.execute(
                 """INSERT INTO UniquePhotos
-                   (file_hash, partial_hash, partial_hash_bytes, file_size, file_name,
-                    create_datetime, create_year, create_month, create_day, original_hash)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (file_hash, partial_hash, partial_hash_bytes, file_size, file_path,
-                 create_datetime, create_year, create_month, create_day, file_hash)
+                   (file_hash, partial_hash, partial_hash_bytes, file_size, file_name, source_path,
+                    revised_photo, revision_reason, revision_timestamp,
+                    create_datetime, create_year, create_month, create_day)
+                   VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?)""",
+                (file_hash, partial_hash, partial_hash_bytes, file_size, file_path, source_path,
+                 create_datetime, create_year, create_month, create_day)
             )
 
-            # Create initial entry in FileHashHistory for duplicate detection after EXIF modifications
-            self.cursor.execute(
-                """INSERT INTO FileHashHistory
-                   (current_file_hash, historical_hash, created_date, reason)
-                   VALUES (?, ?, ?, 'original')""",
-                (file_hash, file_hash, datetime.datetime.now().isoformat())
-            )
-
-            logger.debug(f"Inserted unique photo: {file_path} (partial_hash: {partial_hash is not None}, hash_history: created)")
+            logger.debug(f"Inserted unique photo: {file_path} (partial_hash: {partial_hash is not None}, source: {source_path})")
         except sqlite3.IntegrityError:
             # Hash already exists (PRIMARY KEY constraint)
             logger.warning(f"Attempted to insert duplicate hash: {file_hash}")
@@ -340,141 +296,146 @@ class PhotoDatabase:
             logger.exception(f"Failed to check partial hash: {e}")
             raise
 
-    def is_duplicate_hash_in_history(self, file_hash):
+    def create_revision(self, new_file_hash, parent_hash, revision_reason, file_path, file_size,
+                       create_datetime, create_year, create_month, create_day,
+                       partial_hash=None, partial_hash_bytes=None):
         """
-        Check if a hash exists in FileHashHistory (any version of any file).
-        This enables duplicate detection even after EXIF modifications.
+        Insert a new revision record into UniquePhotos (Schema v5).
+
+        Used when creating rotated, cropped, or EXIF-edited versions of photos.
+        The new file gets its own UniquePhotos record linked to parent via revised_photo.
 
         Parameters:
-            file_hash (str): SHA-256 hash to check
-
-        Returns:
-            str or None: The current_file_hash if found (to identify the photo), None otherwise
-        """
-        try:
-            self.cursor.execute(
-                """SELECT current_file_hash FROM FileHashHistory
-                   WHERE historical_hash = ?
-                   LIMIT 1""",
-                (file_hash,)
-            )
-            result = self.cursor.fetchone()
-            return result[0] if result else None
-        except Exception as e:
-            logger.exception(f"Failed to check hash history: {e}")
-            raise
-
-    def get_all_historical_hashes(self):
-        """
-        Get all historical hashes for in-memory duplicate checking.
-        This includes all versions of all files.
-
-        Returns:
-            set: Set of all historical hash strings
-        """
-        try:
-            self.cursor.execute("SELECT historical_hash FROM FileHashHistory")
-            return {row[0] for row in self.cursor.fetchall()}
-        except Exception as e:
-            logger.exception(f"Failed to retrieve historical hashes: {e}")
-            raise
-
-    def add_hash_to_history(self, current_file_hash, new_hash, reason='exif_edit'):
-        """
-        Add a new hash entry to FileHashHistory after file modification.
-        Also updates the current file_hash in UniquePhotos.
-
-        Parameters:
-            current_file_hash (str): The current file_hash in UniquePhotos (before modification)
-            new_hash (str): The new hash after modification
-            reason (str): Reason for the hash change ('exif_edit', 'reorganization', etc.)
+            new_file_hash (str): SHA-256 hash of the new revision file
+            parent_hash (str): Hash of the parent file this is derived from
+            revision_reason (str): Why created ('rotation', 'crop', 'exif_edit', etc.)
+            file_path (str): Full path to the revision file
+            file_size (int): File size in bytes
+            create_datetime (str): Creation date in YYYY-MM-DD format
+            create_year (str): Year as string
+            create_month (str): Month as zero-padded string
+            create_day (str): Day as zero-padded string
+            partial_hash (str, optional): SHA-256 hash of first N bytes
+            partial_hash_bytes (int, optional): Number of bytes used for partial hash
 
         Returns:
             bool: True if successful, False otherwise
         """
         try:
-            # Add new entry to hash history
+            revision_timestamp = datetime.datetime.now().isoformat()
+
             self.cursor.execute(
-                """INSERT INTO FileHashHistory
-                   (current_file_hash, historical_hash, created_date, reason)
-                   VALUES (?, ?, ?, ?)""",
-                (new_hash, new_hash, datetime.datetime.now().isoformat(), reason)
+                """INSERT INTO UniquePhotos
+                   (file_hash, partial_hash, partial_hash_bytes, file_size, file_name, source_path,
+                    revised_photo, revision_reason, revision_timestamp,
+                    create_datetime, create_year, create_month, create_day)
+                   VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)""",
+                (new_file_hash, partial_hash, partial_hash_bytes, file_size, file_path,
+                 parent_hash, revision_reason, revision_timestamp,
+                 create_datetime, create_year, create_month, create_day)
             )
 
-            # Update all existing history entries to point to new current hash
-            self.cursor.execute(
-                """UPDATE FileHashHistory
-                   SET current_file_hash = ?
-                   WHERE current_file_hash = ?""",
-                (new_hash, current_file_hash)
-            )
-
-            # Update UniquePhotos with new current hash
-            # Note: This changes the PRIMARY KEY, which SQLite handles via UPDATE
-            self.cursor.execute(
-                """UPDATE UniquePhotos
-                   SET file_hash = ?
-                   WHERE file_hash = ?""",
-                (new_hash, current_file_hash)
-            )
-
-            # Also update UnreliableDates table if it exists
-            # This ensures date correction status tracking continues to work
-            try:
-                self.cursor.execute(
-                    """UPDATE UnreliableDates
-                       SET file_hash = ?
-                       WHERE file_hash = ?""",
-                    (new_hash, current_file_hash)
-                )
-                rows_updated = self.cursor.rowcount
-                if rows_updated > 0:
-                    logger.info(f"Updated {rows_updated} UnreliableDates record(s) with new hash")
-            except Exception as e:
-                # Table may not exist in all databases
-                logger.debug(f"Could not update UnreliableDates (may not exist): {e}")
-
-            logger.info(f"Added hash to history: {current_file_hash} -> {new_hash} (reason: {reason})")
+            logger.info(f"Created revision: {new_file_hash[:16]}... (parent: {parent_hash[:16]}..., reason: {revision_reason})")
             return True
+        except sqlite3.IntegrityError:
+            logger.warning(f"Attempted to create revision with duplicate hash: {new_file_hash}")
+            return False
         except Exception as e:
-            logger.exception(f"Failed to add hash to history: {e}")
+            logger.exception(f"Failed to create revision record: {e}")
             return False
 
-    def get_photo_by_historical_hash(self, historical_hash):
+    def get_revision_chain(self, file_hash, max_depth=50):
         """
-        Get photo info by looking up any historical hash version.
+        Walk the revision chain from a file back to its original import.
 
         Parameters:
-            historical_hash (str): Any historical hash of the file
+            file_hash (str): Hash of any file in the chain
+            max_depth (int): Maximum chain depth to prevent infinite loops
 
         Returns:
-            dict or None: Photo info dict if found, None otherwise
+            list: List of dicts with file info, ordered from original to current
+                  [original, revision1, revision2, ..., current]
         """
         try:
-            self.cursor.execute(
-                """SELECT up.file_hash, up.file_name, up.original_hash,
-                          up.create_datetime, up.create_year, up.create_month, up.create_day
-                   FROM UniquePhotos up
-                   JOIN FileHashHistory fhh ON up.file_hash = fhh.current_file_hash
-                   WHERE fhh.historical_hash = ?
-                   LIMIT 1""",
-                (historical_hash,)
-            )
-            result = self.cursor.fetchone()
-            if result:
-                return {
+            chain = []
+            current_hash = file_hash
+            depth = 0
+
+            while current_hash and depth < max_depth:
+                self.cursor.execute("""
+                    SELECT file_hash, file_name, source_path, revised_photo,
+                           revision_reason, revision_timestamp,
+                           create_datetime, create_year, create_month, create_day
+                    FROM UniquePhotos
+                    WHERE file_hash = ?
+                """, (current_hash,))
+
+                result = self.cursor.fetchone()
+                if not result:
+                    break
+
+                file_info = {
                     'file_hash': result[0],
                     'file_name': result[1],
-                    'original_hash': result[2],
-                    'create_datetime': result[3],
-                    'create_year': result[4],
-                    'create_month': result[5],
-                    'create_day': result[6]
+                    'source_path': result[2],
+                    'revised_photo': result[3],
+                    'revision_reason': result[4],
+                    'revision_timestamp': result[5],
+                    'create_datetime': result[6],
+                    'create_year': result[7],
+                    'create_month': result[8],
+                    'create_day': result[9]
                 }
-            return None
+
+                # Prepend to chain (we're walking backwards)
+                chain.insert(0, file_info)
+
+                # Move to parent
+                current_hash = result[3]  # revised_photo
+                depth += 1
+
+            return chain
         except Exception as e:
-            logger.exception(f"Failed to get photo by historical hash: {e}")
-            raise
+            logger.exception(f"Failed to get revision chain: {e}")
+            return []
+
+    def get_all_revisions_of(self, parent_hash):
+        """
+        Find all direct revisions (children) of a given file.
+
+        Parameters:
+            parent_hash (str): Hash of the parent file
+
+        Returns:
+            list: List of dicts with revision info
+        """
+        try:
+            self.cursor.execute("""
+                SELECT file_hash, file_name, revision_reason, revision_timestamp,
+                       create_datetime, create_year, create_month, create_day
+                FROM UniquePhotos
+                WHERE revised_photo = ?
+                ORDER BY revision_timestamp
+            """, (parent_hash,))
+
+            results = self.cursor.fetchall()
+            revisions = []
+            for row in results:
+                revisions.append({
+                    'file_hash': row[0],
+                    'file_name': row[1],
+                    'revision_reason': row[2],
+                    'revision_timestamp': row[3],
+                    'create_datetime': row[4],
+                    'create_year': row[5],
+                    'create_month': row[6],
+                    'create_day': row[7]
+                })
+
+            return revisions
+        except Exception as e:
+            logger.exception(f"Failed to get revisions: {e}")
+            return []
 
     def commit(self):
         """
@@ -488,6 +449,56 @@ class PhotoDatabase:
         except Exception as e:
             logger.exception(f"Failed to commit changes: {e}")
             raise
+
+    def mark_photo_as_deleted(self, file_hash):
+        """
+        Mark a photo as deleted in UniquePhotos table.
+        Note: Actual deletion tracking happens in DeletedFiles table via DatabaseMetadata.
+
+        Args:
+            file_hash: SHA-256 hash of the file
+
+        Returns:
+            bool: True if successful
+        """
+        try:
+            # For now, we don't modify UniquePhotos - the file record stays
+            # Deletion tracking is handled by DeletedFiles table
+            # This method is a placeholder for future functionality
+            logger.debug(f"Photo marked as deleted: {file_hash[:16]}...")
+            return True
+        except Exception as e:
+            logger.exception(f"Failed to mark photo as deleted: {e}")
+            return False
+
+    def restore_photo(self, file_hash, new_archive_path):
+        """
+        Update UniquePhotos with restored archive path after file is restored from Delete Vault.
+
+        Args:
+            file_hash: SHA-256 hash of the file
+            new_archive_path: New path in archive after restoration
+
+        Returns:
+            bool: True if successful
+        """
+        try:
+            self.cursor.execute("""
+                UPDATE UniquePhotos
+                SET file_name = ?
+                WHERE file_hash = ?
+            """, (new_archive_path, file_hash))
+
+            if self.cursor.rowcount > 0:
+                logger.info(f"✓ Updated photo path for restored file: {os.path.basename(new_archive_path)}")
+                return True
+            else:
+                logger.warning(f"No photo record found for hash: {file_hash[:16]}...")
+                return False
+
+        except Exception as e:
+            logger.exception(f"Failed to restore photo path: {e}")
+            return False
 
 
 def should_ignore_directory(dir_path, dir_name, ignored_patterns):
@@ -1742,17 +1753,18 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                             }
                             original_files.append(original_file)
 
-                            # Add to database with partial hash info
+                            # Add to database with partial hash info and source path (v5 schema)
                             db.insert_unique_photo(
                                 file_hash,
-                                filename,
+                                filename,  # This will be archive path after organize_files()
                                 file_create_date,
                                 file_year,
                                 file_month,
                                 file_day,
                                 partial_hash=partial_hash,  # Will be None for small files
                                 partial_hash_bytes=partial_hash_bytes if partial_hash else None,
-                                file_size=file_size
+                                file_size=file_size,
+                                source_path=filename  # Original source location (v5 schema)
                             )
 
                             files_processed += 1

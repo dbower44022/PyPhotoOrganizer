@@ -121,8 +121,17 @@ class UnreliableDatesGridModel(QAbstractListModel):
 
             elif role == Qt.DecorationRole:
                 # Thumbnail pixmap (loaded from cache)
+                # CRITICAL: Prefer archive_path over source_path because:
+                # 1. Rotations/modifications happen on archive files (never modify source files)
+                # 2. Archive file reflects current state after any rotations/corrections
+                # 3. Source files remain pristine and unmodified
                 file_hash = item.get('file_hash')
-                file_path = item.get('source_path')
+                archive_path = item.get('archive_path', '')
+                source_path = item.get('source_path', '')
+
+                # Prefer archive if available, fallback to source
+                file_path = archive_path if archive_path else source_path
+
                 if file_hash and file_path:
                     try:
                         pixmap = self.thumbnail_cache.get_thumbnail(
@@ -193,6 +202,10 @@ class UnreliableDatesGridModel(QAbstractListModel):
         """
         try:
             logger.info(f"Loading {len(records)} records into grid model")
+
+            # CRITICAL: Clear thumbnail cache to force reload of rotated/modified images
+            # Without this, cached thumbnails of pre-rotation images are displayed
+            self.thumbnail_cache.clear_memory_cache()
 
             self._is_resetting = True
             self.beginResetModel()

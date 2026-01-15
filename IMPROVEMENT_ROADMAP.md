@@ -1850,7 +1850,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='pyphotorganizer',
-    version='2.4.0',
+    version='3.0.0',
     description='Deduplicate and organize photo collections',
     author='Doug Bower',
     packages=find_packages(),

@@ -2,7 +2,7 @@
 
 > Code reference and API documentation for developers
 
-**Last Updated:** 2026-01-02
+**Last Updated:** 2026-01-13
 
 ---
 
@@ -14,6 +14,8 @@
 - [utils.py](#utilspy)
 - [DuplicateFileDetection.py](#duplicatefiledetectionpy)
 - [photo_filter.py](#photo_filterpy)
+- [image_modifier.py (NEW v2.4)](#image_modifierpy)
+- [database_metadata.py](#database_metadatapy)
 - [main.py](#mainpy)
 - [Usage Examples](#usage-examples)
 
@@ -953,6 +955,542 @@ with PhotoDatabase('PhotoDB.db') as db:
     )
     # Auto-commits on successful exit
 ```
+
+---
+
+## image_modifier.py
+
+**NEW in v2.4** - Image modification operations and version management for tracking file variations with duplicate detection.
+
+### ImageModifier Class
+
+Static methods for image transformations. All methods preserve EXIF metadata.
+
+#### rotate_image()
+
+```python
+@staticmethod
+def rotate_image(
+    input_path: str,
+    angle: float,
+    expand: bool = True,
+    output_path: Optional[str] = None
+) -> Tuple[bool, Optional[str], Optional[str]]
+```
+
+**Purpose**: Rotate an image by specified angle.
+
+**Parameters:**
+- `input_path` (str): Path to input image file
+- `angle` (float): Rotation angle in degrees (positive = clockwise)
+- `expand` (bool): If True, expand canvas to fit rotated image (default: True)
+- `output_path` (Optional[str]): Output path. If None, uses `input_path_rotated.ext`
+
+**Returns:**
+- Tuple of (success, output_path, error_message)
+  - `success` (bool): True if operation succeeded
+  - `output_path` (str|None): Path to output file if successful
+  - `error_message` (str|None): Error description if failed
+
+**Features:**
+- Supports arbitrary angles (90, 180, 270, 45, etc.)
+- Preserves EXIF metadata
+- Updates EXIF orientation tag to 1 (normal)
+- High-quality rotation using PIL
+- No quality loss for lossless rotations (90°, 180°, 270°)
+
+**Example:**
+```python
+from image_modifier import ImageModifier
+
+success, output, error = ImageModifier.rotate_image(
+    "photo.jpg",
+    angle=90,
+    expand=True
+)
+
+if success:
+    print(f"Rotated image saved to: {output}")
+else:
+    print(f"Rotation failed: {error}")
+```
+
+---
+
+#### crop_image()
+
+```python
+@staticmethod
+def crop_image(
+    input_path: str,
+    box: Tuple[int, int, int, int],
+    output_path: Optional[str] = None
+) -> Tuple[bool, Optional[str], Optional[str]]
+```
+
+**Purpose**: Crop an image to specified bounding box.
+
+**Parameters:**
+- `input_path` (str): Path to input image file
+- `box` (Tuple[int, int, int, int]): Crop box as (left, upper, right, lower) in pixels
+- `output_path` (Optional[str]): Output path. If None, uses `input_path_cropped.ext`
+
+**Returns:**
+- Tuple of (success, output_path, error_message)
+
+**Validation:**
+- Crop box must be within image bounds
+- left < right, upper < lower
+- All values must be non-negative
+
+**Example:**
+```python
+# Crop to center 800x600 region
+success, output, error = ImageModifier.crop_image(
+    "photo.jpg",
+    box=(100, 100, 900, 700)
+)
+```
+
+---
+
+#### resize_image()
+
+```python
+@staticmethod
+def resize_image(
+    input_path: str,
+    width: int,
+    height: int,
+    maintain_aspect: bool = True,
+    output_path: Optional[str] = None
+) -> Tuple[bool, Optional[str], Optional[str]]
+```
+
+**Purpose**: Resize an image to specified dimensions.
+
+**Parameters:**
+- `input_path` (str): Path to input image file
+- `width` (int): Target width in pixels
+- `height` (int): Target height in pixels
+- `maintain_aspect` (bool): If True, maintain aspect ratio using max dimensions (default: True)
+- `output_path` (Optional[str]): Output path. If None, uses `input_path_resized.ext`
+
+**Returns:**
+- Tuple of (success, output_path, error_message)
+
+**Resampling:**
+- Uses LANCZOS filter for highest quality
+- Suitable for both upscaling and downscaling
+
+**Example:**
+```python
+# Resize to 1920x1080, maintaining aspect ratio
+success, output, error = ImageModifier.resize_image(
+    "photo.jpg",
+    width=1920,
+    height=1080,
+    maintain_aspect=True
+)
+```
+
+---
+
+#### adjust_color()
+
+```python
+@staticmethod
+def adjust_color(
+    input_path: str,
+    brightness: int = 0,
+    contrast: int = 0,
+    saturation: int = 0,
+    output_path: Optional[str] = None
+) -> Tuple[bool, Optional[str], Optional[str]]
+```
+
+**Purpose**: Adjust image brightness, contrast, and saturation.
+
+**Parameters:**
+- `input_path` (str): Path to input image file
+- `brightness` (int): Brightness adjustment from -100 (darker) to +100 (brighter), 0 = no change
+- `contrast` (int): Contrast adjustment from -100 to +100, 0 = no change
+- `saturation` (int): Saturation adjustment from -100 (grayscale) to +100 (vivid), 0 = no change
+- `output_path` (Optional[str]): Output path. If None, uses `input_path_adjusted.ext`
+
+**Returns:**
+- Tuple of (success, output_path, error_message)
+
+**Example:**
+```python
+# Increase brightness and saturation, decrease contrast
+success, output, error = ImageModifier.adjust_color(
+    "photo.jpg",
+    brightness=20,
+    contrast=-10,
+    saturation=15
+)
+```
+
+---
+
+#### convert_format()
+
+```python
+@staticmethod
+def convert_format(
+    input_path: str,
+    target_format: str,
+    quality: int = 95,
+    output_path: Optional[str] = None
+) -> Tuple[bool, Optional[str], Optional[str]]
+```
+
+**Purpose**: Convert image to different format.
+
+**Parameters:**
+- `input_path` (str): Path to input image file
+- `target_format` (str): Target format: 'jpeg', 'png', 'tiff', 'bmp', 'gif'
+- `quality` (int): Quality for JPEG/WebP formats (1-100, default: 95)
+- `output_path` (Optional[str]): Output path. If None, changes extension only
+
+**Returns:**
+- Tuple of (success, output_path, error_message)
+
+**Features:**
+- Automatic transparency handling (converts to white background for JPEG)
+- Preserves EXIF metadata in JPEG and TIFF
+- Quality parameter ignored for lossless formats (PNG, TIFF)
+
+**Example:**
+```python
+# Convert PNG to high-quality JPEG
+success, output, error = ImageModifier.convert_format(
+    "photo.png",
+    target_format="jpeg",
+    quality=95
+)
+```
+
+---
+
+### VersionManager Class
+
+Manages file version history and storage for tracking photo modifications.
+
+#### \_\_init\_\_()
+
+```python
+def __init__(self, database_path: str, archive_base: str)
+```
+
+**Purpose**: Initialize version manager with automatic database migration.
+
+**Parameters:**
+- `database_path` (str): Path to SQLite database file
+- `archive_base` (str): Base directory for archive (version storage will be `<archive_base>/.pyphotoorg_versions/`)
+
+**Side Effects:**
+- Creates version storage directory if needed
+- Runs database migration to schema v3 automatically
+- Raises `RuntimeError` if migration fails
+
+**Example:**
+```python
+from image_modifier import VersionManager
+
+vm = VersionManager(
+    database_path="/path/to/PhotoDB.db",
+    archive_base="/path/to/archive"
+)
+# Database is now migrated and ready for version tracking
+```
+
+---
+
+#### save_original_version()
+
+```python
+def save_original_version(self, archive_file_path: str) -> Optional[str]
+```
+
+**Purpose**: Save original file as version 0 before first modification.
+
+**Parameters:**
+- `archive_file_path` (str): Path to file in archive
+
+**Returns:**
+- `version_id` (str): Version ID if successful (format: `{hash}_v0`), None if failed
+
+**Storage:**
+- Creates v0 in `.pyphotoorg_versions/by_hash/{hash_prefix}/{full_hash}_v0.{ext}`
+- Records in `FileVersions` table
+- Adds hash to `FileHashHistory` for duplicate detection
+
+**Example:**
+```python
+version_id_v0 = vm.save_original_version(
+    "/archive/2024/01/15/photo.jpg"
+)
+print(f"Original saved as: {version_id_v0}")
+# Output: "Original saved as: abcd1234...ef_v0"
+```
+
+---
+
+#### create_new_version()
+
+```python
+def create_new_version(
+    self,
+    parent_version_id: str,
+    modified_file_path: str,
+    modification_type: str,
+    params: Dict,
+    session_id: str
+) -> Optional[str]
+```
+
+**Purpose**: Create new version after modification.
+
+**Parameters:**
+- `parent_version_id` (str): Version ID of parent (typically v0 or previous version)
+- `modified_file_path` (str): Path to modified file (temporary location)
+- `modification_type` (str): Type of modification ('rotation', 'crop', 'resize', 'color_adjust', 'format_convert')
+- `params` (Dict): Modification parameters as dictionary (e.g., `{'angle': 90}`)
+- `session_id` (str): Session ID for tracking batch operations
+
+**Returns:**
+- `version_id` (str): Version ID if successful (format: `{hash}_v{N}`), None if failed
+
+**Side Effects:**
+- Calculates hash of modified file
+- Copies file to version storage
+- Marks previous versions as inactive (`is_active=0`)
+- Sets new version as active (`is_active=1`)
+- **NEW in v2.4**: Adds hash to `FileHashHistory` for duplicate detection
+- Records in `FileVersions` table with full metadata
+
+**Example:**
+```python
+# After rotating photo.jpg
+version_id_v1 = vm.create_new_version(
+    parent_version_id="abcd1234...ef_v0",
+    modified_file_path="/tmp/rotated.jpg",
+    modification_type="rotation",
+    params={'angle': 90, 'expand': True},
+    session_id="manual_rotation_20260113"
+)
+print(f"New version: {version_id_v1}")
+# Output: "New version: xyz9876...ab_v1"
+```
+
+---
+
+#### get_version_history()
+
+```python
+def get_version_history(self, original_hash: str) -> List[Dict]
+```
+
+**Purpose**: Retrieve complete version history for a file.
+
+**Parameters:**
+- `original_hash` (str): SHA-256 hash of original file (when first imported)
+
+**Returns:**
+- `List[Dict]`: List of version records, ordered by version_number ascending
+
+**Record Structure:**
+```python
+{
+    'version_id': str,           # e.g., "abcd1234...ef_v2"
+    'file_hash': str,            # SHA-256 of this version
+    'parent_version_id': str,    # Parent version ID
+    'original_hash': str,        # Original file hash
+    'version_number': int,       # 0, 1, 2, ...
+    'storage_path': str,         # Full path to version file
+    'is_active': int,            # 1 = active, 0 = inactive
+    'modification_type': str,    # 'rotation', 'crop', etc.
+    'modification_params': str,  # JSON-encoded parameters
+    'file_size': int,            # Bytes
+    'image_width': int,          # Pixels
+    'image_height': int,         # Pixels
+    'image_format': str,         # 'JPEG', 'PNG', etc.
+    'created_timestamp': str     # ISO format
+}
+```
+
+**Example:**
+```python
+history = vm.get_version_history("abcd1234...ef")
+
+for version in history:
+    print(f"v{version['version_number']}: {version['modification_type']}")
+    print(f"  Created: {version['created_timestamp']}")
+    print(f"  Active: {version['is_active']}")
+
+# Output:
+# v0: original
+#   Created: 2026-01-13T10:00:00
+#   Active: 0
+# v1: rotation
+#   Created: 2026-01-13T10:15:00
+#   Active: 0
+# v2: crop
+#   Created: 2026-01-13T10:30:00
+#   Active: 1
+```
+
+---
+
+#### restore_version()
+
+```python
+def restore_version(self, version_id: str, target_path: str) -> bool
+```
+
+**Purpose**: Restore a specific version to target location.
+
+**Parameters:**
+- `version_id` (str): Version ID to restore (e.g., `"abcd1234...ef_v1"`)
+- `target_path` (str): Destination path for restored file
+
+**Returns:**
+- `bool`: True if successful, False if failed
+
+**Example:**
+```python
+# Restore v1 to temp location for preview
+success = vm.restore_version(
+    version_id="abcd1234...ef_v1",
+    target_path="/tmp/preview.jpg"
+)
+
+if success:
+    print("Version restored successfully")
+```
+
+---
+
+## database_metadata.py
+
+Database metadata and configuration management, including version synchronization (v2.4+).
+
+### DatabaseMetadata Class
+
+#### sync_versions_to_hash_history()
+
+**NEW in v2.4** - Sync existing file versions to FileHashHistory for duplicate detection.
+
+```python
+def sync_versions_to_hash_history(self) -> int
+```
+
+**Purpose**: One-time synchronization of existing version hashes to enable duplicate detection. Safe to run multiple times.
+
+**Returns:**
+- `int`: Number of version hashes synced
+
+**Use Case:**
+- Run after database migration to schema v3
+- Needed if versions were created before v2.4
+- Makes existing versions visible to duplicate detection
+
+**SQL Logic:**
+```sql
+-- Finds versions not in hash history
+SELECT COUNT(*) FROM FileVersions v
+WHERE NOT EXISTS (
+    SELECT 1 FROM FileHashHistory h
+    WHERE h.historical_hash = v.file_hash
+)
+
+-- Inserts missing hashes
+INSERT OR IGNORE INTO FileHashHistory
+    (current_file_hash, historical_hash, created_date, reason)
+SELECT
+    v.original_hash,
+    v.file_hash,
+    v.created_timestamp,
+    'sync_' || COALESCE(v.modification_type, 'version')
+FROM FileVersions v
+WHERE NOT EXISTS (...)
+```
+
+**Example:**
+```python
+from database_metadata import DatabaseMetadata
+
+db_meta = DatabaseMetadata("/path/to/PhotoDB.db")
+
+# Sync all existing versions
+synced = db_meta.sync_versions_to_hash_history()
+
+if synced > 0:
+    print(f"Synced {synced} version hashes to FileHashHistory")
+    print("Duplicate detection now works for all versions")
+else:
+    print("All versions already synced")
+```
+
+---
+
+## DuplicateFileDetection.py Updates (v2.4)
+
+### PhotoDatabase Class
+
+#### add_version_hash_to_history()
+
+**NEW in v2.4** - Add version hash to FileHashHistory without updating UniquePhotos.
+
+```python
+def add_version_hash_to_history(
+    self,
+    original_hash: str,
+    version_hash: str,
+    reason: str = 'version'
+) -> bool
+```
+
+**Purpose**: Record a version hash for duplicate detection while keeping versions separate from primary archive.
+
+**Parameters:**
+- `original_hash` (str): SHA-256 hash of the original file (links all versions together)
+- `version_hash` (str): SHA-256 hash of the version file
+- `reason` (str): Reason for version creation (e.g., 'version_rotation', 'version_crop')
+
+**Returns:**
+- `bool`: True if successful, False if failed
+
+**Behavior:**
+- Adds entry to `FileHashHistory` table
+- Uses `INSERT OR IGNORE` for idempotent operation
+- Does NOT update `UniquePhotos` table (versions stored separately)
+- Creates "star topology": all versions point to original_hash, not previous version
+
+**Difference from add_hash_to_history():**
+- `add_hash_to_history()`: Updates `UniquePhotos.file_hash` (replaces primary file)
+- `add_version_hash_to_history()`: Only updates `FileHashHistory` (versions separate)
+
+**Example:**
+```python
+with PhotoDatabase("PhotoDB.db") as db:
+    # Add rotated version hash
+    success = db.add_version_hash_to_history(
+        original_hash="abcd1234...ef",
+        version_hash="xyz9876...ab",
+        reason="version_rotation"
+    )
+
+    if success:
+        print("Version hash added for duplicate detection")
+```
+
+**Integration:**
+- Called automatically by `VersionManager.create_new_version()`
+- Called automatically by `VersionManager.save_original_version()`
+- Enables `find_duplicates()` to detect version hashes as duplicates
 
 ---
 

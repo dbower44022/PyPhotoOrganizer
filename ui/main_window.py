@@ -213,6 +213,10 @@ class MainWindow(QMainWindow):
             if not self.archive_settings_tab.save_organization_to_database():
                 return  # Error dialog already shown
 
+            # Add organization template from database to config
+            config['organization_template'] = self.database_metadata.get_organization_template()
+            logger.info(f"Organization template from database: {config['organization_template']}")
+
             # Validate operation mode
             if not config['copy_files'] and not config['move_files']:
                 QMessageBox.warning(self, "Error", "Please select Copy or Move mode in System Settings tab")

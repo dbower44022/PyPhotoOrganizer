@@ -44,22 +44,49 @@ class TriageDatabase:
 
     def ensure_triage_tables(self):
         """
-        Ensure all triage tables exist.
-        Runs migration script if tables don't exist.
+        Ensure all triage tables exist and are up-to-date.
+        Runs migration script and upgrades schema if needed.
         """
+        logger.info(f"{'='*80}")
+        logger.info(f"ENSURING TRIAGE TABLES")
+        logger.info(f"  Database: {self.db_path}")
+        logger.info(f"{'-'*60}")
+
         migration_script = Path(__file__).parent / "migrate_database.sql"
 
         if not migration_script.exists():
+            logger.error(f"✗ Migration script not found: {migration_script}")
             raise FileNotFoundError(f"Migration script not found: {migration_script}")
 
         with open(migration_script, 'r') as f:
             sql_script = f.read()
 
         with PhotoDatabase(self.db_path) as db:
+            # Run migration script (creates tables if they don't exist)
             db.conn.executescript(sql_script)
+
+            # Check and upgrade ThumbnailCache schema if needed
+            cursor = db.conn.cursor()
+            cursor.execute("PRAGMA table_info(ThumbnailCache)")
+            columns = [row[1] for row in cursor.fetchall()]
+
+            # Add file_modified_timestamp column if missing
+            if 'file_modified_timestamp' not in columns:
+                logger.info("  Upgrading ThumbnailCache: adding file_modified_timestamp column")
+                cursor.execute("""
+                    ALTER TABLE ThumbnailCache
+                    ADD COLUMN file_modified_timestamp TEXT NOT NULL DEFAULT ''
+                """)
+                logger.info("  ✓ Added file_modified_timestamp column")
+
+            # Remove obsolete file_size_bytes column if it exists (can't drop in SQLite, just ignore it)
+            if 'file_size_bytes' in columns and 'file_modified_timestamp' in columns:
+                logger.debug("  Note: Obsolete file_size_bytes column exists but is unused")
+
             db.commit()
 
-        logger.info("Triage tables ensured in database")
+        logger.info(f"✓ Triage tables ensured and upgraded")
+        logger.info(f"{'='*80}")
 
     # ========================================================================
     # TriageActions - Mark/Unmark Operations
@@ -339,6 +366,54 @@ class TriageDatabase:
 
         logger.info(f"Cleaned up {deleted_count} thumbnails, "
                    f"new size: {total_size / 1024 / 1024:.1f} MB")
+        return deleted_count
+
+    def delete_thumbnails_for_hash(self, file_hash: str) -> int:
+        """
+        Delete all cached thumbnails for a specific file hash.
+
+        Used when file is modified (rotated, edited) and hash changes.
+        Removes thumbnails from both database and disk.
+
+        Args:
+            file_hash: SHA-256 hash to delete thumbnails for
+
+        Returns:
+            Number of thumbnails deleted
+        """
+        deleted_count = 0
+
+        with PhotoDatabase(self.db_path) as db:
+            # Get all thumbnail paths for this hash
+            db.cursor.execute("""
+                SELECT thumbnail_path
+                FROM ThumbnailCache
+                WHERE file_hash = ?
+            """, (file_hash,))
+
+            thumbnail_paths = [row[0] for row in db.cursor.fetchall()]
+
+            # Delete files from disk
+            for thumb_path in thumbnail_paths:
+                if os.path.exists(thumb_path):
+                    try:
+                        os.remove(thumb_path)
+                        deleted_count += 1
+                        logger.debug(f"Deleted thumbnail file: {thumb_path}")
+                    except OSError as e:
+                        logger.warning(f"Failed to delete {thumb_path}: {e}")
+
+            # Delete from database
+            db.cursor.execute("""
+                DELETE FROM ThumbnailCache
+                WHERE file_hash = ?
+            """, (file_hash,))
+
+            db.commit()
+
+        if deleted_count > 0:
+            logger.debug(f"Deleted {deleted_count} thumbnails for hash {file_hash[:8]}...")
+
         return deleted_count
 
     # ========================================================================

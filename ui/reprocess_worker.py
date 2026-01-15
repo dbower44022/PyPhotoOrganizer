@@ -255,10 +255,11 @@ class ReprocessWorker(QThread):
                             create_day=day,
                             partial_hash=partial_hash,
                             partial_hash_bytes=partial_hash_bytes,
-                            file_size=file_size
+                            file_size=file_size,
+                            source_path=source_path  # Preserve original import source (v5 schema)
                         )
 
-                        # Note: Hash history is automatically created by insert_unique_photo()
+                        # Note: In v5 schema, duplicate detection is via primary key lookup (no hash history table)
 
                     # Log to audit
                     if self.audit_manager and self.session_id:

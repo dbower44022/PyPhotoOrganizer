@@ -9,6 +9,12 @@ Performance optimizations:
 - Saves as JPEG with quality=85 (good balance)
 - Handles HEIC, RAW formats via pillow_heif
 - Runs in separate thread (no UI blocking)
+
+EXIF Orientation Handling (v3.0.3):
+- Applies EXIF orientation tags via ImageOps.exif_transpose()
+- Ensures thumbnails display with correct rotation
+- Handles all 8 EXIF orientation values (rotations + mirrors)
+- Critical for phone/camera photos that use orientation tags
 """
 
 import logging
@@ -19,7 +25,7 @@ from typing import Optional
 
 from PySide6.QtCore import QRunnable, QObject, Signal, Slot, Qt
 from PySide6.QtGui import QPixmap, QImage, QColor, QPainter, QFont
-from PIL import Image
+from PIL import Image, ImageOps
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +135,11 @@ class ThumbnailWorker(QRunnable):
             # Open image with PIL
             img = Image.open(self.file_path)
 
+            # Apply EXIF orientation tag to display image correctly
+            # Many cameras/phones save images in a default orientation and use EXIF
+            # orientation tag to indicate how the image should be displayed
+            img = ImageOps.exif_transpose(img)
+
             # Convert to RGB if needed (handles RGBA, L, CMYK, etc.)
             if img.mode not in ('RGB', 'L'):
                 self.signals.progress.emit(self.file_hash, "Converting to RGB...")
@@ -197,11 +208,34 @@ class ThumbnailWorker(QRunnable):
 
         except (OSError, IOError) as e:
             error_msg = f"OS/IO error: {str(e)}"
-            logger.error(f"Thumbnail generation failed for {self.file_path}: {error_msg}")
+            logger.error(f"✗ Thumbnail generation failed for {self.file_path}: {error_msg}")
+            logger.error(f"  File may be corrupted or incomplete")
+            logger.info(f"  Generating 'CORRUPTED' placeholder thumbnail...")
+
             try:
-                self.signals.error.emit(self.file_hash, error_msg)
-            except Exception as emit_error:
-                logger.error(f"Failed to emit error signal: {emit_error}")
+                # Generate corrupted file placeholder instead of failing silently
+                cache_subdir = self.cache_dir / self.file_hash[:2]
+                cache_subdir.mkdir(parents=True, exist_ok=True)
+                disk_path = cache_subdir / f"{self.file_hash}_{self.size}_corrupted.jpg"
+
+                # Generate and save placeholder
+                placeholder = self._create_corrupted_placeholder()
+                placeholder.save(str(disk_path), 'JPEG', quality=85)
+                logger.info(f"  ✓ Saved corrupted placeholder to: {disk_path}")
+
+                # Update database
+                self._update_cache_metadata(disk_path)
+
+                # Emit success signal with placeholder (not error signal)
+                self.signals.finished.emit(self.file_hash, self.size, str(disk_path))
+                logger.info(f"  ✓ Corrupted file will display with placeholder thumbnail")
+
+            except Exception as placeholder_error:
+                logger.error(f"  ✗ Failed to create placeholder: {placeholder_error}")
+                try:
+                    self.signals.error.emit(self.file_hash, error_msg)
+                except Exception as emit_error:
+                    logger.error(f"Failed to emit error signal: {emit_error}")
 
         except Exception as e:
             error_msg = f"Unexpected error: {str(e)}"
@@ -250,6 +284,69 @@ class ThumbnailWorker(QRunnable):
         text_x = (self.size - text_width) // 2
         text_y = self.size - max(20, self.size // 10)
         draw.text((text_x, text_y), text, fill=(200, 200, 200), font=font)
+
+        return img
+
+    def _create_corrupted_placeholder(self) -> Image.Image:
+        """
+        Create placeholder thumbnail for corrupted/damaged image files as PIL Image.
+
+        Returns:
+            PIL Image with "CORRUPTED" text and warning symbol
+        """
+        from PIL import ImageDraw, ImageFont
+
+        # Create placeholder with red/orange warning color
+        img = Image.new('RGB', (self.size, self.size), color=(80, 40, 40))
+        draw = ImageDraw.Draw(img)
+
+        # Draw warning triangle (exclamation mark shape)
+        triangle_size = self.size // 3
+        center_x = self.size // 2
+        center_y = self.size // 2 - self.size // 10
+
+        # Triangle outline
+        triangle = [
+            (center_x, center_y - triangle_size//2),  # Top point
+            (center_x - triangle_size//2, center_y + triangle_size//2),  # Bottom left
+            (center_x + triangle_size//2, center_y + triangle_size//2)   # Bottom right
+        ]
+        draw.polygon(triangle, outline=(220, 100, 80), fill=None, width=max(2, self.size // 128))
+
+        # Draw exclamation mark inside triangle
+        # Vertical bar
+        bar_width = max(2, self.size // 64)
+        bar_height = triangle_size // 3
+        bar_x = center_x - bar_width // 2
+        bar_y = center_y - triangle_size // 6
+        draw.rectangle(
+            [(bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height)],
+            fill=(220, 100, 80)
+        )
+
+        # Dot at bottom
+        dot_size = max(2, self.size // 48)
+        dot_y = bar_y + bar_height + dot_size
+        draw.ellipse(
+            [(center_x - dot_size, dot_y), (center_x + dot_size, dot_y + dot_size * 2)],
+            fill=(220, 100, 80)
+        )
+
+        # Draw "CORRUPTED" text below triangle
+        text = "CORRUPTED"
+        try:
+            # Try to use a TrueType font if available
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", max(10, self.size // 24))
+        except:
+            # Fallback to default PIL font
+            font = ImageFont.load_default()
+
+        # Get text bounding box and draw centered at bottom
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_x = (self.size - text_width) // 2
+        text_y = self.size - max(20, self.size // 10)
+        draw.text((text_x, text_y), text, fill=(220, 100, 80), font=font)
 
         return img
 

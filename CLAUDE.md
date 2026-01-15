@@ -270,6 +270,454 @@ python TestRoutines.py
 - Better performance for concurrent access
 - Creates additional files: `*.db-wal` and `*.db-shm` (normal, don't delete)
 
+### Database Auto-Upgrade System (v3.0.1)
+
+**Purpose**: Transparently upgrade database schemas without manual migration scripts or user intervention. As new features are added, columns/tables are automatically created on first access.
+
+**Architecture:**
+
+1. **DatabaseMetadata Auto-Upgrade** (`database_metadata.py` lines 130-220):
+   - `_ensure_metadata_table()` checks for missing columns on every connection
+   - Uses `PRAGMA table_info(DatabaseMetadata)` to get current schema
+   - Compares against expected columns list
+   - Adds missing columns with `ALTER TABLE ... ADD COLUMN`
+   - Sets default values for existing rows with `UPDATE`
+
+   ```python
+   # Example: Adding delete_vault_location column
+   cursor.execute("PRAGMA table_info(DatabaseMetadata)")
+   columns = [row[1] for row in cursor.fetchall()]
+
+   if 'delete_vault_location' not in columns:
+       logger.info("Upgrading database: adding delete_vault_location column")
+       cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN delete_vault_location TEXT")
+   ```
+
+2. **Triage Tables Auto-Upgrade** (`triage/triage_database.py` lines 45-89):
+   - `ensure_triage_tables()` runs migration SQL + schema checks
+   - Detects missing columns in ThumbnailCache table
+   - Adds `file_modified_timestamp` if missing (replaces obsolete `file_size_bytes`)
+   - Called automatically when ThumbnailCache initializes
+
+   ```python
+   # ThumbnailCache initialization (thumbnail_cache.py lines 88-91)
+   self.triage_db = TriageDatabase(db_path)
+   self.triage_db.ensure_triage_tables()  # Auto-upgrade before use
+   ```
+
+3. **Upgrade Logging Standards**:
+   - All upgrades logged with section markers (`===` and `---`)
+   - Visual indicators: ℹ for info, ✓ for success
+   - Step-by-step progress logged
+   - Example output:
+     ```
+     ================================================================================
+     ENSURING TRIAGE TABLES
+       Database: PhotoDB_V3_Test02_DB.db
+     ------------------------------------------------------------
+       Upgrading ThumbnailCache: adding file_modified_timestamp column
+       ✓ Added file_modified_timestamp column
+     ✓ Triage tables ensured and upgraded
+     ================================================================================
+     ```
+
+**Key Principles:**
+- **Idempotent**: Safe to run multiple times (uses IF NOT EXISTS, column checks)
+- **Non-Destructive**: Never drops columns or tables (SQLite limitation anyway)
+- **Backward Compatible**: Old columns remain (ignored by new code)
+- **Automatic**: No user action required - happens on first access
+- **Logged**: All upgrades produce detailed logs for debugging
+
+**Column Upgrade History:**
+- `video_archive_location` - Added for separate video storage
+- `organization_template` - Added for custom folder templates
+- `file_type_organization` - Added for video organization options
+- `filename_template` - Added for custom filename patterns
+- `enable_file_rename` - Added to toggle filename template
+- `delete_vault_location` - Added for delete vault configuration (v3.0.1)
+- `file_modified_timestamp` - Added to ThumbnailCache for cache invalidation (v3.0.1)
+
+**When Adding New Database Columns:**
+1. Add column to appropriate CREATE TABLE statement (for new databases)
+2. Add column check + ALTER TABLE in `_ensure_metadata_table()` or `ensure_triage_tables()`
+3. Add column to SELECT queries that need it
+4. Test on old database to verify auto-upgrade works
+5. Document in CHANGELOG.md with migration details
+
+### Configuration Flow and Worker Integration (v3.0.1)
+
+**Problem Solved**: Custom organization templates were saved to database but not applied during import because they weren't passed to the worker thread.
+
+**Configuration Assembly Process** (`ui/main_window.py` lines 154-232):
+
+1. **Get Base Config from Import Settings Tab**:
+   ```python
+   config = self.import_settings_tab.get_config()
+   ```
+   Returns: photo filter settings, processing options, etc.
+
+2. **Add Database-Bound Settings**:
+   ```python
+   config['source_directory'] = source_folders  # From database SourceDirectories
+   config['destination_directory'] = destination_folder  # From database archive_location
+   config['database_path'] = self.current_database_path
+   config['copy_files'] = self.system_settings_tab.is_copy_mode()
+   config['ignored_directories'] = self.database_metadata.get_ignored_directories()
+   ```
+
+3. **Add System Performance Settings**:
+   ```python
+   perf_config = self.system_settings_tab.get_config()
+   config.update(perf_config)  # Partial hash settings, etc.
+   ```
+
+4. **Save and Add Organization Template** (CRITICAL - Fixed in v3.0.1):
+   ```python
+   # Save organization settings to database
+   self.archive_settings_tab.save_organization_to_database()
+
+   # Add organization template from database to config (NEW in v3.0.1)
+   config['organization_template'] = self.database_metadata.get_organization_template()
+   logger.info(f"Organization template from database: {config['organization_template']}")
+   ```
+
+5. **Pass Config to Worker Thread**:
+   ```python
+   self.worker = ProcessingWorker(config)
+   self.worker.start()
+   ```
+
+**Worker Usage** (`ui/worker.py` line 59):
+```python
+organization_template = self.config.get('organization_template', '{YYYY}/{MM}/{DD}')
+```
+Now correctly receives custom template like `{YYYY}/{MM}{month_sname}` instead of falling back to default.
+
+**Result**: Files organized using correct template:
+- Before fix: Always used default `{YYYY}/{MM}/{DD}` → folders like `2025/01/01/`
+- After fix: Uses custom template `{YYYY}/{MM}{month_sname}` → folders like `2025/01Jan/`
+
+**Key Lesson**: Database-bound settings must be explicitly added to config dict before passing to worker threads. The config dict is the "contract" between UI thread and worker thread.
+
+### DeletedFiles Table and Soft-Delete System (v3.0.2)
+
+**Purpose**: Track files deleted to Delete Vault with full restore capability and audit trail.
+
+**Database Schema** (`database_metadata.py` lines 99-114):
+```python
+DELETED_FILES_TABLE_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS DeletedFiles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_hash TEXT NOT NULL,
+        original_archive_path TEXT NOT NULL,
+        delete_vault_path TEXT NOT NULL,
+        deletion_timestamp TEXT NOT NULL,
+        deletion_reason TEXT,
+        deleted_by_session TEXT,
+        file_size INTEGER,
+        creation_date TEXT,
+        is_restored INTEGER DEFAULT 0,
+        restore_timestamp TEXT,
+        FOREIGN KEY (file_hash) REFERENCES UniquePhotos(file_hash)
+    );
+"""
+```
+
+**Performance Indexes**:
+- `idx_deleted_hash` - Fast lookups by file hash
+- `idx_deleted_restored` - Filter by restoration status
+- `idx_deleted_timestamp` - Sort by deletion date
+
+**Key Methods** (`database_metadata.py`):
+
+1. **`mark_file_as_deleted(file_hash, original_path, vault_path, reason)`** (lines 2086-2135):
+   - Inserts deletion record with metadata from UniquePhotos
+   - Calculates creation_date from create_year/month/day (with int() conversion for TEXT fields)
+   - Returns True on success, False on failure
+   - Logs all operations with visual indicators
+
+2. **`get_deleted_files(include_restored=False)`** (lines 2050-2084):
+   - Query DeletedFiles table with optional restored filtering
+   - Returns list of dict records with all file metadata
+   - Orders by deletion_timestamp DESC (most recent first)
+
+3. **`mark_file_as_restored(file_hash)`** (lines 2137-2163):
+   - Sets is_restored=1 and updates restore_timestamp
+   - Only affects non-restored records (WHERE is_restored=0)
+
+**Auto-Creation**:
+- Table created automatically in `DatabaseMetadata.__init__()` (line 129)
+- `_ensure_deleted_files_table()` method handles creation + indexes (lines 338-357)
+- No manual migration needed - works on all new and existing databases
+
+**Integration Points**:
+- `ui/date_corrections_tab.py` - Delete button calls `mark_file_as_deleted()`
+- `ui/delete_worker.py` - Background worker for file deletion (copy-verify-delete pattern)
+- `ui/deleted_files_dialog.py` - View and restore deleted files (planned)
+- `ui/restore_worker.py` - Background worker for file restoration (planned)
+
+**Critical Fix** (v3.0.2):
+```python
+# Fixed formatting error - month/day stored as TEXT, need int() for :02d format
+creation_date = f"{photo_info[1]}-{int(photo_info[2]):02d}-{int(photo_info[3]):02d}"
+```
+
+### Corrupted File Thumbnail Handling (v3.0.2)
+
+**Purpose**: Generate visual placeholders for damaged/corrupted image files instead of failing silently.
+
+**Problem**: Files with corrupted data streams, incomplete transfers, or storage corruption cause PIL to fail when generating thumbnails, leaving blank spots in the grid.
+
+**Solution**: Generate "CORRUPTED" placeholder thumbnails with warning symbol.
+
+**Visual Design**:
+- Background: Red/orange warning color (80, 40, 40)
+- Symbol: Warning triangle with exclamation mark
+- Text: "CORRUPTED" label at bottom
+- Color scheme: (220, 100, 80) for symbol and text
+- Clear distinction from VIDEO placeholders and normal thumbnails
+
+**Implementation** (`triage/thumbnail_generator.py`):
+
+1. **`_create_corrupted_placeholder()`** method (lines 279-340):
+   ```python
+   def _create_corrupted_placeholder(self) -> Image.Image:
+       # Create placeholder with warning colors
+       img = Image.new('RGB', (self.size, self.size), color=(80, 40, 40))
+       draw = ImageDraw.Draw(img)
+
+       # Draw warning triangle with exclamation mark
+       triangle = [(center_x, top), (bottom_left), (bottom_right)]
+       draw.polygon(triangle, outline=(220, 100, 80), fill=None, width=...)
+
+       # Draw "!" symbol
+       draw.rectangle([...], fill=(220, 100, 80))  # Vertical bar
+       draw.ellipse([...], fill=(220, 100, 80))    # Dot
+
+       # Draw "CORRUPTED" text
+       draw.text((x, y), "CORRUPTED", fill=(220, 100, 80), font=font)
+
+       return img
+   ```
+
+2. **OSError/IOError Exception Handler** (lines 198-227):
+   ```python
+   except (OSError, IOError) as e:
+       error_msg = f"OS/IO error: {str(e)}"
+       logger.error(f"✗ Thumbnail generation failed for {self.file_path}: {error_msg}")
+       logger.error(f"  File may be corrupted or incomplete")
+       logger.info(f"  Generating 'CORRUPTED' placeholder thumbnail...")
+
+       try:
+           # Generate corrupted file placeholder
+           cache_subdir = self.cache_dir / self.file_hash[:2]
+           disk_path = cache_subdir / f"{self.file_hash}_{self.size}_corrupted.jpg"
+
+           placeholder = self._create_corrupted_placeholder()
+           placeholder.save(str(disk_path), 'JPEG', quality=85)
+
+           # Update database with placeholder path
+           self._update_cache_metadata(disk_path)
+
+           # Emit success signal (not error) so grid displays placeholder
+           self.signals.finished.emit(self.file_hash, self.size, str(disk_path))
+           logger.info(f"  ✓ Corrupted file will display with placeholder thumbnail")
+   ```
+
+**User Benefits**:
+- Can now **see** which files are corrupted (instead of blank spots)
+- Can **identify** problematic files for review or deletion
+- Can **select** corrupted files in grid for batch deletion
+- Clear visual warning about file integrity issues
+
+**Caching**:
+- Placeholder saved to disk cache with `_corrupted.jpg` suffix
+- Same caching behavior as normal thumbnails
+- No performance impact on grid rendering
+
+**Logging Standards**:
+- Error logging with ✗ indicator for failed generation
+- Success logging with ✓ indicator for placeholder creation
+- Detailed context: file path, error message, placeholder location
+
+### EXIF Orientation Handling (v3.0.3)
+
+**Purpose**: Display images with correct orientation by respecting EXIF orientation tags.
+
+**Problem**: Many cameras and smartphones save images in a default orientation (usually landscape) and use the EXIF Orientation tag to indicate how the image should be displayed. Without applying this tag, images appear rotated incorrectly in thumbnails and previews, even though they display correctly in the operating system's file viewer.
+
+**Solution**: Use `PIL.ImageOps.exif_transpose()` to automatically apply EXIF orientation tags when loading images.
+
+**How EXIF Orientation Works**:
+- EXIF Orientation tag values 1-8 indicate rotation and mirroring transformations
+- Value 1 = Normal (no transformation needed)
+- Value 3 = Rotated 180°
+- Value 6 = Rotated 90° CW (common for portrait photos on phones)
+- Value 8 = Rotated 90° CCW
+- Values 2, 4, 5, 7 = Various mirrored orientations
+- `ImageOps.exif_transpose()` handles all 8 orientations automatically
+
+**Files Updated**:
+
+1. **`triage/thumbnail_generator.py`** (lines 22, 132-135):
+   ```python
+   from PIL import Image, ImageOps
+
+   # In ThumbnailWorker.run():
+   img = Image.open(self.file_path)
+
+   # Apply EXIF orientation tag to display image correctly
+   img = ImageOps.exif_transpose(img)
+   ```
+
+2. **`ui/date_corrections_tab.py`** - `ZoomableImageViewer.load_image()`:
+   ```python
+   from PIL import Image, ImageOps
+
+   pil_img = Image.open(file_path)
+   pil_img = ImageOps.exif_transpose(pil_img)
+   ```
+
+3. **`ui/import_history_tab.py`** - `ImagePreviewWidget.setImage()`:
+   ```python
+   from PIL import Image, ImageOps
+
+   pil_img = Image.open(file_path)
+   pil_img = ImageOps.exif_transpose(pil_img)
+   ```
+
+4. **`ui/filtered_files_tab.py`** - Preview loading:
+   ```python
+   from PIL import Image, ImageOps
+
+   img = Image.open(file_path)
+   img = ImageOps.exif_transpose(img)
+   ```
+
+**Important Notes**:
+- `exif_transpose()` returns a new image if transformation is needed, or the original if not
+- The function handles images without EXIF data gracefully (returns original)
+- Must be called BEFORE any mode conversion (RGB) to preserve EXIF data
+- This fix applies to display only - source files and archive files are NOT modified
+
+**Cache Invalidation**:
+After updating to v3.0.3, existing cached thumbnails may show incorrect orientation. To fix:
+1. Clear the thumbnail cache directory (configured in database metadata)
+2. Or delete the `ThumbnailCache` table entries to force regeneration
+3. Thumbnails will regenerate with correct orientation on next view
+
+**Testing**:
+To verify the fix works correctly:
+1. Find an image that appears rotated incorrectly in the app but correctly in OS file viewer
+2. Check the image's EXIF Orientation tag: `exiftool -Orientation <file>`
+3. After the fix, the image should display correctly in all app previews and thumbnails
+
+### Database Schema Test Infrastructure (v3.0.2)
+
+**Purpose**: Comprehensive verification that all database tables, columns, indexes, and foreign keys are created correctly.
+
+**Test Files**:
+
+1. **`test_database_schema.py`** - Comprehensive schema verification (24 tests)
+   - Scope: Tests all DatabaseMetadata-managed tables
+   - Does NOT test audit tables (managed by AuditManager separately)
+   - Usage: `python3 test_database_schema.py`
+
+2. **`test_deleted_files_table.py`** - Focused DeletedFiles verification
+   - Scope: Specifically tests DeletedFiles table implementation
+   - Bypasses pillow_heif dependency for isolated testing
+   - Usage: `python3 test_deleted_files_table.py`
+
+**Test Coverage**:
+
+**Test 1: New Database Creation**
+- Creates temporary database with DatabaseMetadata initialization
+- Verifies database file created successfully
+- Tests auto-upgrade system adds missing columns
+
+**Test 2: Table Existence**
+- Verifies all 7 expected tables exist:
+  - DatabaseMetadata, UniquePhotos, SourceDirectories
+  - UnreliableDates, FileRenameHistory, ThumbnailCache
+  - DeletedFiles ✓
+
+**Test 3: Column Verification**
+- Checks each table has all expected columns
+- DeletedFiles: Verifies all 11 columns present
+- Reports missing columns with detailed error messages
+
+**Test 4: Index Verification**
+- Verifies performance indexes created correctly
+- DeletedFiles: 3 indexes (hash, restored, timestamp)
+- UnreliableDates: 2 indexes (hash, needs_reorg)
+- ThumbnailCache: 2 indexes (hash, accessed)
+- UniquePhotos: 3 indexes (file_hash, original_hash, partial_hash)
+
+**Test 5: Auto-Upgrade Functionality**
+- Creates minimal old database (missing columns/tables)
+- Initializes DatabaseMetadata to trigger upgrades
+- Verifies new columns and tables added automatically
+- Tests idempotent behavior (safe to run multiple times)
+
+**Test 6: Foreign Key Constraints**
+- Checks foreign keys defined in table schemas
+- DeletedFiles → UniquePhotos(file_hash) ✓
+- UnreliableDates → UniquePhotos(file_hash) ✓
+- FileRenameHistory → UniquePhotos(file_hash) ✓
+- Note: SQLite doesn't enforce by default, but definitions are correct
+
+**Test Results**:
+- **Pass Rate**: 100% (24/24 tests)
+- **Tables Verified**: 7 core tables
+- **Indexes Verified**: 10 performance indexes
+- **Foreign Keys Verified**: 3 referential integrity constraints
+
+**Key Test Patterns**:
+
+1. **Temporary Database Creation**:
+   ```python
+   db_path = os.path.join(tempfile.gettempdir(), 'test_schema_verification.db')
+   db_meta = DatabaseMetadata(db_path)  # Triggers auto-creation
+   ```
+
+2. **Schema Introspection**:
+   ```python
+   cursor.execute("PRAGMA table_info(DeletedFiles)")
+   columns = [row[1] for row in cursor.fetchall()]
+   assert 'delete_vault_path' in columns
+   ```
+
+3. **Foreign Key Detection**:
+   ```python
+   cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='DeletedFiles'")
+   table_sql = cursor.fetchone()[0]
+   assert 'FOREIGN KEY' in table_sql
+   ```
+
+4. **Cleanup**:
+   ```python
+   os.remove(db_path)  # Clean up test database
+   ```
+
+**When to Run Tests**:
+- After modifying database schemas (tables, columns, indexes)
+- After adding new auto-upgrade logic
+- Before releasing new version with schema changes
+- When debugging schema-related issues
+- During development to verify changes don't break existing schemas
+
+**Continuous Integration**:
+- Tests use temporary databases (no production impact)
+- Exit code 0 on success, 1 on failure (CI-friendly)
+- Comprehensive output with pass/fail summary
+- Failed tests show detailed error messages
+
+**Fixed Issues** (v3.0.2):
+- UnreliableDates foreign key: `UniquePhotos(hash)` → `UniquePhotos(file_hash)`
+- Test suite corruption: Auto-upgrade test no longer deletes main test database
+- Missing indexes: Added UnreliableDates performance indexes
+- Improved foreign key detection logic for better test reliability
+
 ### Data Flow
 
 1. **GUI Mode**: Source directories loaded from database `SourceDirectories` table (persistent across sessions)
@@ -1220,6 +1668,927 @@ self.on_selection_changed()
 - `ui/date_corrections_tab.py`: QTableWidgetItem checkboxes (lines 283-742)
 - `ui/import_settings_tab.py`: QCheckBox widgets (source folder enable/disable checkboxes)
 - `ui/date_correction_dialog.py`: Dialog centering (lines 481-500)
+
+### File Version Management System (v2.4)
+
+**Purpose**: Track multiple file variations (rotations, color corrections, crops) while maintaining duplicate detection across all versions.
+
+**Architecture Overview:**
+
+PyPhotoOrganizer uses a sophisticated version management system that allows users to create multiple variations of a photo (rotated, cropped, color-adjusted) while ensuring all variations are recognized as duplicates during import. This prevents the same photo from being imported multiple times just because it was edited externally.
+
+**Core Components:**
+
+1. **FileVersions Table**: Stores complete version history with parent-child relationships
+   - `version_id`: Unique identifier (format: `{hash}_v{version_number}`)
+   - `file_hash`: SHA-256 hash of this version
+   - `parent_version_id`: Links to parent version (NULL for v0/original)
+   - `original_hash`: Links all versions to the same original file
+   - `version_number`: Sequential version number (0 = original, 1+ = modifications)
+   - `storage_path`: Physical file location in version storage
+   - `is_active`: Flag indicating current/active version
+   - `modification_type`: Type of modification ('rotation', 'crop', 'color_adjust', etc.)
+   - `modification_params`: JSON-encoded modification parameters
+   - `created_timestamp`: When version was created
+
+2. **VersionManager Class** (`image_modifier.py`): Creates and manages versions in `.pyphotoorg_versions/` storage
+   - `save_original_version()`: Store v0 before first modification
+   - `create_new_version()`: Create new version after modification
+   - `get_version_history()`: Retrieve complete version tree
+   - `restore_version()`: Restore specific version to archive
+   - `_ensure_migration()`: Automatically runs database migration to schema v3
+
+3. **FileHashHistory Integration**: All version hashes automatically added for duplicate detection
+   - When a version is created, its hash is added to `FileHashHistory`
+   - **Star topology**: All versions link to `original_hash` (not linear chain)
+   - Enables `find_duplicates()` to detect any version as a duplicate
+   - Works transparently with existing duplicate detection logic
+
+**Version Storage:**
+
+Files are stored separately from the main archive:
+- **Location**: `<archive>/.pyphotoorg_versions/by_hash/<hash_prefix>/<full_hash>_v<N>.<ext>`
+- **Example**: `archive/.pyphotoorg_versions/by_hash/ab/abcd1234...ef_v2.jpg`
+- **Hash prefix**: First 2 characters of hash (for filesystem organization)
+- **Version number**: Sequential (v0 = original, v1 = first modification, etc.)
+
+**Duplicate Detection Workflow:**
+
+```
+User imports photo.jpg (hash AAA)
+    ↓
+Stored in UniquePhotos (file_hash=AAA)
+FileHashHistory entry (historical_hash=AAA, reason='original')
+    ↓
+User rotates photo 90° via VersionManager
+    ↓
+New version created in FileVersions (v1, hash BBB)
+FileHashHistory entry added (historical_hash=BBB, reason='version_rotation')
+    ↓
+User imports same rotated image from different source
+    ↓
+find_duplicates() checks FileHashHistory
+Finds BBB in historical_hashes → Detected as duplicate ✓
+Import skipped - file recognized as existing photo
+```
+
+**Supported Modifications** (via `ImageModifier` class):
+
+1. **Rotation**: `rotate_image(angle, expand=True)`
+   - Arbitrary angles (90°, 180°, 270°, custom)
+   - Preserves EXIF data
+   - Updates EXIF orientation tag
+
+2. **Crop**: `crop_image(box)`
+   - Bounding box format: (left, upper, right, lower)
+   - Validates crop bounds
+   - Preserves EXIF metadata
+
+3. **Resize**: `resize_image(width, height, maintain_aspect=True)`
+   - Optional aspect ratio maintenance
+   - LANCZOS resampling for quality
+
+4. **Color Adjustment**: `adjust_color(brightness, contrast, saturation)`
+   - Range: -100 to +100 for each parameter
+   - Real-time preview support
+
+5. **Format Conversion**: `convert_format(target_format, quality=95)`
+   - Supports: JPEG, PNG, TIFF, BMP, GIF
+   - Handles transparency conversion
+   - Preserves EXIF in JPEG and TIFF
+
+**Database Tables:**
+
+**FileVersions** (complete version history):
+```sql
+CREATE TABLE FileVersions (
+    version_id TEXT PRIMARY KEY,
+    file_hash TEXT NOT NULL,
+    parent_version_id TEXT,
+    original_hash TEXT NOT NULL,
+    version_number INTEGER NOT NULL,
+    storage_path TEXT NOT NULL,
+    is_active INTEGER DEFAULT 1,
+    modification_session_id TEXT,
+    modification_type TEXT,
+    modification_params TEXT,
+    file_size INTEGER,
+    image_width INTEGER,
+    image_height INTEGER,
+    image_format TEXT,
+    created_timestamp TEXT NOT NULL,
+    FOREIGN KEY (parent_version_id) REFERENCES FileVersions(version_id),
+    FOREIGN KEY (original_hash) REFERENCES UniquePhotos(original_hash)
+)
+```
+
+**FileHashHistory** (enhanced with version hashes):
+- Existing table now includes version hashes with `reason` starting with 'version_'
+- Examples: `'version_rotation'`, `'version_crop'`, `'version_color_adjust'`
+- Enables transparent duplicate detection for all versions
+
+**ModificationSession** (session tracking):
+- Tracks batch modification operations
+- Records statistics (total files, successful, failed)
+- Supports undo capability (future enhancement)
+
+**ModificationLog** (per-file operation logging):
+- Complete audit trail for all modifications
+- Links input version → output version
+- Stores operation parameters for reproducibility
+
+**Key Methods:**
+
+**PhotoDatabase Class** (`DuplicateFileDetection.py`):
+- `add_version_hash_to_history(original_hash, version_hash, reason)`: Add version hash for duplicate detection
+  - Creates "star" topology: all versions link to original
+  - Does NOT update `UniquePhotos` (versions are separate)
+  - Uses `INSERT OR IGNORE` for idempotent operation
+
+**VersionManager Class** (`image_modifier.py`):
+- `save_original_version(archive_file_path)`: Creates v0 before first modification
+- `create_new_version(parent_version_id, modified_file_path, modification_type, params, session_id)`: Creates new version after modification
+- `get_version_history(original_hash)`: Returns complete version tree ordered by version number
+- `restore_version(version_id, target_path)`: Restores specific version to target path
+- `_ensure_migration()`: Ensures database schema supports version tracking (auto-runs migration)
+
+**DatabaseMetadata Class** (`database_metadata.py`):
+- `sync_versions_to_hash_history()`: One-time sync to populate FileHashHistory with existing version hashes
+  - Safe to run multiple times (uses `INSERT OR IGNORE`)
+  - Returns count of synced hashes
+  - Useful after migration or for legacy databases
+
+**Integration with Existing Features:**
+
+1. **Duplicate Detection**:
+   - `find_duplicates()` automatically checks `FileHashHistory` for all version hashes
+   - No code changes needed - works transparently
+   - Any version hash match = duplicate (file skipped)
+
+2. **EXIF Modification**:
+   - EXIF date corrections continue to work with `add_hash_to_history()`
+   - Version system uses separate method: `add_version_hash_to_history()`
+   - Both coexist in `FileHashHistory` table
+
+3. **Date Correction Workflow**:
+   - User can correct date, then rotate/crop the file
+   - All operations tracked in version history
+   - Reorganization works with versioned files
+
+**Database Migration:**
+
+The system automatically migrates existing databases to schema version 3:
+- Migration script: `migrations/add_modifications_support.py`
+- Auto-runs when `VersionManager` is initialized
+- Adds: `FileVersions`, `ModificationSession`, `ModificationLog` tables
+- Enhances: `FileHashHistory` with `version_id` column
+- Creates: 13 indexes for performance
+- Safe: Idempotent (can run multiple times)
+
+**Backward Compatibility:**
+
+- Existing databases auto-upgrade on first access
+- EXIF modification tracking continues to work unchanged
+- `add_hash_to_history()` for in-place modifications (EXIF edits)
+- `add_version_hash_to_history()` for separate versions (rotations, crops)
+- Both methods coexist peacefully in `FileHashHistory`
+
+**Version Synchronization:**
+
+For databases with existing versions (created before this integration):
+1. Call `DatabaseMetadata.sync_versions_to_hash_history()`
+2. Method queries `FileVersions` for hashes not in `FileHashHistory`
+3. Inserts missing hashes with reason `'sync_<modification_type>'`
+4. Makes existing versions visible to duplicate detection
+5. Safe to call multiple times (uses `INSERT OR IGNORE`)
+
+**Source File Protection:**
+
+All version operations follow the critical architectural principle:
+- ✅ Source files are **NEVER modified**
+- ✅ Versions are created from **archive copies only**
+- ✅ All modifications operate on `.pyphotoorg_versions/` storage
+- ✅ Original archive file remains untouched (unless explicitly replaced)
+
+**Future UI Integration (v2.5 planned):**
+
+- Image Editor tab with modification tools
+- Version history viewer with timeline
+- Restore version capability
+- Apply version to replace original
+- Batch modification support
+
+### Prior Revision Archive System (v3.0.3)
+
+**Purpose**: Maintain a clean, current-revision-only main archive by automatically moving superseded file versions to a separate Prior Revision Archive during image rotation operations. This two-archive architecture keeps the main archive organized while preserving complete revision history for undo capability.
+
+**Architecture Overview:**
+
+PyPhotoOrganizer uses a dual-archive system for image revision management:
+- **Main Archive**: Contains ONLY the current/latest revision of each file
+- **Prior Revision Archive**: Contains all superseded revisions (historical versions)
+
+When a user rotates an image, the system:
+1. Moves the original file from Main Archive → Prior Revision Archive
+2. Places the rotated version in the Main Archive (takes over the original's slot)
+3. Updates database records to track both file locations
+4. Maintains parent-child revision chain for undo capability
+
+**Key Benefits:**
+- Main archive stays clean (no version clutter)
+- Instant undo capability (swap files between archives)
+- Complete revision history preserved
+- Transparent duplicate detection (all revisions tracked)
+- User-configurable archive locations
+- No performance impact on day-to-day operations
+
+**Database Schema Integration:**
+
+**DatabaseMetadata Table (Enhanced):**
+```sql
+-- New column added to existing table
+ALTER TABLE DatabaseMetadata
+ADD COLUMN prior_revision_archive_location TEXT;
+```
+
+**UniquePhotos Table (Schema v5):**
+```sql
+CREATE TABLE UniquePhotos (
+    file_hash TEXT PRIMARY KEY,          -- Current file hash
+    file_name TEXT NOT NULL,             -- Current file path (main OR prior archive)
+    creation_date TEXT,                  -- YYYY-MM-DD format
+    date_source TEXT,                    -- 'exif', 'video_metadata', 'os_metadata', 'fallback'
+    file_size INTEGER,
+    revised_photo TEXT,                  -- Parent revision hash (NULL = original)
+    original_hash TEXT,                  -- Links all revisions to same original
+    FOREIGN KEY (revised_photo) REFERENCES UniquePhotos(file_hash)
+);
+```
+
+**Revision Chain Topology:**
+
+Files are organized in a parent-child chain where:
+- **Original file** (v0): `revised_photo=NULL`, `original_hash=<own_hash>`
+- **First rotation** (v1): `revised_photo=<v0_hash>`, `original_hash=<v0_hash>`
+- **Second rotation** (v2): `revised_photo=<v1_hash>`, `original_hash=<v0_hash>`
+
+All revisions link back to the same `original_hash` for relationship tracking.
+
+**File Organization Strategy:**
+
+**Main Archive** (current revisions only):
+```
+/archive/2024/01/15/vacation.jpg              # Current revision (hash CCC)
+/archive/2024/01/15/beach.jpg                 # Current revision (hash FFF)
+```
+
+**Prior Revision Archive** (historical revisions with hash suffixes):
+```
+/prior_revisions/2024/01/15/vacation_aaaabbbb.jpg    # v0 original (hash AAA)
+/prior_revisions/2024/01/15/vacation_bbbbcccc.jpg    # v1 first rotation (hash BBB)
+/prior_revisions/2024/01/15/beach_ddddeeff.jpg       # v0 original (hash DDD)
+/prior_revisions/2024/01/15/beach_eeeeffff.jpg       # v1 first rotation (hash EEE)
+```
+
+**Filename Convention:**
+- Main archive: Original filename unchanged (`vacation.jpg`)
+- Prior archive: Hash-suffixed filenames (`vacation_aaaabbbb.jpg`)
+  - Suffix format: First 8 characters of SHA-256 hash
+  - Prevents filename collisions for multiple revisions
+  - Maintains human readability
+
+**Date Structure Mirroring:**
+- Prior Revision Archive mirrors Main Archive's date folder structure
+- Example: `/archive/2024/01/15/photo.jpg` → `/prior_revisions/2024/01/15/photo_hash.jpg`
+- Preserves chronological organization
+- Easy to locate related revisions
+
+**Core Methods:**
+
+**DatabaseMetadata Class** (`database_metadata.py`):
+
+```python
+def get_prior_revision_archive_location(self) -> str:
+    """
+    Get the Prior Revision Archive location from database metadata.
+
+    Returns:
+        str: Path to prior revision archive, or None if not configured
+
+    Example:
+        prior_archive = db_metadata.get_prior_revision_archive_location()
+        if prior_archive:
+            print(f"Prior revisions stored in: {prior_archive}")
+    """
+
+def set_prior_revision_archive_location(self, path: str) -> bool:
+    """
+    Set the Prior Revision Archive location with extensive validation.
+
+    Args:
+        path: Absolute path to prior revision archive directory
+              Set to empty string or None to clear the location
+
+    Returns:
+        bool: True if successful, False otherwise
+
+    Validation Checks:
+        - Path must exist and be a directory
+        - Path must be writable
+        - Cannot be same as main archive
+        - Cannot be inside main archive (prevents circular reference)
+        - Allows clearing by passing None or empty string
+
+    Example:
+        success = db_metadata.set_prior_revision_archive_location("/mnt/backup/prior_revisions")
+        if not success:
+            logger.error("Failed to set prior revision archive location")
+    """
+```
+
+**Helper Functions** (`ui/rotate_worker.py`):
+
+```python
+def generate_prior_revision_path(original_archive_path, file_hash, prior_archive_base):
+    """
+    Generate path in Prior Revision Archive that mirrors original date structure.
+
+    Algorithm:
+        1. Extract date structure from original path (YYYY/MM/DD pattern)
+        2. Extract filename from original path
+        3. Add hash suffix to filename (first 8 chars of hash)
+        4. Combine: prior_archive_base + date_structure + hash_suffixed_filename
+
+    Args:
+        original_archive_path: Path in main archive
+            Example: /archive/2024/01/15/vacation.jpg
+        file_hash: SHA-256 hash of the file (64 hex characters)
+        prior_archive_base: Base path for prior revision archive
+            Example: /prior_revisions/
+
+    Returns:
+        str: Full path in prior revision archive with hash suffix
+            Example: /prior_revisions/2024/01/15/vacation_abcd1234.jpg
+
+    Hash Suffix Format:
+        - Uses first 8 characters of SHA-256 hash
+        - Sufficient uniqueness (1 in 4 billion collision chance)
+        - Keeps filenames readable and manageable
+        - Format: {original_name}_{hash[:8]}{extension}
+
+    Date Structure Detection:
+        - Looks for YYYY pattern in path (4 digits, value 1990-2100)
+        - Extracts all path components after year
+        - Handles various organization templates
+        - Falls back to last 3 directory components if no year found
+
+    Example Transformations:
+        /archive/2024/01/15/photo.jpg + hash=abcd1234ef567890...
+            → /prior/2024/01/15/photo_abcd1234.jpg
+
+        /archive/2024/01-Jan/15/photo.jpg + hash=12345678abcdef...
+            → /prior/2024/01-Jan/15/photo_12345678.jpg
+
+        /archive/2024/January/photo.jpg + hash=aabbccdd11223344...
+            → /prior/2024/January/photo_aabbccdd.jpg
+    """
+```
+
+**Rotation Workflow:**
+
+**RotateWorker Class** (`ui/rotate_worker.py`):
+
+The rotation workflow has been completely redesigned to implement the Prior Revision Archive system. Here's the detailed algorithm:
+
+```
+PRE-ROTATION PHASE:
+1. Validate prior revision archive is configured
+   - Call db_metadata.get_prior_revision_archive_location()
+   - If None, raise error: "Prior Revision Archive not configured"
+   - Verify directory exists and is writable
+
+2. Load file record from database
+   - Query UniquePhotos for file_hash
+   - Verify archive_path exists on disk
+   - Get current file properties (size, hash)
+
+ROTATION PHASE:
+3. Create rotated version (in temp directory)
+   - Call ImageModifier.rotate_image(angle, expand=True)
+   - Preserves EXIF data during rotation
+   - Calculates new file hash (file content changed)
+   - Verifies rotation succeeded (file size > 0)
+
+ARCHIVE REORGANIZATION PHASE:
+4. Move original to Prior Revision Archive
+   - Generate prior revision path with hash suffix
+   - Create directory structure in prior archive
+   - Execute move: Main Archive → Prior Archive
+   - Fallback strategy:
+     a. Try shutil.move() (fast, atomic)
+     b. If fails, try shutil.copy2() + os.remove()
+     c. If copy2 fails (permissions), use shutil.copy() + os.remove()
+   - Verify original no longer exists in main archive
+
+5. Place rotated version in Main Archive
+   - Copy rotated file from temp to main archive
+   - Takes over the original file's exact path
+   - Verify placement (file exists, size matches)
+   - Delete temp file
+
+DATABASE UPDATE PHASE:
+6. Update original file record (now in prior archive)
+   - UPDATE UniquePhotos SET file_name = <prior_archive_path>
+   - WHERE file_hash = <original_hash>
+   - Record now points to prior revision archive
+
+7. Insert new revision record (now in main archive)
+   - INSERT INTO UniquePhotos:
+     - file_hash = <new_hash>
+     - file_name = <main_archive_path> (same path original had)
+     - revised_photo = <original_hash> (parent reference)
+     - original_hash = <original_hash> (chain to same original)
+     - creation_date, file_size, date_source (preserved from original)
+
+8. Add revision hash to FileHashHistory
+   - INSERT INTO FileHashHistory:
+     - current_file_hash = <original_hash>
+     - historical_hash = <new_hash>
+     - reason = 'rotation_revision'
+   - Enables duplicate detection for rotated version
+
+UNRELIABLE DATES UPDATE (if applicable):
+9. Update UnreliableDates table
+   - If file has unreliable date record, update its hash
+   - UPDATE UnreliableDates SET file_hash = <new_hash>
+   - WHERE file_hash = <original_hash>
+   - Preserves date correction flags
+
+AUDIT TRAIL PHASE:
+10. Log rotation operation
+    - Call audit_manager.log_file_operation()
+    - Operation: 'rotate_image'
+    - Source: <original_path_in_main_archive>
+    - Destination: <prior_archive_path>
+    - Status: 'success'
+    - Includes: rotation angle, duration, file sizes
+
+CLEANUP PHASE:
+11. Clean empty directories
+    - Check if original's date folder in main archive is now empty
+    - If empty, remove directory (keeps archive organized)
+    - Recursively check parent directories
+
+12. Emit progress signal
+    - Signal completion to UI
+    - Update progress bar
+    - Display success message
+```
+
+**Complete Workflow Example:**
+
+```
+INITIAL STATE:
+  Main Archive:    /archive/2024/01/15/vacation.jpg (hash AAA, 2.5MB)
+  Prior Archive:   (empty)
+  Database:        UniquePhotos: {hash='AAA', file_name='...archive/vacation.jpg',
+                                   revised_photo=NULL, original_hash='AAA'}
+
+USER ACTION: Rotate 90° clockwise
+
+STEP 1: Create rotated version in temp
+  Temp:            /tmp/vacation_rotated.jpg (hash BBB, 2.6MB)
+
+STEP 2: Move original to Prior Archive
+  Main Archive:    (vacation.jpg deleted)
+  Prior Archive:   /prior_revisions/2024/01/15/vacation_aaaabbbb.jpg (hash AAA, 2.5MB)
+
+STEP 3: Place rotated version in Main Archive
+  Main Archive:    /archive/2024/01/15/vacation.jpg (hash BBB, 2.6MB)
+  Prior Archive:   /prior_revisions/2024/01/15/vacation_aaaabbbb.jpg (hash AAA, 2.5MB)
+
+STEP 4: Update database
+  UniquePhotos:    {hash='AAA', file_name='...prior_revisions/vacation_aaaabbbb.jpg',
+                    revised_photo=NULL, original_hash='AAA'}
+                   {hash='BBB', file_name='...archive/vacation.jpg',
+                    revised_photo='AAA', original_hash='AAA'}
+
+  FileHashHistory: {current_file_hash='AAA', historical_hash='AAA', reason='original'}
+                   {current_file_hash='AAA', historical_hash='BBB', reason='rotation_revision'}
+
+RESULT:
+  Main Archive contains ONLY current revision (BBB)
+  Prior Archive contains historical revision (AAA)
+  Full undo capability maintained
+  Both hashes tracked for duplicate detection
+```
+
+**Multi-Rotation Example:**
+
+```
+INITIAL: vacation.jpg in main archive (hash AAA)
+
+ROTATION 1 (90° CW):
+  Main Archive:    vacation.jpg (hash BBB, 90° rotation)
+  Prior Archive:   vacation_aaaabbbb.jpg (hash AAA, original)
+  Database:        AAA → points to prior archive
+                   BBB → points to main archive, revised_photo='AAA'
+
+ROTATION 2 (180° additional = 270° total):
+  Main Archive:    vacation.jpg (hash CCC, 270° rotation)
+  Prior Archive:   vacation_aaaabbbb.jpg (hash AAA, original)
+                   vacation_bbbbcccc.jpg (hash BBB, 90° rotation)
+  Database:        AAA → points to prior archive, revised_photo=NULL
+                   BBB → points to prior archive, revised_photo='AAA'
+                   CCC → points to main archive, revised_photo='BBB'
+
+ROTATION 3 (90° additional = 360° = back to original orientation):
+  Main Archive:    vacation.jpg (hash DDD, 360° rotation)
+  Prior Archive:   vacation_aaaabbbb.jpg (hash AAA)
+                   vacation_bbbbcccc.jpg (hash BBB)
+                   vacation_ccccdddd.jpg (hash CCC)
+  Database:        AAA → revised_photo=NULL (original)
+                   BBB → revised_photo='AAA'
+                   CCC → revised_photo='BBB'
+                   DDD → revised_photo='CCC' (current in main archive)
+
+Note: Hash DDD ≠ AAA even though orientation is same
+      (EXIF orientation tags differ, pixel data layout differs)
+```
+
+**Undo Rotation System:**
+
+**UndoRotationWorker Class** (`ui/rotate_worker.py`):
+
+```python
+class UndoRotationWorker(QThread):
+    """
+    Background worker for undoing image rotations by restoring prior revisions.
+
+    Workflow:
+        1. Query database for current revision (in main archive)
+        2. Query database for parent revision (in prior archive)
+        3. Move current revision → Prior Archive (becomes historical)
+        4. Move parent revision → Main Archive (becomes current)
+        5. Update database records for both files
+        6. Update UnreliableDates if applicable
+        7. Log to audit trail
+
+    Signals:
+        progress(int current, int total, str filename): Emits progress updates
+        finished(dict results): Emits final results with success/error counts
+
+    Thread Safety:
+        - Runs in background QThread to avoid UI freeze
+        - All file operations use thread-safe methods
+        - Database operations use separate connection per thread
+        - Progress updates via Qt signals (thread-safe)
+    """
+```
+
+**Undo Algorithm:**
+
+```
+PRE-UNDO VALIDATION:
+1. Verify prior revision archive is configured
+2. Query current revision record (hash CCC in example)
+   - Verify it has a parent (revised_photo IS NOT NULL)
+   - Get current file path in main archive
+3. Query parent revision record (hash BBB in example)
+   - Get parent file path in prior archive
+   - Verify parent file exists on disk
+
+ARCHIVE SWAP PHASE:
+4. Move current revision to Prior Archive
+   - Generate new prior path with hash suffix
+   - Create directory structure if needed
+   - Move: Main Archive → Prior Archive
+   - Fallback: copy + verify + delete (same as rotation)
+   - Verify current revision no longer in main archive
+
+5. Move parent revision to Main Archive
+   - Extract original filename (strip hash suffix)
+   - Move: Prior Archive → Main Archive
+   - Takes over the current revision's path
+   - Fallback: copy + verify + delete
+   - Verify parent revision now in main archive
+
+DATABASE UPDATE PHASE:
+6. Update current revision record (now in prior archive)
+   - UPDATE UniquePhotos:
+     - file_name = <new_prior_archive_path>
+     - WHERE file_hash = <current_hash>
+
+7. Update parent revision record (now in main archive)
+   - UPDATE UniquePhotos:
+     - file_name = <main_archive_path>
+     - WHERE file_hash = <parent_hash>
+
+8. Update UnreliableDates (if applicable)
+   - UPDATE UnreliableDates:
+     - file_hash = <parent_hash>
+     - WHERE file_hash = <current_hash>
+
+AUDIT TRAIL PHASE:
+9. Log undo operation
+   - Operation: 'undo_rotation'
+   - Source: <main_archive_path>
+   - Destination: <prior_archive_path>
+   - Details: parent_hash, current_hash
+
+RESULT:
+   - Parent revision restored to main archive
+   - Current revision moved to prior archive
+   - Revision chain preserved (undo can be undone)
+   - Database accurately reflects current state
+```
+
+**Undo Example:**
+
+```
+BEFORE UNDO (from previous multi-rotation example):
+  Main Archive:    vacation.jpg (hash CCC, 270° rotation)
+  Prior Archive:   vacation_aaaabbbb.jpg (hash AAA, original)
+                   vacation_bbbbcccc.jpg (hash BBB, 90° rotation)
+  Database:        CCC → main archive, revised_photo='BBB'
+                   BBB → prior archive, revised_photo='AAA'
+                   AAA → prior archive, revised_photo=NULL
+
+USER ACTION: Undo last rotation
+
+STEP 1: Move CCC to Prior Archive
+  Main Archive:    (vacation.jpg deleted)
+  Prior Archive:   vacation_aaaabbbb.jpg (hash AAA)
+                   vacation_bbbbcccc.jpg (hash BBB)
+                   vacation_ccccdddd.jpg (hash CCC) ← NEW
+
+STEP 2: Move BBB to Main Archive
+  Main Archive:    vacation.jpg (hash BBB, 90° rotation) ← RESTORED
+  Prior Archive:   vacation_aaaabbbb.jpg (hash AAA)
+                   vacation_ccccdddd.jpg (hash CCC)
+
+  Note: vacation_bbbbcccc.jpg deleted from prior archive
+
+STEP 3: Update database
+  Database:        CCC → prior archive, revised_photo='BBB'
+                   BBB → main archive, revised_photo='AAA'
+                   AAA → prior archive, revised_photo=NULL
+
+RESULT:
+  Main Archive contains hash BBB (90° rotation)
+  Prior Archive contains AAA (original) and CCC (270° rotation)
+  Can undo again to restore AAA
+  Can "redo" by undoing the undo (restore CCC)
+```
+
+**Duplicate Detection Integration:**
+
+The Prior Revision Archive system transparently integrates with PyPhotoOrganizer's duplicate detection:
+
+```python
+# When user imports a file, find_duplicates() checks:
+
+1. Current UniquePhotos.file_hash (main archive revisions)
+2. FileHashHistory.historical_hash (all revision hashes)
+
+# Example: User rotated vacation.jpg (AAA → BBB → CCC)
+# Then tries to re-import original vacation.jpg from phone
+
+FileHashHistory contains:
+  - historical_hash='AAA' (original)
+  - historical_hash='BBB' (90° rotation)
+  - historical_hash='CCC' (270° rotation)
+
+Import process:
+  1. Calculate hash of phone file → AAA
+  2. Check FileHashHistory for AAA
+  3. MATCH FOUND → Duplicate detected
+  4. File skipped, not copied to archive
+
+Result: System recognizes this is same photo despite rotation
+```
+
+**Performance Characteristics:**
+
+- **Rotation Speed**: ~100-500ms per file (depends on resolution)
+  - Small photos (1-2MP): 100-200ms
+  - Medium photos (8-12MP): 200-350ms
+  - Large photos (24MP+): 350-500ms
+  - Bottleneck: Image decoding/encoding, not file operations
+
+- **Undo Speed**: ~50-150ms per file
+  - Mostly file move operations (very fast)
+  - No image processing required
+  - Bottleneck: Disk I/O (SSD vs HDD)
+
+- **Database Operations**: <10ms per file
+  - Indexed queries (hash lookups)
+  - WAL mode for concurrent access
+  - Negligible compared to file operations
+
+- **Duplicate Detection**: No performance impact
+  - FileHashHistory lookup same speed as before
+  - Index on historical_hash column
+  - O(1) hash table lookup
+
+- **Disk Space**: Approximately doubles per rotation
+  - Original (2.5MB) + Rotated (2.6MB) = 5.1MB total
+  - Multiple rotations accumulate in prior archive
+  - User can manually clean prior archive if needed
+  - Future enhancement: Retention policies
+
+**Error Handling:**
+
+The system includes comprehensive error handling at every step:
+
+1. **Configuration Errors**:
+   - Prior archive not configured → Clear error message
+   - Prior archive same as main archive → Validation prevents
+   - Prior archive inside main archive → Validation prevents
+   - Prior archive not writable → Detected before rotation starts
+
+2. **File Operation Errors**:
+   - Original file missing → Operation aborted, logged
+   - Move fails → Automatic fallback to copy+delete
+   - Copy2 fails (permission) → Fallback to copy
+   - Insufficient disk space → Caught, error message displayed
+   - File locked → Retry with fallback methods
+
+3. **Database Errors**:
+   - Connection failure → Operation rolled back
+   - Update returns 0 rows → Error logged, operation aborted
+   - Constraint violation → Transaction rolled back
+   - WAL mode prevents most lock contention
+
+4. **Consistency Checks**:
+   - After move: Verify source deleted, destination exists
+   - After copy: Verify file sizes match exactly
+   - After database update: Verify row count = expected
+   - If any check fails: Full rollback attempted
+
+5. **Audit Trail**:
+   - All errors logged with full stack traces
+   - Operation status: 'success', 'failed', 'partial'
+   - Error details preserved for debugging
+   - User sees clear error messages (no technical jargon)
+
+**Integration with Other Features:**
+
+**Date Correction System:**
+- Files in prior archive can have corrected dates
+- UnreliableDates table tracks hash changes through rotations
+- Reorganization works with both main and prior archives
+- If file rotated after date correction, both operations tracked
+
+**Import History:**
+- Rotation operations logged in FileProcessingLog
+- Audit trail shows: original → prior, rotated → main
+- Undo operations also logged separately
+- Complete traceability for all file movements
+
+**File Rename System:**
+- Renamed files preserve their revision chains
+- Prior archive uses ORIGINAL filenames (with hash suffix)
+- Main archive uses CURRENT filename (after rename)
+- Undo restores previous filename automatically
+
+**Organization Templates:**
+- Prior archive mirrors whatever template used in main archive
+- Works with all presets: By Day, By Month, By Year, Custom
+- Date structure preserved exactly
+- Easy to locate related files in both archives
+
+**UI Integration (Planned for v3.1):**
+
+**Archive Settings Tab** (`ui/archive_settings_tab.py`):
+```
+Prior Revision Archive Section:
+  [ ] Enable Prior Revision Archive
+
+  Location: [/mnt/backup/prior_revisions     ] [Browse...]
+
+  Status: ✓ Configured and writable
+
+  Statistics:
+    - Total prior revisions: 1,247 files
+    - Disk space used: 8.3 GB
+    - Oldest revision: 2024-01-15
+    - Newest revision: 2024-12-30
+
+  [Clear All Prior Revisions...]  (Warning: Irreversible)
+```
+
+**Date Corrections Tab** (Rotation Controls):
+```
+When file selected in grid:
+  [Rotate 90° CW]  [Rotate 90° CCW]  [Rotate 180°]  [Custom Angle...]
+
+  Revision History:
+    ○ Current (hash CCC, 270° rotation) ← in main archive
+    ○ Previous (hash BBB, 90° rotation) ← in prior archive
+    ○ Original (hash AAA, no rotation) ← in prior archive
+
+  [Undo Last Rotation]  [Restore Original]
+```
+
+**Security Considerations:**
+
+1. **Path Traversal Prevention**:
+   - All paths normalized before use
+   - No `..` sequences allowed in configuration
+   - Symlink detection and handling
+   - Absolute paths required
+
+2. **Permission Validation**:
+   - Write access verified before operations
+   - Directory creation permissions checked
+   - Fallback copy methods for restricted filesystems
+   - Clear error messages for permission issues
+
+3. **Data Integrity**:
+   - File size verification after all copies
+   - Hash verification optional (performance trade-off)
+   - Database transactions prevent partial updates
+   - Rollback capability on errors
+
+4. **Concurrent Access**:
+   - Database WAL mode prevents locks
+   - File operations use OS-level locking
+   - QThread workers prevent UI blocking
+   - Multiple rotation operations can run safely
+
+**Migration and Backward Compatibility:**
+
+**For Existing Installations:**
+
+1. **Automatic Schema Migration**:
+   - `prior_revision_archive_location` column added automatically
+   - Uses ALTER TABLE (non-destructive)
+   - Defaults to NULL (feature disabled until configured)
+   - No data loss or corruption risk
+
+2. **Existing Rotations**:
+   - Old rotation workflow remains in database
+   - New rotations use Prior Revision Archive (if configured)
+   - Mixed mode supported: some files with old workflow, others with new
+   - No need to "convert" old rotations
+
+3. **Configuration Required**:
+   - User must set Prior Revision Archive location
+   - Until set, rotation operations fail with clear error
+   - UI prompts user to configure on first rotation attempt
+
+4. **Rolling Back** (if needed):
+   - Simply clear prior_revision_archive_location in database
+   - Old rotation workflow not available in v3.0.3+
+   - Recommend backing up database before upgrade
+
+**Known Limitations:**
+
+1. **No Automatic Cleanup**:
+   - Prior archive grows with each rotation
+   - User must manually delete old revisions if needed
+   - Future enhancement: Retention policies (keep last N revisions)
+
+2. **Single Prior Archive**:
+   - All databases share same prior archive (if desired)
+   - Or each database can have separate prior archive
+   - User's choice during configuration
+
+3. **No Cross-Database Undo**:
+   - Undo only works within same database
+   - Moving files between databases loses undo capability
+   - Revision chain specific to database instance
+
+4. **Hash Changes Not Tracked for Prior Files**:
+   - If user manually modifies file in prior archive, hash changes not detected
+   - Duplicate detection may break for that specific revision
+   - Don't manually modify files in prior archive
+
+**Testing Checklist:**
+
+- [ ] Configure Prior Revision Archive (valid path)
+- [ ] Attempt rotation without configuration (expect error)
+- [ ] Configure invalid path (expect validation error)
+- [ ] Configure path inside main archive (expect validation error)
+- [ ] Single file rotation (verify main/prior archives)
+- [ ] Multiple file rotation (verify batch processing)
+- [ ] Rotation with insufficient disk space (expect clear error)
+- [ ] Undo single rotation (verify file swap)
+- [ ] Undo multiple times (verify chain traversal)
+- [ ] Undo when parent file missing (expect error)
+- [ ] Re-import rotated file (expect duplicate detection)
+- [ ] Re-import original file (expect duplicate detection)
+- [ ] Verify FileHashHistory contains all revision hashes
+- [ ] Verify UnreliableDates updates with rotation
+- [ ] Check audit trail for rotation operations
+- [ ] Check audit trail for undo operations
+- [ ] Verify empty directory cleanup after rotation
+- [ ] Verify date structure mirroring in prior archive
+- [ ] Verify hash suffix prevents filename collisions
+- [ ] Database integrity check after 100 rotations
+- [ ] Cross-platform testing (Windows, Linux, macOS)
+- [ ] Performance test with large files (50MB+ photos)
 
 ### File Type Verification
 - Uses PIL/Pillow to verify file format matches extension

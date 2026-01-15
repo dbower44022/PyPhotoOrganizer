@@ -92,6 +92,58 @@ class ArchiveSettingsTab(QWidget):
         archive_group.setLayout(archive_layout)
         layout.addWidget(archive_group)
 
+        # Prior Revision Archive Group
+        prior_archive_group = QGroupBox("Prior Revision Archive")
+        prior_archive_group.setStyleSheet(self.groupbox_style)
+        prior_archive_layout = QVBoxLayout()
+
+        prior_archive_info = QLabel(
+            "Prior Revision Archive stores historical versions of rotated images.\n"
+            "When you rotate an image, the original is moved here automatically,\n"
+            "keeping your main archive clean with only current revisions."
+        )
+        prior_archive_info.setWordWrap(True)
+        prior_archive_info.setStyleSheet("color: #666; font-size: 11px; margin-bottom: 5px;")
+        prior_archive_layout.addWidget(prior_archive_info)
+
+        prior_archive_path_layout = QHBoxLayout()
+        self.prior_archive_path_edit = QLineEdit()
+        self.prior_archive_path_edit.setReadOnly(True)
+        self.prior_archive_path_edit.setPlaceholderText("Not configured (rotation disabled)")
+        self.prior_archive_path_edit.setStyleSheet("background-color: #f5f5f5;")
+        prior_archive_path_layout.addWidget(self.prior_archive_path_edit)
+
+        self.browse_prior_archive_btn = QPushButton("Browse...")
+        self.browse_prior_archive_btn.setToolTip("Select a directory for prior revision storage (auto-saves)")
+        self.browse_prior_archive_btn.clicked.connect(self.on_browse_prior_archive)
+        prior_archive_path_layout.addWidget(self.browse_prior_archive_btn)
+
+        self.clear_prior_archive_btn = QPushButton("Clear")
+        self.clear_prior_archive_btn.setToolTip("Clear Prior Revision Archive location (disables rotation)")
+        self.clear_prior_archive_btn.clicked.connect(self.on_clear_prior_archive)
+        prior_archive_path_layout.addWidget(self.clear_prior_archive_btn)
+
+        prior_archive_layout.addLayout(prior_archive_path_layout)
+
+        self.prior_archive_status_label = QLabel("")
+        self.prior_archive_status_label.setWordWrap(True)
+        self.prior_archive_status_label.setStyleSheet("font-size: 10px; color: #666; margin-top: 5px;")
+        prior_archive_layout.addWidget(self.prior_archive_status_label)
+
+        # Help text
+        help_label = QLabel(
+            "<b>Important:</b> Prior Revision Archive must be:\n"
+            "• Different from main archive\n"
+            "• Not inside main archive\n"
+            "• Writable with sufficient disk space"
+        )
+        help_label.setWordWrap(True)
+        help_label.setStyleSheet("font-size: 10px; color: #444; margin-top: 10px; padding: 5px; background-color: #f9f9f9; border: 1px solid #ddd; border-radius: 3px;")
+        prior_archive_layout.addWidget(help_label)
+
+        prior_archive_group.setLayout(prior_archive_layout)
+        layout.addWidget(prior_archive_group)
+
         # Organization Settings
         org_group = QGroupBox("Organization Settings")
         org_group.setStyleSheet(self.groupbox_style)
@@ -597,6 +649,165 @@ class ArchiveSettingsTab(QWidget):
             )
             return False
 
+    # ========== Prior Revision Archive Methods ==========
+
+    def on_browse_prior_archive(self):
+        """Browse for Prior Revision Archive location and auto-save."""
+        if self.db_metadata is None:
+            QMessageBox.critical(
+                self,
+                "Error",
+                "Database connection not initialized.\nPlease load or create a database first."
+            )
+            return
+
+        # Get current path or default to home directory
+        current_path = self.prior_archive_path_edit.text() or os.path.expanduser("~")
+
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Prior Revision Archive Location",
+            current_path
+        )
+
+        # User cancelled
+        if not folder:
+            return
+
+        # Validate path exists
+        if not os.path.exists(folder):
+            QMessageBox.warning(
+                self,
+                "Invalid Path",
+                f"The specified path does not exist:\n\n{folder}\n\nPlease create the directory first."
+            )
+            return
+
+        # Validate is directory
+        if not os.path.isdir(folder):
+            QMessageBox.warning(
+                self,
+                "Invalid Path",
+                f"The specified path is not a directory:\n\n{folder}"
+            )
+            return
+
+        # Validate writable
+        if not os.access(folder, os.W_OK):
+            QMessageBox.warning(
+                self,
+                "Permission Error",
+                f"The specified path is not writable:\n\n{folder}\n\nPlease check permissions."
+            )
+            return
+
+        # Get main archive location for validation
+        archive_base = self.db_metadata.get_archive_location()
+
+        # Check if same as main archive
+        if archive_base and os.path.realpath(folder) == os.path.realpath(archive_base):
+            QMessageBox.warning(
+                self,
+                "Invalid Configuration",
+                "Prior Revision Archive cannot be the same as the main archive.\n\n"
+                "Please select a different location."
+            )
+            return
+
+        # Check if inside main archive
+        if archive_base and os.path.realpath(folder).startswith(os.path.realpath(archive_base) + os.sep):
+            QMessageBox.warning(
+                self,
+                "Invalid Configuration",
+                "Prior Revision Archive cannot be inside the main archive.\n\n"
+                "Please select a location outside the main archive."
+            )
+            return
+
+        # All validation passed - save to database
+        success = self.db_metadata.set_prior_revision_archive_location(folder)
+
+        if success:
+            # Update UI
+            self.prior_archive_path_edit.setText(folder)
+            self.prior_archive_status_label.setText(f"✓ Configured: {folder}")
+            self.prior_archive_status_label.setStyleSheet("font-size: 10px; color: #28a745; margin-top: 5px;")
+
+            # Show success message
+            QMessageBox.information(
+                self,
+                "Success",
+                f"Prior Revision Archive location saved successfully.\n\nLocation: {folder}\n\n"
+                "Image rotation is now enabled.\n"
+                "When you rotate images, originals will be moved to this location automatically."
+            )
+            logger.info(f"Prior Revision Archive configured: {folder}")
+        else:
+            # Save failed
+            self.prior_archive_status_label.setText("✗ Failed to save configuration")
+            self.prior_archive_status_label.setStyleSheet("font-size: 10px; color: #dc3545; margin-top: 5px;")
+            QMessageBox.critical(
+                self,
+                "Error",
+                "Failed to save Prior Revision Archive location.\n\nCheck the log for details."
+            )
+
+    def on_clear_prior_archive(self):
+        """Clear Prior Revision Archive location (disables rotation)."""
+        if self.db_metadata is None:
+            QMessageBox.critical(
+                self,
+                "Error",
+                "Database connection not initialized.\nPlease load or create a database first."
+            )
+            return
+
+        # Check if already empty
+        current_path = self.prior_archive_path_edit.text().strip()
+        if not current_path:
+            QMessageBox.information(
+                self,
+                "Already Clear",
+                "Prior Revision Archive is not configured."
+            )
+            return
+
+        # Confirm clearing
+        reply = QMessageBox.question(
+            self,
+            "Clear Prior Revision Archive",
+            "This will disable the Prior Revision Archive.\n"
+            "You will not be able to rotate images until you configure a new location.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Clear from database
+        success = self.db_metadata.set_prior_revision_archive_location("")
+
+        if success:
+            # Update UI
+            self.prior_archive_path_edit.setText("")
+            self.prior_archive_status_label.setText("ℹ Prior Revision Archive cleared (rotation disabled)")
+            self.prior_archive_status_label.setStyleSheet("font-size: 10px; color: #666; margin-top: 5px;")
+
+            QMessageBox.information(
+                self,
+                "Success",
+                "Prior Revision Archive has been cleared.\nImage rotation is now disabled."
+            )
+            logger.info("Prior Revision Archive cleared")
+        else:
+            QMessageBox.critical(
+                self,
+                "Error",
+                "Failed to clear Prior Revision Archive location."
+            )
+
     # ========== File Renaming Methods ==========
 
     def on_rename_enabled_changed(self, state):
@@ -745,6 +956,23 @@ class ArchiveSettingsTab(QWidget):
             else:
                 self.archive_status_label.setText("⚠ Warning: Archive folder does not exist!")
                 self.archive_status_label.setStyleSheet("font-size: 10px; color: red; margin-top: 5px;")
+
+        # Load Prior Revision Archive location
+        prior_archive_location = db_metadata.get_prior_revision_archive_location()
+        if prior_archive_location:
+            self.prior_archive_path_edit.setText(prior_archive_location)
+            self.clear_prior_archive_btn.setEnabled(True)
+            if os.path.exists(prior_archive_location):
+                self.prior_archive_status_label.setText(f"✓ Configured: {prior_archive_location}")
+                self.prior_archive_status_label.setStyleSheet("font-size: 10px; color: #28a745; margin-top: 5px;")
+            else:
+                self.prior_archive_status_label.setText("⚠ Warning: Prior archive folder does not exist!")
+                self.prior_archive_status_label.setStyleSheet("font-size: 10px; color: #dc3545; margin-top: 5px;")
+        else:
+            self.prior_archive_path_edit.setText("")
+            self.prior_archive_status_label.setText("ℹ Not configured (image rotation disabled)")
+            self.prior_archive_status_label.setStyleSheet("font-size: 10px; color: #666; margin-top: 5px;")
+            self.clear_prior_archive_btn.setEnabled(False)
 
         # Load organization template
         template = db_metadata.get_organization_template()
