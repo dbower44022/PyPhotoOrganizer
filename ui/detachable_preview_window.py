@@ -3,7 +3,7 @@ Detachable Preview Window
 
 Separate window for large image viewing with zoom capabilities.
 Can be moved to second monitor for dual-screen workflows.
-Enhanced with Source/Archive file actions and revision history.
+Enhanced with Source/Archive file actions, revision history, and comprehensive file details.
 """
 
 import logging
@@ -11,12 +11,14 @@ import os
 import json
 import subprocess
 import platform
+from datetime import datetime
+from math import gcd
 from typing import Optional, Dict, Any, List
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QGroupBox, QApplication, QSplitter,
-    QListWidget, QListWidgetItem, QFrame, QMessageBox
+    QListWidget, QListWidgetItem, QFrame, QMessageBox, QScrollArea
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCloseEvent, QFont
@@ -51,6 +53,114 @@ class StyledLabel(QLabel):
     def update_theme(self):
         """Update styling when theme changes."""
         self._apply_style()
+
+
+class CollapsibleSection(QWidget):
+    """
+    A collapsible section with header and content area for file details.
+    """
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self._is_expanded = True
+        self._title = title
+        self._init_ui()
+
+    def _init_ui(self):
+        theme = get_theme()
+        c = theme.colors
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # Header button
+        self.header_btn = QPushButton(f"▼ {self._title}")
+        self.header_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.bg_tertiary};
+                border: none;
+                border-radius: 4px;
+                color: {c.text_primary};
+                font-weight: 600;
+                font-size: 13px;
+                text-align: left;
+                padding: 8px 12px;
+            }}
+            QPushButton:hover {{
+                background-color: {c.hover_bg};
+            }}
+        """)
+        self.header_btn.clicked.connect(self._toggle)
+        main_layout.addWidget(self.header_btn)
+
+        # Content widget
+        self.content_widget = QWidget()
+        self.content_layout = QVBoxLayout(self.content_widget)
+        self.content_layout.setContentsMargins(8, 6, 8, 6)
+        self.content_layout.setSpacing(2)
+        main_layout.addWidget(self.content_widget)
+
+    def _toggle(self):
+        self._is_expanded = not self._is_expanded
+        self.content_widget.setVisible(self._is_expanded)
+        arrow = "▼" if self._is_expanded else "▶"
+        self.header_btn.setText(f"{arrow} {self._title}")
+
+    def add_row(self, label: str, value: str):
+        """Add a label-value row to the content."""
+        theme = get_theme()
+        c = theme.colors
+
+        row = QWidget()
+        row.setStyleSheet(f"background-color: transparent;")
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 2, 0, 2)
+        row_layout.setSpacing(8)
+
+        label_widget = QLabel(f"{label}:")
+        label_widget.setStyleSheet(f"color: {c.text_muted}; font-size: 12px; min-width: 85px; background-color: transparent;")
+        label_widget.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        row_layout.addWidget(label_widget)
+
+        value_widget = QLabel(value)
+        value_widget.setStyleSheet(f"color: {c.text_primary}; font-size: 12px; background-color: transparent;")
+        value_widget.setWordWrap(True)
+        value_widget.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        row_layout.addWidget(value_widget, 1)
+
+        self.content_layout.addWidget(row)
+
+    def add_widget(self, widget: QWidget):
+        """Add a custom widget to the content area."""
+        self.content_layout.addWidget(widget)
+
+    def clear_content(self):
+        """Clear all content rows."""
+        while self.content_layout.count():
+            item = self.content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def update_theme(self):
+        """Update styling when theme changes."""
+        theme = get_theme()
+        c = theme.colors
+        self.header_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.bg_tertiary};
+                border: none;
+                border-radius: 4px;
+                color: {c.text_primary};
+                font-weight: 600;
+                font-size: 13px;
+                text-align: left;
+                padding: 8px 12px;
+            }}
+            QPushButton:hover {{
+                background-color: {c.hover_bg};
+            }}
+        """)
 
 
 class DetachablePreviewWindow(QMainWindow):
@@ -97,176 +207,176 @@ class DetachablePreviewWindow(QMainWindow):
         logger.info("DetachablePreviewWindow initialized")
 
     def _init_ui(self):
-        """Initialize user interface."""
+        """Initialize user interface with image viewer and comprehensive file details."""
+        theme = get_theme()
+        c = theme.colors
+
         # Central widget
         central = QWidget()
         main_layout = QVBoxLayout(central)
-        main_layout.setSpacing(8)
+        main_layout.setSpacing(4)
+        main_layout.setContentsMargins(8, 8, 8, 8)
 
-        # Header: filename (styling applied in _apply_theme)
+        # Header: filename
         self.filename_label = QLabel("No file selected")
         main_layout.addWidget(self.filename_label)
 
-        # Image viewer (from unified preview module)
+        # Main horizontal splitter: Image Viewer | Details Panel
+        self.main_splitter = QSplitter(Qt.Horizontal)
+
+        # Left side: Image viewer
         try:
             from ui.preview import ZoomableImageViewer
             self.viewer = ZoomableImageViewer()
-            main_layout.addWidget(self.viewer, 1)  # Stretch factor 1
         except ImportError:
             logger.error("Failed to import ZoomableImageViewer from ui.preview")
             self.viewer = QLabel("Image viewer not available")
-            main_layout.addWidget(self.viewer, 1)
+        self.main_splitter.addWidget(self.viewer)
 
-        # Details and Revisions area (horizontal splitter)
-        details_splitter = QSplitter(Qt.Horizontal)
+        # Right side: Scrollable details panel
+        details_scroll = QScrollArea()
+        details_scroll.setWidgetResizable(True)
+        details_scroll.setFrameShape(QFrame.NoFrame)
+        details_scroll.setMinimumWidth(320)
+        details_scroll.setMaximumWidth(500)
+        details_scroll.setStyleSheet(f"""
+            QScrollArea {{
+                background-color: {c.bg_secondary};
+                border: none;
+            }}
+            QScrollBar:vertical {{
+                background-color: {c.bg_tertiary};
+                width: 10px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:vertical {{
+                background-color: {c.gray_500};
+                border-radius: 5px;
+                min-height: 30px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background-color: {c.gray_400};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+        """)
 
-        # Left side: File Details
-        details_group = QGroupBox("File Details")
-        details_layout = QGridLayout()
-        details_layout.setSpacing(6)
-        details_layout.setColumnStretch(1, 1)  # Value column stretches
+        details_content = QWidget()
+        details_content.setStyleSheet(f"background-color: {c.bg_secondary};")
+        details_layout = QVBoxLayout(details_content)
+        details_layout.setContentsMargins(10, 10, 10, 10)
+        details_layout.setSpacing(8)
 
-        row = 0
+        # Database Info section
+        self.db_section = CollapsibleSection("Database Info")
+        details_layout.addWidget(self.db_section)
 
-        # Source path
-        details_layout.addWidget(StyledLabel("Source:"), row, 0, Qt.AlignTop)
-        self.detail_source = StyledLabel("-", is_value=True)
-        details_layout.addWidget(self.detail_source, row, 1)
-        row += 1
+        # File Information section
+        self.file_section = CollapsibleSection("File Information")
+        details_layout.addWidget(self.file_section)
 
-        # Archive path
-        details_layout.addWidget(StyledLabel("Archive:"), row, 0, Qt.AlignTop)
-        self.detail_archive = StyledLabel("-", is_value=True)
-        details_layout.addWidget(self.detail_archive, row, 1)
-        row += 1
+        # Image Properties section
+        self.image_section = CollapsibleSection("Image Properties")
+        details_layout.addWidget(self.image_section)
 
-        # Detected Date
-        details_layout.addWidget(StyledLabel("Detected Date:"), row, 0, Qt.AlignTop)
-        self.detail_detected_date = StyledLabel("-", is_value=True)
-        details_layout.addWidget(self.detail_detected_date, row, 1)
-        row += 1
+        # EXIF Data section
+        self.exif_section = CollapsibleSection("EXIF Data")
+        details_layout.addWidget(self.exif_section)
 
-        # Corrected Date
-        details_layout.addWidget(StyledLabel("Corrected Date:"), row, 0, Qt.AlignTop)
-        self.detail_corrected_date = StyledLabel("-", is_value=True)
-        details_layout.addWidget(self.detail_corrected_date, row, 1)
-        row += 1
-
-        # Flag Reason
-        details_layout.addWidget(StyledLabel("Flag Reason:"), row, 0, Qt.AlignTop)
-        self.detail_reason = StyledLabel("-", is_value=True)
-        details_layout.addWidget(self.detail_reason, row, 1)
-        row += 1
-
-        # Status
-        details_layout.addWidget(StyledLabel("Status:"), row, 0, Qt.AlignTop)
-        self.detail_status = StyledLabel("-", is_value=True)
-        details_layout.addWidget(self.detail_status, row, 1)
-        row += 1
-
-        # Hash (styling applied in _apply_theme)
-        details_layout.addWidget(StyledLabel("Hash:"), row, 0, Qt.AlignTop)
-        self.detail_hash = StyledLabel("-", is_value=True)
-        details_layout.addWidget(self.detail_hash, row, 1)
-
-        details_group.setLayout(details_layout)
-        details_splitter.addWidget(details_group)
-
-        # Right side: Revisions panel
-        revisions_group = QGroupBox("Revisions (Double-click to preview)")
-        revisions_layout = QVBoxLayout()
-
+        # Revisions section
+        self.revisions_section = CollapsibleSection("Revisions")
         self.revisions_list = QListWidget()
         self.revisions_list.setAlternatingRowColors(True)
-        # Styling applied in _apply_theme
+        self.revisions_list.setMaximumHeight(150)
         self.revisions_list.itemDoubleClicked.connect(self._on_revision_double_clicked)
-        revisions_layout.addWidget(self.revisions_list)
-
-        # Revision info label (styling applied in _apply_theme)
+        self.revisions_section.add_widget(self.revisions_list)
         self.revision_info_label = QLabel("No revisions found")
-        revisions_layout.addWidget(self.revision_info_label)
+        self.revision_info_label.setStyleSheet(f"color: {c.text_muted}; font-style: italic; font-size: 12px; background-color: transparent;")
+        self.revisions_section.add_widget(self.revision_info_label)
+        details_layout.addWidget(self.revisions_section)
 
-        revisions_group.setLayout(revisions_layout)
-        details_splitter.addWidget(revisions_group)
+        details_layout.addStretch()
 
-        # Set initial splitter sizes (60% details, 40% revisions)
-        details_splitter.setSizes([350, 250])
+        details_scroll.setWidget(details_content)
+        self.main_splitter.addWidget(details_scroll)
 
-        main_layout.addWidget(details_splitter)
+        # Set splitter sizes (70% image, 30% details)
+        self.main_splitter.setSizes([700, 350])
+        self.main_splitter.setStretchFactor(0, 1)  # Image stretches
+        self.main_splitter.setStretchFactor(1, 0)  # Details fixed width
+
+        main_layout.addWidget(self.main_splitter, 1)
+
+        # Action buttons in a compact row
+        actions_widget = QWidget()
+        actions_layout = QHBoxLayout(actions_widget)
+        actions_layout.setContentsMargins(0, 4, 0, 0)
+        actions_layout.setSpacing(6)
 
         # Source file buttons
-        source_buttons_group = QGroupBox("Source File Actions")
-        source_buttons_layout = QHBoxLayout()
-        source_buttons_layout.setSpacing(8)
-
-        self.open_source_file_btn = QPushButton("Open Source File")
-        self.open_source_file_btn.setMinimumHeight(36)
+        self.open_source_file_btn = QPushButton("📂 Source")
+        self.open_source_file_btn.setMinimumHeight(32)
         self.open_source_file_btn.clicked.connect(self._on_open_source_file)
         self.open_source_file_btn.setEnabled(False)
-        source_buttons_layout.addWidget(self.open_source_file_btn)
+        self.open_source_file_btn.setToolTip("Open source file location")
+        actions_layout.addWidget(self.open_source_file_btn)
 
-        self.open_source_folder_btn = QPushButton("Open Source Folder")
-        self.open_source_folder_btn.setMinimumHeight(36)
+        self.open_source_folder_btn = QPushButton("📁 Source Folder")
+        self.open_source_folder_btn.setMinimumHeight(32)
         self.open_source_folder_btn.clicked.connect(self._on_open_source_folder)
         self.open_source_folder_btn.setEnabled(False)
-        source_buttons_layout.addWidget(self.open_source_folder_btn)
+        actions_layout.addWidget(self.open_source_folder_btn)
 
-        self.copy_source_path_btn = QPushButton("Copy Source Path")
-        self.copy_source_path_btn.setMinimumHeight(36)
+        self.copy_source_path_btn = QPushButton("📋 Copy Source")
+        self.copy_source_path_btn.setMinimumHeight(32)
         self.copy_source_path_btn.clicked.connect(self._on_copy_source_path)
         self.copy_source_path_btn.setEnabled(False)
-        source_buttons_layout.addWidget(self.copy_source_path_btn)
+        actions_layout.addWidget(self.copy_source_path_btn)
 
-        source_buttons_group.setLayout(source_buttons_layout)
-        main_layout.addWidget(source_buttons_group)
+        # Separator
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.VLine)
+        sep1.setStyleSheet(f"background-color: {c.border_light};")
+        actions_layout.addWidget(sep1)
 
         # Archive file buttons
-        archive_buttons_group = QGroupBox("Archive File Actions")
-        archive_buttons_layout = QHBoxLayout()
-        archive_buttons_layout.setSpacing(8)
-
-        self.open_archive_file_btn = QPushButton("Open Archive File")
-        self.open_archive_file_btn.setMinimumHeight(36)
+        self.open_archive_file_btn = QPushButton("📂 Archive")
+        self.open_archive_file_btn.setMinimumHeight(32)
         self.open_archive_file_btn.clicked.connect(self._on_open_archive_file)
         self.open_archive_file_btn.setEnabled(False)
-        archive_buttons_layout.addWidget(self.open_archive_file_btn)
+        self.open_archive_file_btn.setToolTip("Open archive file location")
+        actions_layout.addWidget(self.open_archive_file_btn)
 
-        self.open_archive_folder_btn = QPushButton("Open Archive Folder")
-        self.open_archive_folder_btn.setMinimumHeight(36)
+        self.open_archive_folder_btn = QPushButton("📁 Archive Folder")
+        self.open_archive_folder_btn.setMinimumHeight(32)
         self.open_archive_folder_btn.clicked.connect(self._on_open_archive_folder)
         self.open_archive_folder_btn.setEnabled(False)
-        archive_buttons_layout.addWidget(self.open_archive_folder_btn)
+        actions_layout.addWidget(self.open_archive_folder_btn)
 
-        self.copy_archive_path_btn = QPushButton("Copy Archive Path")
-        self.copy_archive_path_btn.setMinimumHeight(36)
+        self.copy_archive_path_btn = QPushButton("📋 Copy Archive")
+        self.copy_archive_path_btn.setMinimumHeight(32)
         self.copy_archive_path_btn.clicked.connect(self._on_copy_archive_path)
         self.copy_archive_path_btn.setEnabled(False)
-        archive_buttons_layout.addWidget(self.copy_archive_path_btn)
+        actions_layout.addWidget(self.copy_archive_path_btn)
 
-        archive_buttons_group.setLayout(archive_buttons_layout)
-        main_layout.addWidget(archive_buttons_group)
+        actions_layout.addStretch()
 
-        # Action buttons row
-        action_layout = QHBoxLayout()
-        action_layout.setSpacing(8)
-
-        # Correct date button (styling applied in _apply_theme)
-        self.correct_btn = QPushButton("Correct Date...")
-        self.correct_btn.setMinimumHeight(40)
+        # Correct date button
+        self.correct_btn = QPushButton("📅 Correct Date...")
+        self.correct_btn.setMinimumHeight(36)
         self.correct_btn.clicked.connect(self.on_correct_date)
         self.correct_btn.setEnabled(False)
-        action_layout.addWidget(self.correct_btn)
+        actions_layout.addWidget(self.correct_btn)
 
-        action_layout.addStretch()
-
-        # Close button (red, positioned on right)
+        # Close button
         self.close_btn = QPushButton("Close")
-        self.close_btn.setMinimumHeight(40)
-        self.close_btn.setMinimumWidth(100)
+        self.close_btn.setMinimumHeight(36)
+        self.close_btn.setMinimumWidth(80)
         self.close_btn.clicked.connect(self.close)
-        action_layout.addWidget(self.close_btn)
+        actions_layout.addWidget(self.close_btn)
 
-        main_layout.addLayout(action_layout)
+        main_layout.addWidget(actions_widget)
 
         self.setCentralWidget(central)
 
@@ -283,9 +393,9 @@ class DetachablePreviewWindow(QMainWindow):
 
         # Filename header
         self.filename_label.setStyleSheet(f"""
-            font-size: 14pt;
+            font-size: 13pt;
             font-weight: bold;
-            padding: 10px;
+            padding: 8px 12px;
             background-color: {c.bg_secondary};
             border-radius: 4px;
             color: {c.text_primary};
@@ -302,6 +412,7 @@ class DetachablePreviewWindow(QMainWindow):
                 padding: 6px;
                 border-bottom: 1px solid {c.border_light};
                 color: {c.text_primary};
+                font-size: 12px;
             }}
             QListWidget::item:selected {{
                 background-color: {c.primary};
@@ -316,10 +427,7 @@ class DetachablePreviewWindow(QMainWindow):
         """)
 
         # Revision info label
-        self.revision_info_label.setStyleSheet(f"color: {c.text_muted}; font-style: italic;")
-
-        # Hash label - monospace font
-        self.detail_hash.setStyleSheet(f"color: {c.text_primary}; font-family: monospace; font-size: 9pt;")
+        self.revision_info_label.setStyleSheet(f"color: {c.text_muted}; font-style: italic; font-size: 12px; background-color: transparent;")
 
         # Correct date button (primary action)
         self.correct_btn.setStyleSheet(f"""
@@ -356,6 +464,10 @@ class DetachablePreviewWindow(QMainWindow):
         # Update all StyledLabels
         for label in self.findChildren(StyledLabel):
             label.update_theme()
+
+        # Update collapsible sections
+        for section in self.findChildren(CollapsibleSection):
+            section.update_theme()
 
         # Update the viewer theme if it has that capability
         if hasattr(self.viewer, 'update_theme'):
@@ -395,45 +507,21 @@ class DetachablePreviewWindow(QMainWindow):
             filename = os.path.basename(source_path) if source_path else os.path.basename(archive_path)
             self.filename_label.setText(filename or "Unknown")
 
-            # Update details
-            self.detail_source.setText(source_path or "N/A")
-            self.detail_archive.setText(archive_path or "Not organized")
-
-            # Dates
-            detected_date = record.get('original_date') or record.get('create_datetime', '-')
-            date_source = record.get('date_source', '')
-            if date_source:
-                self.detail_detected_date.setText(f"{detected_date} (from {date_source})")
-            else:
-                self.detail_detected_date.setText(detected_date)
-
-            corrected_date = record.get('corrected_date')
-            self.detail_corrected_date.setText(corrected_date or "Not corrected")
-
-            # Reason
-            reason = record.get('flag_reason') or '-'
-            reason = reason.replace('_', ' ').title()
-            self.detail_reason.setText(reason)
-
-            # Status (use theme colors)
-            theme = get_theme()
-            c = theme.colors
-            if corrected_date:
-                if record.get('needs_reorganization'):
-                    status_text = "Corrected (Needs reorganization)"
-                    self.detail_status.setStyleSheet(f"color: {c.status_corrected}; font-weight: bold; font-size: 10pt;")
-                else:
-                    status_text = "Reorganized"
-                    self.detail_status.setStyleSheet(f"color: {c.status_reorganized}; font-weight: bold; font-size: 10pt;")
-            else:
-                status_text = "Pending correction"
-                self.detail_status.setStyleSheet(f"color: {c.text_muted}; font-size: 10pt;")
-            self.detail_status.setText(status_text)
-
-            # Hash
+            # Get file hash for later use
             file_hash = record.get('file_hash', 'N/A')
-            self.detail_hash.setText(file_hash)
             logger.debug(f"update_preview: file_hash={file_hash[:16] if file_hash and file_hash != 'N/A' else file_hash}...")
+
+            # Populate Database Info section
+            self._populate_db_section(record, file_hash, source_path, archive_path)
+
+            # Populate File Information section
+            self._populate_file_section(preview_path)
+
+            # Populate Image Properties section
+            self._populate_image_section(preview_path)
+
+            # Populate EXIF Data section
+            self._populate_exif_section(preview_path)
 
             # Enable buttons based on path existence
             has_source = bool(source_path and os.path.exists(source_path))
@@ -453,6 +541,368 @@ class DetachablePreviewWindow(QMainWindow):
 
         except Exception as e:
             logger.error(f"Error updating preview: {e}", exc_info=True)
+
+    def _populate_db_section(self, record: Dict, file_hash: str, source_path: str, archive_path: str):
+        """Populate the Database Info collapsible section."""
+        self.db_section.clear_content()
+        theme = get_theme()
+        c = theme.colors
+
+        # Hash
+        self.db_section.add_row("Hash", file_hash if file_hash != 'N/A' else "Not available")
+
+        # Source path
+        self.db_section.add_row("Source", source_path or "N/A")
+
+        # Archive path
+        self.db_section.add_row("Archive", archive_path or "Not organized")
+
+        # Detected date
+        detected_date = record.get('original_date') or record.get('create_datetime', '-')
+        date_source = record.get('date_source', '')
+        if date_source:
+            self.db_section.add_row("Detected Date", f"{detected_date} (from {date_source})")
+        else:
+            self.db_section.add_row("Detected Date", detected_date)
+
+        # Corrected date
+        corrected_date = record.get('corrected_date')
+        self.db_section.add_row("Corrected Date", corrected_date or "Not corrected")
+
+        # Flag reason
+        reason = record.get('flag_reason') or '-'
+        reason_display = reason.replace('_', ' ').title()
+        self.db_section.add_row("Flag Reason", reason_display)
+
+        # Status with color
+        if corrected_date:
+            if record.get('needs_reorganization'):
+                status_text = "Corrected (Needs reorganization)"
+            else:
+                status_text = "Reorganized"
+        else:
+            status_text = "Pending correction"
+        self.db_section.add_row("Status", status_text)
+
+    def _populate_file_section(self, file_path: str):
+        """Populate the File Information collapsible section."""
+        self.file_section.clear_content()
+
+        if not file_path or not os.path.exists(file_path):
+            self.file_section.add_row("Status", "File not found")
+            return
+
+        try:
+            stat = os.stat(file_path)
+
+            # File size
+            size_bytes = stat.st_size
+            if size_bytes < 1024:
+                size_str = f"{size_bytes} B"
+            elif size_bytes < 1024 * 1024:
+                size_str = f"{size_bytes / 1024:.1f} KB"
+            else:
+                size_str = f"{size_bytes / (1024 * 1024):.2f} MB"
+            self.file_section.add_row("Size", size_str)
+
+            # File type
+            ext = os.path.splitext(file_path)[1].upper()
+            self.file_section.add_row("Type", ext or "Unknown")
+
+            # Modified time
+            mtime = datetime.fromtimestamp(stat.st_mtime)
+            self.file_section.add_row("Modified", mtime.strftime("%Y-%m-%d %H:%M:%S"))
+
+            # Created time (if available)
+            try:
+                if hasattr(stat, 'st_birthtime'):
+                    ctime = datetime.fromtimestamp(stat.st_birthtime)
+                else:
+                    ctime = datetime.fromtimestamp(stat.st_ctime)
+                self.file_section.add_row("Created", ctime.strftime("%Y-%m-%d %H:%M:%S"))
+            except:
+                pass
+
+        except Exception as e:
+            logger.debug(f"Could not get file stats: {e}")
+            self.file_section.add_row("Error", str(e))
+
+    def _populate_image_section(self, file_path: str):
+        """Populate the Image Properties collapsible section."""
+        self.image_section.clear_content()
+
+        if not file_path or not os.path.exists(file_path):
+            self.image_section.add_row("Status", "File not found")
+            return
+
+        try:
+            from PIL import Image
+
+            with Image.open(file_path) as img:
+                # Dimensions
+                width, height = img.size
+                self.image_section.add_row("Dimensions", f"{width} × {height} px")
+
+                # Megapixels
+                megapixels = (width * height) / 1_000_000
+                self.image_section.add_row("Megapixels", f"{megapixels:.1f} MP")
+
+                # Aspect ratio
+                divisor = gcd(width, height)
+                aspect_w = width // divisor
+                aspect_h = height // divisor
+                # Simplify common ratios
+                if (aspect_w, aspect_h) in [(16, 9), (4, 3), (3, 2), (1, 1), (9, 16), (3, 4), (2, 3)]:
+                    self.image_section.add_row("Aspect Ratio", f"{aspect_w}:{aspect_h}")
+                else:
+                    ratio = width / height
+                    self.image_section.add_row("Aspect Ratio", f"{ratio:.2f}:1")
+
+                # Format
+                self.image_section.add_row("Format", img.format or "Unknown")
+
+                # Color mode
+                mode_names = {
+                    '1': 'Black & White (1-bit)',
+                    'L': 'Grayscale (8-bit)',
+                    'P': 'Palette (8-bit)',
+                    'RGB': 'RGB Color (24-bit)',
+                    'RGBA': 'RGBA Color (32-bit)',
+                    'CMYK': 'CMYK Color',
+                    'YCbCr': 'YCbCr Color',
+                    'LAB': 'LAB Color',
+                    'HSV': 'HSV Color',
+                    'I': 'Integer (32-bit)',
+                    'F': 'Float (32-bit)',
+                }
+                mode_display = mode_names.get(img.mode, img.mode)
+                self.image_section.add_row("Color Mode", mode_display)
+
+                # Bit depth
+                mode_bits = {
+                    '1': 1, 'L': 8, 'P': 8, 'RGB': 24, 'RGBA': 32,
+                    'CMYK': 32, 'YCbCr': 24, 'LAB': 24, 'HSV': 24,
+                    'I': 32, 'F': 32, 'I;16': 16, 'I;16L': 16, 'I;16B': 16
+                }
+                bits = mode_bits.get(img.mode, 0)
+                if bits:
+                    self.image_section.add_row("Bit Depth", f"{bits} bits")
+
+        except Exception as e:
+            logger.debug(f"Could not get image properties: {e}")
+            self.image_section.add_row("Error", "Could not read image properties")
+
+    def _populate_exif_section(self, file_path: str):
+        """Populate the EXIF Data collapsible section."""
+        self.exif_section.clear_content()
+
+        if not file_path or not os.path.exists(file_path):
+            self.exif_section.add_row("Status", "File not found")
+            return
+
+        try:
+            from PIL import Image
+            from PIL.ExifTags import TAGS, GPSTAGS
+
+            with Image.open(file_path) as img:
+                exif_data = img._getexif()
+
+                if not exif_data:
+                    self.exif_section.add_row("Status", "No EXIF data found")
+                    return
+
+                # Priority EXIF fields to display
+                priority_tags = {
+                    'DateTimeOriginal': 'Date Taken',
+                    'DateTime': 'Date Modified',
+                    'Make': 'Camera Make',
+                    'Model': 'Camera Model',
+                    'ExposureTime': 'Exposure',
+                    'FNumber': 'Aperture',
+                    'ISOSpeedRatings': 'ISO',
+                    'FocalLength': 'Focal Length',
+                    'Flash': 'Flash',
+                    'WhiteBalance': 'White Balance',
+                    'ExposureProgram': 'Exposure Program',
+                    'MeteringMode': 'Metering Mode',
+                    'LensModel': 'Lens',
+                    'Software': 'Software',
+                    'Artist': 'Artist',
+                    'Copyright': 'Copyright',
+                }
+
+                # Build reverse lookup
+                tag_names = {v: k for k, v in TAGS.items()}
+
+                displayed = 0
+                for tag_name, display_name in priority_tags.items():
+                    tag_id = tag_names.get(tag_name)
+                    if tag_id and tag_id in exif_data:
+                        value = exif_data[tag_id]
+                        formatted = self._format_exif_value(tag_name, value)
+                        if formatted:
+                            self.exif_section.add_row(display_name, formatted)
+                            displayed += 1
+
+                # GPS info if available
+                gps_tag_id = tag_names.get('GPSInfo')
+                if gps_tag_id and gps_tag_id in exif_data:
+                    gps_info = exif_data[gps_tag_id]
+                    coords = self._parse_gps_info(gps_info)
+                    if coords:
+                        self.exif_section.add_row("GPS Location", coords)
+                        displayed += 1
+
+                if displayed == 0:
+                    self.exif_section.add_row("Status", "No readable EXIF data")
+
+        except Exception as e:
+            logger.debug(f"Could not read EXIF data: {e}")
+            self.exif_section.add_row("Error", "Could not read EXIF data")
+
+    def _format_exif_value(self, tag_name: str, value) -> str:
+        """Format an EXIF value for display."""
+        try:
+            if tag_name == 'ExposureTime':
+                if isinstance(value, tuple) and len(value) == 2:
+                    num, denom = value
+                    if denom and num:
+                        if num < denom:
+                            return f"1/{int(denom/num)}s"
+                        else:
+                            return f"{num/denom:.1f}s"
+                return str(value)
+
+            elif tag_name == 'FNumber':
+                if isinstance(value, tuple) and len(value) == 2:
+                    num, denom = value
+                    if denom:
+                        return f"f/{num/denom:.1f}"
+                elif hasattr(value, 'numerator'):
+                    return f"f/{float(value):.1f}"
+                return f"f/{value}"
+
+            elif tag_name == 'FocalLength':
+                if isinstance(value, tuple) and len(value) == 2:
+                    num, denom = value
+                    if denom:
+                        return f"{num/denom:.0f}mm"
+                elif hasattr(value, 'numerator'):
+                    return f"{float(value):.0f}mm"
+                return f"{value}mm"
+
+            elif tag_name == 'ISOSpeedRatings':
+                if isinstance(value, tuple):
+                    return str(value[0])
+                return str(value)
+
+            elif tag_name == 'Flash':
+                flash_modes = {
+                    0: 'No Flash',
+                    1: 'Flash Fired',
+                    5: 'Flash Fired, Strobe Return Not Detected',
+                    7: 'Flash Fired, Strobe Return Detected',
+                    9: 'Flash Fired, Compulsory',
+                    13: 'Flash Fired, Compulsory, Return Not Detected',
+                    15: 'Flash Fired, Compulsory, Return Detected',
+                    16: 'No Flash Function',
+                    24: 'No Flash, Auto',
+                    25: 'Flash Fired, Auto',
+                    29: 'Flash Fired, Auto, Return Not Detected',
+                    31: 'Flash Fired, Auto, Return Detected',
+                }
+                return flash_modes.get(value, f"Mode {value}")
+
+            elif tag_name == 'WhiteBalance':
+                wb_modes = {0: 'Auto', 1: 'Manual'}
+                return wb_modes.get(value, f"Mode {value}")
+
+            elif tag_name == 'ExposureProgram':
+                programs = {
+                    0: 'Not Defined',
+                    1: 'Manual',
+                    2: 'Program AE',
+                    3: 'Aperture Priority',
+                    4: 'Shutter Priority',
+                    5: 'Creative',
+                    6: 'Action',
+                    7: 'Portrait',
+                    8: 'Landscape',
+                }
+                return programs.get(value, f"Mode {value}")
+
+            elif tag_name == 'MeteringMode':
+                modes = {
+                    0: 'Unknown',
+                    1: 'Average',
+                    2: 'Center-Weighted',
+                    3: 'Spot',
+                    4: 'Multi-Spot',
+                    5: 'Multi-Segment',
+                    6: 'Partial',
+                }
+                return modes.get(value, f"Mode {value}")
+
+            else:
+                # Default: convert to string
+                if isinstance(value, bytes):
+                    try:
+                        return value.decode('utf-8', errors='ignore').strip('\x00')
+                    except:
+                        return "(binary data)"
+                return str(value)
+
+        except Exception as e:
+            logger.debug(f"Error formatting EXIF value {tag_name}: {e}")
+            return str(value)
+
+    def _parse_gps_info(self, gps_info: Dict) -> Optional[str]:
+        """Parse GPS info from EXIF and return formatted coordinates."""
+        try:
+            from PIL.ExifTags import GPSTAGS
+
+            # Build reverse lookup for GPS tags
+            gps_tag_names = {v: k for k, v in GPSTAGS.items()}
+
+            def get_gps_value(tag_name):
+                tag_id = gps_tag_names.get(tag_name)
+                return gps_info.get(tag_id) if tag_id else None
+
+            lat = get_gps_value('GPSLatitude')
+            lat_ref = get_gps_value('GPSLatitudeRef')
+            lon = get_gps_value('GPSLongitude')
+            lon_ref = get_gps_value('GPSLongitudeRef')
+
+            if not all([lat, lat_ref, lon, lon_ref]):
+                return None
+
+            def convert_to_degrees(value):
+                """Convert GPS coordinates to degrees."""
+                if isinstance(value, tuple) and len(value) == 3:
+                    d, m, s = value
+                    # Handle IFDRational objects
+                    if hasattr(d, 'numerator'):
+                        d = float(d)
+                    if hasattr(m, 'numerator'):
+                        m = float(m)
+                    if hasattr(s, 'numerator'):
+                        s = float(s)
+                    return d + m / 60.0 + s / 3600.0
+                return 0
+
+            lat_deg = convert_to_degrees(lat)
+            lon_deg = convert_to_degrees(lon)
+
+            if lat_ref == 'S':
+                lat_deg = -lat_deg
+            if lon_ref == 'W':
+                lon_deg = -lon_deg
+
+            return f"{lat_deg:.6f}, {lon_deg:.6f}"
+
+        except Exception as e:
+            logger.debug(f"Error parsing GPS info: {e}")
+            return None
 
     def _load_revisions(self, file_hash: str):
         """Load and display revision history for the current file."""

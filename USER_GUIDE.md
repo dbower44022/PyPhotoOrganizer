@@ -12,10 +12,11 @@
 8. [Viewing Results](#viewing-results)
 9. [Date Corrections](#date-corrections)
 10. [File Version Management](#file-version-management)
-11. [Import History](#import-history)
-12. [Settings](#settings)
-13. [Troubleshooting](#troubleshooting)
-14. [FAQ](#faq)
+11. [Photo Review App](#photo-review-app)
+12. [Import History](#import-history)
+13. [Settings](#settings)
+14. [Troubleshooting](#troubleshooting)
+15. [FAQ](#faq)
 
 ---
 
@@ -1091,6 +1092,95 @@ db_meta.sync_versions_to_hash_history()
 
 ---
 
+## Photo Review App
+
+The **Photo Review** app (`photo_review.py`) is a standalone companion tool for browsing and managing photos in your archive. It provides a modern grid-based interface optimized for reviewing large photo collections.
+
+### Launching Photo Review
+
+```bash
+python photo_review.py
+```
+
+Or from the main application, use File > Open Photo Review.
+
+### Interface Overview
+
+The Photo Review window has four main areas:
+
+1. **Search Bar** (top): Quick search with Ctrl+K shortcut
+2. **Query Panel** (left): Filter and search options
+3. **Photo Grid** (center): Thumbnail view of photos
+4. **Preview Panel** (right): Selected photo preview
+
+### Query Panel Features
+
+The query panel has collapsible sections:
+
+- **Browse Folders**: Navigate archive folder structure
+- **Search Photos**: Text search across filenames and paths
+- **Filter Status**: Filter by date status (Unreliable, Corrected, Reorganized)
+- **Saved Queries**: Save and recall filter combinations
+
+**Saved Queries**: Click a saved query to automatically apply its filters and execute the search.
+
+### Photo Grid
+
+- **Thumbnail Size**: Use slider to adjust thumbnail size
+- **Selection**: Click to select, Ctrl+Click for multi-select, Shift+Click for range
+- **Status Badges**: Colored pills show photo status:
+  - **Amber "Unreliable"**: Date needs verification
+  - **Green "Needs Move"**: Corrected, pending reorganization
+  - **Blue "Done"**: Fully processed
+  - **Violet "Revisions"**: Has version history
+- **Checkmarks**: Blue circle with checkmark shows selected photos
+
+### Selection Action Bar
+
+When photos are selected, a floating action bar appears with quick actions:
+- **Delete**: Move selected photos to delete vault
+- **Rotate**: Rotate selected photos
+- **Correct Date**: Open date correction dialog
+- **Deselect**: Clear selection
+
+### Preview Panel
+
+Shows the selected photo with:
+- Rubber band zoom (drag to select area, double-click to reset)
+- File details (name, date, status)
+- Double-click a photo to open full preview window
+
+### Detachable Preview Window
+
+Double-click a photo or use the context menu to open the full preview window:
+
+- **Large Image View**: Zoomable preview with rubber band selection
+- **File Details Panel**: Source path, archive path, dates, status, hash
+- **Revisions Panel**: View all versions of the photo
+- **Source Actions**: Open source file, open source folder, copy path
+- **Archive Actions**: Open archive file, open archive folder, copy path
+- **Correct Date**: Open date correction dialog
+- **Close Button** (red): Prominently positioned for easy closing
+
+### Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| Ctrl+K | Focus search bar |
+| Delete | Delete selected photos |
+| Ctrl+A | Select all |
+| Escape | Deselect all |
+
+### Theme Support
+
+Photo Review supports both dark and light modes. The theme automatically matches your system preference, or you can toggle it manually.
+
+### Close Button
+
+Both the main window and preview window have a **red Close button** in the bottom-right corner for easy, visible window closing.
+
+---
+
 ## Import History
 
 The **Import History** tab provides a complete audit trail of all processing sessions.
@@ -1109,10 +1199,37 @@ The **Import History** tab provides a complete audit trail of all processing ses
 
 ### File-Level Details
 
-Three tabs show file operations:
-- **All Files**: Every file processed
-- **Duplicates**: Only duplicate files with original locations
-- **Errors**: Failed operations with error messages
+The file grid shows all operations with filtering options:
+- **Show dropdown**: Filter by All Files, New Files, Duplicates, Filtered, or Errors
+- **Search box**: Text search across all columns
+- Columns: Source Folder, Filename, Destination, Operation, Status, Hash, Details
+
+### Previewing Files
+
+**Detached Preview Window** (Recommended):
+- **Double-click** any file row to open the large preview window
+- Shows comprehensive file details:
+  - Database Info (hash, paths, dates, status)
+  - File Information (size, type, modified date)
+  - Image Properties (dimensions, megapixels, aspect ratio, format)
+  - EXIF Data (camera, exposure, GPS, etc.)
+  - Revisions (if file has been rotated/modified)
+- Preview **automatically updates** when you select a different file
+- Can be moved to a second monitor for dual-screen workflows
+
+**Inline Preview Panel** (Optional):
+- Click "Show Preview Panel" button to reveal inline preview
+- Shows image preview and file details in the bottom section
+- Hidden by default to maximize grid space
+- Performance optimized: only loads when visible
+
+### File Actions
+
+When a file is selected:
+- **Open Source File**: Open the original file with default application
+- **Open Source Folder**: Open folder containing the source file
+- **Copy Source Path**: Copy file path to clipboard
+- **Process File(s)**: Reprocess selected files with current settings
 
 ### Exporting Reports
 

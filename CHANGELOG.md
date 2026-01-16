@@ -5,6 +5,122 @@ All notable changes to PyPhotoOrganizer will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.6] - 2026-01-16
+
+### Added
+
+**Unified Detachable Preview Window Across Application**
+- **Import History Tab**: Added full DetachablePreviewWindow support
+  - Double-click any file row to open large preview window
+  - Preview window shows comprehensive file details (Database Info, File Information, Image Properties, EXIF Data, Revisions)
+  - Inline preview hidden by default for cleaner UI
+  - "Show Preview Panel" toggle button to reveal inline preview if desired
+  - Performance optimization: inline preview only loads when visible
+
+- **Consistent Preview Behavior**: All tabs now sync selection with detached preview
+  - Import History tab: Selection change updates detached preview window
+  - Date Corrections tab: Already had this behavior (verified)
+  - Photo Review app: Selection change now updates detached preview window
+  - Detached preview always shows currently selected file
+
+### Changed
+
+- **Import History Tab Layout**
+  - Inline preview panel now hidden by default
+  - Added "Show Preview Panel" toggle button in toolbar
+  - Double-click to open detached preview (recommended workflow)
+  - Preview only loads images when visible (performance optimization)
+
+### Fixed
+
+- **Preview Sync Issue**: Fixed issue where detached preview could show different image than selected
+  - All components now update detached preview on selection change
+  - No more confusion about which file is being previewed
+
+---
+
+## [3.0.5] - 2026-01-15
+
+### Added
+
+**Photo Review App UI Modernization**
+- **Theme System Integration**: Full dark/light mode support across all components
+  - `ui/theme.py` - Centralized theme system with `ThemeManager` singleton
+  - `ColorPalette` and `DarkColorPalette` dataclasses for consistent colors
+  - Semantic color naming (primary, success, warning, error, status colors)
+  - Global stylesheet generation for consistent widget styling
+
+- **Modern Photo Grid Delegate** (`photo_review/photo_grid_delegate.py`)
+  - Pill-shaped status badges with labels (Unreliable, Needs Move, Done, Revisions)
+  - Selection checkmarks in top-left corner with blue circle background
+  - Subtle hover effects with brightness overlay
+  - Loading placeholder with spinner animation
+  - Shadow effects behind thumbnails
+  - Compact symbol badges for small thumbnails
+
+- **Collapsible Query Panel Sections** (`photo_review/query_panel.py`)
+  - Modern collapsible sections with icons and smooth animations
+  - Size policies to prevent unwanted vertical expansion
+  - Auto-execute saved queries on selection (no "Run" button needed)
+  - Improved delete button with text label
+
+- **Floating Search Bar** (`photo_review/review_window.py`)
+  - Fixed height search bar that doesn't expand vertically
+  - Modern styling with rounded input field
+  - Clear button and keyboard shortcut hint (Ctrl+K)
+
+- **Selection Action Bar** (`photo_review/review_window.py`)
+  - Floating action bar showing selection count
+  - Quick action buttons: Delete, Rotate, Correct Date, Deselect
+  - Auto-hide when nothing selected
+
+- **Preview Info Bar** (`photo_review/review_window.py`)
+  - Shows filename and details for selected photo
+  - Theme-aware styling
+
+- **Red Close Buttons**
+  - Main Review Window: Red close button in bottom-right corner
+  - Preview Window: Red close button in action bar
+  - High visibility styling (#EF4444 background, darker on hover)
+
+### Changed
+
+**Detachable Preview Window Theme Support** (`ui/detachable_preview_window.py`)
+- **StyledLabel Class**: Now theme-aware with `update_theme()` method
+  - Value labels use `c.text_primary` instead of hardcoded `#333`
+  - Header labels use `c.primary` instead of hardcoded `#0066cc`
+- **New `_apply_theme()` Method**: Centralizes all theme-dependent styling
+  - Applies global theme stylesheet to window
+  - Filename header uses theme background and text colors
+  - Revisions list fully themed (background, borders, selection, hover)
+  - Hash label uses theme text color with monospace font
+  - Status colors use theme status colors (corrected, reorganized, pending)
+- **Secondary Revision Preview Window**: Now properly themed
+- **Close Button**: Now red for visibility
+
+**Unified Image Viewer Theme Support** (`ui/preview/zoomable_viewer.py`)
+- Added conditional import of theme system (`HAS_THEME` flag)
+- `_apply_styling()` now uses theme colors when available
+  - Background uses `c.bg_tertiary`
+  - Border uses `c.border_light`
+- Placeholder text uses `c.text_muted` for theme-aware color
+- Added `update_theme()` public method for external theme updates
+
+### Fixed
+
+- **Search Panel Expanding**: Fixed issue where query panel sections expanded vertically with window resize
+  - Added `QSizePolicy.Maximum` to CollapsibleSection
+  - Added `setAlignment(Qt.AlignTop)` to scroll layout
+  - Added splitter stretch factors (0 for query panel, 1 for grid)
+  - Fixed FloatingSearchBar with `setFixedHeight(64)`
+
+- **Tooltip Error**: Fixed `AttributeError: 'PySide6.QtGui.QHelpEvent' object has no attribute 'ToolTip'`
+  - Changed `event.ToolTip` to `QEvent.ToolTip` with proper import
+
+- **Dark Mode Text Readability**: Fixed unreadable text in preview window dark mode
+  - All hardcoded light colors replaced with theme-aware colors
+  - Background colors now properly adapt to dark/light mode
+
 ## [3.0.4] - 2026-01-15
 
 ### Added

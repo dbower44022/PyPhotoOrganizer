@@ -227,59 +227,207 @@ class SelectionActionBar(QWidget):
             self.hide()
 
 
-class PreviewInfoBar(QWidget):
+class CollapsibleSection(QWidget):
     """
-    Info bar below the preview showing file metadata.
+    A collapsible section with header and content area.
+    """
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self._is_expanded = True
+        self._title = title
+        self._init_ui()
+
+    def _init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # Header button
+        self.header_btn = QPushButton(f"▼ {self._title}")
+        self.header_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #333333;
+                border: none;
+                border-radius: 4px;
+                color: #FFFFFF;
+                font-weight: 600;
+                font-size: 12px;
+                text-align: left;
+                padding: 8px 12px;
+            }
+            QPushButton:hover {
+                background-color: #3d3d3d;
+            }
+        """)
+        self.header_btn.clicked.connect(self._toggle)
+        main_layout.addWidget(self.header_btn)
+
+        # Content widget
+        self.content_widget = QWidget()
+        self.content_layout = QVBoxLayout(self.content_widget)
+        self.content_layout.setContentsMargins(12, 8, 12, 8)
+        self.content_layout.setSpacing(4)
+        main_layout.addWidget(self.content_widget)
+
+    def _toggle(self):
+        self._is_expanded = not self._is_expanded
+        self.content_widget.setVisible(self._is_expanded)
+        arrow = "▼" if self._is_expanded else "▶"
+        self.header_btn.setText(f"{arrow} {self._title}")
+
+    def add_row(self, label: str, value: str):
+        """Add a label-value row to the content."""
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 2, 0, 2)
+        row_layout.setSpacing(8)
+
+        label_widget = QLabel(f"{label}:")
+        label_widget.setStyleSheet("color: #888888; font-size: 11px; min-width: 80px;")
+        label_widget.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        row_layout.addWidget(label_widget)
+
+        value_widget = QLabel(value)
+        value_widget.setStyleSheet("color: #FFFFFF; font-size: 11px;")
+        value_widget.setWordWrap(True)
+        value_widget.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        row_layout.addWidget(value_widget, 1)
+
+        self.content_layout.addWidget(row)
+
+    def clear_content(self):
+        """Clear all content rows."""
+        while self.content_layout.count():
+            item = self.content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+
+class FileDetailsPanel(QWidget):
+    """
+    Comprehensive file details panel showing file information, image properties, and EXIF data.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._current_file_path = None
         self._init_ui()
 
     def _init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(4)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(4)
 
-        # Filename
+        # Create scroll area for content
+        scroll_area = QWidget()
+        scroll_layout = QVBoxLayout(scroll_area)
+        scroll_layout.setContentsMargins(8, 8, 8, 8)
+        scroll_layout.setSpacing(8)
+
+        # Header with filename
         self.filename_label = QLabel("No file selected")
         self.filename_label.setStyleSheet("""
             font-weight: 600;
-            font-size: 13px;
+            font-size: 14px;
             color: #FFFFFF;
+            padding: 8px 12px;
+            background-color: #333333;
+            border-radius: 4px;
         """)
-        layout.addWidget(self.filename_label)
+        self.filename_label.setWordWrap(True)
+        scroll_layout.addWidget(self.filename_label)
 
-        # Details row
-        self.details_label = QLabel("")
-        self.details_label.setStyleSheet("""
+        # Quick status bar
+        self.status_bar = QLabel("")
+        self.status_bar.setStyleSheet("""
             font-size: 12px;
             color: #888888;
+            padding: 4px 12px;
         """)
-        layout.addWidget(self.details_label)
+        scroll_layout.addWidget(self.status_bar)
+
+        # Database Info section
+        self.db_section = CollapsibleSection("Database Info")
+        scroll_layout.addWidget(self.db_section)
+
+        # File Info section
+        self.file_section = CollapsibleSection("File Information")
+        scroll_layout.addWidget(self.file_section)
+
+        # Image Properties section
+        self.image_section = CollapsibleSection("Image Properties")
+        scroll_layout.addWidget(self.image_section)
+
+        # EXIF section
+        self.exif_section = CollapsibleSection("EXIF Data")
+        scroll_layout.addWidget(self.exif_section)
+
+        scroll_layout.addStretch()
+
+        # Put scroll area in a QScrollArea widget
+        from PySide6.QtWidgets import QScrollArea
+        scroll = QScrollArea()
+        scroll.setWidget(scroll_area)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                background-color: #1A1A1A;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background-color: #262626;
+                width: 10px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #444444;
+                border-radius: 5px;
+                min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #555555;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+        """)
+
+        main_layout.addWidget(scroll)
 
         self.setStyleSheet("""
             QWidget {
-                background-color: #262626;
-                border-top: 1px solid #333333;
+                background-color: #1A1A1A;
             }
         """)
 
     def update_info(self, record: dict):
-        """Update info from a file record."""
+        """Update all sections with file information."""
+        # Clear all sections
+        self.db_section.clear_content()
+        self.file_section.clear_content()
+        self.image_section.clear_content()
+        self.exif_section.clear_content()
+
         if not record:
             self.filename_label.setText("No file selected")
-            self.details_label.setText("")
+            self.status_bar.setText("")
+            self._current_file_path = None
             return
 
-        # Get file path
-        file_path = record.get('archive_path') or record.get('source_path', '')
+        # Get file path - prefer archive over source
+        archive_path = record.get('archive_path') or record.get('file_name', '')
+        source_path = record.get('source_path', '')
+        file_path = archive_path if (archive_path and os.path.exists(archive_path)) else source_path
+        self._current_file_path = file_path
+
+        # Filename header
         filename = os.path.basename(file_path) if file_path else "Unknown"
+        self.filename_label.setText(filename)
 
-        # Build details
-        details = []
-
-        # Date
+        # Build quick status
+        status_parts = []
         year = record.get('create_year')
         month = record.get('create_month')
         day = record.get('create_day')
@@ -289,9 +437,8 @@ class PreviewInfoBar(QWidget):
                 date_str += f"-{str(month).zfill(2)}"
                 if day:
                     date_str += f"-{str(day).zfill(2)}"
-            details.append(f"📅 {date_str}")
+            status_parts.append(f"📅 {date_str}")
 
-        # Date source
         date_source = record.get('date_source', '')
         if date_source:
             source_icons = {
@@ -300,9 +447,8 @@ class PreviewInfoBar(QWidget):
                 'os_metadata': '📂 File',
                 'fallback': '⚠ Fallback'
             }
-            details.append(source_icons.get(date_source, date_source))
+            status_parts.append(source_icons.get(date_source, date_source))
 
-        # Status
         status = self._get_status(record)
         if status and status != 'normal':
             status_labels = {
@@ -311,10 +457,20 @@ class PreviewInfoBar(QWidget):
                 'reorganized': '📦 Reorganized',
                 'revision': '🔄 Has Revisions'
             }
-            details.append(status_labels.get(status, status))
+            status_parts.append(status_labels.get(status, status))
 
-        self.filename_label.setText(filename)
-        self.details_label.setText("  •  ".join(details) if details else "")
+        self.status_bar.setText("  •  ".join(status_parts) if status_parts else "")
+
+        # Populate Database Info section
+        self._populate_db_info(record)
+
+        # Populate File Info section
+        if file_path and os.path.exists(file_path):
+            self._populate_file_info(file_path)
+            self._populate_image_info(file_path)
+            self._populate_exif_info(file_path)
+        else:
+            self.file_section.add_row("Status", "File not found")
 
     def _get_status(self, record):
         """Determine status from record."""
@@ -332,6 +488,425 @@ class PreviewInfoBar(QWidget):
         if has_unreliable:
             return 'unreliable'
         return 'normal'
+
+    def _populate_db_info(self, record: dict):
+        """Populate database information section."""
+        # File hash
+        file_hash = record.get('file_hash', '')
+        if file_hash:
+            # Show truncated hash with full hash as tooltip
+            short_hash = f"{file_hash[:16]}...{file_hash[-8:]}" if len(file_hash) > 24 else file_hash
+            self.db_section.add_row("Hash", short_hash)
+
+        # Archive path
+        archive_path = record.get('archive_path') or record.get('file_name', '')
+        if archive_path:
+            self.db_section.add_row("Archive", archive_path)
+
+        # Source path
+        source_path = record.get('source_path', '')
+        if source_path:
+            self.db_section.add_row("Source", source_path)
+
+        # Creation date from database
+        year = record.get('create_year')
+        month = record.get('create_month')
+        day = record.get('create_day')
+        if year:
+            date_str = f"{year}"
+            if month:
+                date_str += f"-{str(month).zfill(2)}"
+                if day:
+                    date_str += f"-{str(day).zfill(2)}"
+            self.db_section.add_row("DB Date", date_str)
+
+        # Date source
+        date_source = record.get('date_source', '')
+        if date_source:
+            self.db_section.add_row("Date Source", date_source.replace('_', ' ').title())
+
+        # Corrected date
+        corrected_date = record.get('corrected_date')
+        if corrected_date:
+            self.db_section.add_row("Corrected", corrected_date)
+
+        # Flag reason
+        flag_reason = record.get('flag_reason')
+        if flag_reason:
+            self.db_section.add_row("Flag Reason", flag_reason.replace('_', ' ').title())
+
+        # Status
+        status = self._get_status(record)
+        self.db_section.add_row("Status", status.replace('_', ' ').title())
+
+        # Revision info
+        revised_photo = record.get('revised_photo')
+        if revised_photo:
+            self.db_section.add_row("Parent Hash", f"{revised_photo[:16]}...")
+
+        original_hash = record.get('original_hash')
+        if original_hash and original_hash != record.get('file_hash'):
+            self.db_section.add_row("Original Hash", f"{original_hash[:16]}...")
+
+    def _populate_file_info(self, file_path: str):
+        """Populate file information section."""
+        try:
+            stat_info = os.stat(file_path)
+
+            # File size
+            size_bytes = stat_info.st_size
+            if size_bytes < 1024:
+                size_str = f"{size_bytes} bytes"
+            elif size_bytes < 1024 * 1024:
+                size_str = f"{size_bytes / 1024:.1f} KB"
+            elif size_bytes < 1024 * 1024 * 1024:
+                size_str = f"{size_bytes / (1024 * 1024):.2f} MB"
+            else:
+                size_str = f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+            self.file_section.add_row("Size", size_str)
+
+            # File extension
+            _, ext = os.path.splitext(file_path)
+            if ext:
+                self.file_section.add_row("Type", ext.upper().lstrip('.'))
+
+            # Modified time
+            from datetime import datetime
+            mtime = datetime.fromtimestamp(stat_info.st_mtime)
+            self.file_section.add_row("Modified", mtime.strftime("%Y-%m-%d %H:%M:%S"))
+
+            # Access time
+            atime = datetime.fromtimestamp(stat_info.st_atime)
+            self.file_section.add_row("Accessed", atime.strftime("%Y-%m-%d %H:%M:%S"))
+
+            # Creation time (platform dependent)
+            if hasattr(stat_info, 'st_birthtime'):
+                # macOS
+                ctime = datetime.fromtimestamp(stat_info.st_birthtime)
+                self.file_section.add_row("Created", ctime.strftime("%Y-%m-%d %H:%M:%S"))
+            elif hasattr(stat_info, 'st_ctime'):
+                # Windows uses st_ctime as creation time, Linux as change time
+                import platform
+                if platform.system() == 'Windows':
+                    ctime = datetime.fromtimestamp(stat_info.st_ctime)
+                    self.file_section.add_row("Created", ctime.strftime("%Y-%m-%d %H:%M:%S"))
+
+        except Exception as e:
+            logger.warning(f"Could not get file info: {e}")
+            self.file_section.add_row("Error", str(e))
+
+    def _populate_image_info(self, file_path: str):
+        """Populate image properties section."""
+        # Check if it's an image
+        image_extensions = {'.jpg', '.jpeg', '.png', '.tiff', '.tif', '.gif', '.bmp', '.webp', '.heic', '.heif'}
+        _, ext = os.path.splitext(file_path)
+        if ext.lower() not in image_extensions:
+            self.image_section.add_row("Type", "Not an image file")
+            return
+
+        try:
+            from PIL import Image
+
+            with Image.open(file_path) as img:
+                # Dimensions
+                width, height = img.size
+                self.image_section.add_row("Dimensions", f"{width} × {height} px")
+
+                # Megapixels
+                megapixels = (width * height) / 1_000_000
+                self.image_section.add_row("Megapixels", f"{megapixels:.2f} MP")
+
+                # Aspect ratio
+                from math import gcd
+                divisor = gcd(width, height)
+                aspect_w = width // divisor
+                aspect_h = height // divisor
+                # Simplify common ratios
+                if aspect_w > 100 or aspect_h > 100:
+                    ratio = width / height
+                    if abs(ratio - 16/9) < 0.01:
+                        aspect_str = "16:9"
+                    elif abs(ratio - 4/3) < 0.01:
+                        aspect_str = "4:3"
+                    elif abs(ratio - 3/2) < 0.01:
+                        aspect_str = "3:2"
+                    elif abs(ratio - 1) < 0.01:
+                        aspect_str = "1:1"
+                    else:
+                        aspect_str = f"{ratio:.2f}:1"
+                else:
+                    aspect_str = f"{aspect_w}:{aspect_h}"
+                self.image_section.add_row("Aspect Ratio", aspect_str)
+
+                # Format
+                self.image_section.add_row("Format", img.format or "Unknown")
+
+                # Color mode
+                mode_descriptions = {
+                    '1': '1-bit (B&W)',
+                    'L': 'Grayscale',
+                    'P': 'Palette',
+                    'RGB': 'RGB Color',
+                    'RGBA': 'RGB + Alpha',
+                    'CMYK': 'CMYK',
+                    'YCbCr': 'YCbCr',
+                    'LAB': 'LAB Color',
+                    'HSV': 'HSV Color',
+                    'I': '32-bit Integer',
+                    'F': '32-bit Float'
+                }
+                mode_str = mode_descriptions.get(img.mode, img.mode)
+                self.image_section.add_row("Color Mode", mode_str)
+
+                # Bits per pixel (approximate)
+                mode_bits = {
+                    '1': 1, 'L': 8, 'P': 8, 'RGB': 24, 'RGBA': 32,
+                    'CMYK': 32, 'YCbCr': 24, 'LAB': 24, 'HSV': 24,
+                    'I': 32, 'F': 32
+                }
+                bits = mode_bits.get(img.mode, 0)
+                if bits:
+                    self.image_section.add_row("Bit Depth", f"{bits} bits")
+
+                # Animation info for GIFs
+                if img.format == 'GIF':
+                    try:
+                        frames = 0
+                        while True:
+                            frames += 1
+                            img.seek(frames)
+                    except EOFError:
+                        pass
+                    if frames > 1:
+                        self.image_section.add_row("Frames", str(frames))
+
+        except Exception as e:
+            logger.warning(f"Could not get image info: {e}")
+            self.image_section.add_row("Error", str(e))
+
+    def _populate_exif_info(self, file_path: str):
+        """Populate EXIF data section."""
+        # Check if it's an image that might have EXIF
+        image_extensions = {'.jpg', '.jpeg', '.tiff', '.tif', '.heic', '.heif'}
+        _, ext = os.path.splitext(file_path)
+        if ext.lower() not in image_extensions:
+            self.exif_section.add_row("Info", "EXIF not supported for this format")
+            return
+
+        try:
+            from PIL import Image
+            from PIL.ExifTags import TAGS, GPSTAGS
+
+            with Image.open(file_path) as img:
+                exif_data = img._getexif()
+                if not exif_data:
+                    self.exif_section.add_row("Info", "No EXIF data found")
+                    return
+
+                # Map EXIF tag numbers to names
+                exif_dict = {}
+                for tag_id, value in exif_data.items():
+                    tag_name = TAGS.get(tag_id, str(tag_id))
+                    exif_dict[tag_name] = value
+
+                # Define fields to display with formatting
+                exif_fields = [
+                    ('DateTimeOriginal', 'Date Taken', None),
+                    ('DateTime', 'Date Modified', None),
+                    ('Make', 'Camera Make', None),
+                    ('Model', 'Camera Model', None),
+                    ('LensModel', 'Lens', None),
+                    ('ExposureTime', 'Exposure', self._format_exposure),
+                    ('FNumber', 'Aperture', self._format_fnumber),
+                    ('ISOSpeedRatings', 'ISO', None),
+                    ('FocalLength', 'Focal Length', self._format_focal_length),
+                    ('FocalLengthIn35mmFilm', '35mm Equiv', lambda v: f"{v}mm"),
+                    ('ExposureBiasValue', 'Exp. Comp.', self._format_exposure_bias),
+                    ('MeteringMode', 'Metering', self._format_metering_mode),
+                    ('Flash', 'Flash', self._format_flash),
+                    ('WhiteBalance', 'White Balance', lambda v: 'Auto' if v == 0 else 'Manual'),
+                    ('ExposureProgram', 'Program', self._format_exposure_program),
+                    ('Software', 'Software', None),
+                    ('Artist', 'Artist', None),
+                    ('Copyright', 'Copyright', None),
+                    ('ImageDescription', 'Description', None),
+                    ('Orientation', 'Orientation', self._format_orientation),
+                ]
+
+                fields_found = 0
+                for exif_key, display_name, formatter in exif_fields:
+                    if exif_key in exif_dict:
+                        value = exif_dict[exif_key]
+                        try:
+                            if formatter:
+                                value = formatter(value)
+                            elif isinstance(value, bytes):
+                                value = value.decode('utf-8', errors='ignore').strip()
+                            else:
+                                value = str(value)
+                            if value:
+                                self.exif_section.add_row(display_name, value)
+                                fields_found += 1
+                        except Exception:
+                            pass
+
+                # Handle GPS info separately
+                if 'GPSInfo' in exif_dict:
+                    gps_info = exif_dict['GPSInfo']
+                    gps_str = self._format_gps(gps_info)
+                    if gps_str:
+                        self.exif_section.add_row("GPS", gps_str)
+                        fields_found += 1
+
+                if fields_found == 0:
+                    self.exif_section.add_row("Info", "EXIF data present but no recognized fields")
+
+        except ImportError:
+            self.exif_section.add_row("Error", "PIL not available")
+        except Exception as e:
+            logger.warning(f"Could not read EXIF data: {e}")
+            self.exif_section.add_row("Error", str(e))
+
+    def _format_exposure(self, value):
+        """Format exposure time value."""
+        if isinstance(value, tuple) and len(value) == 2:
+            if value[0] == 0 or value[1] == 0:
+                return None
+            ratio = value[0] / value[1]
+            if ratio >= 1:
+                return f"{ratio:.1f}s"
+            else:
+                return f"1/{int(1/ratio)}s"
+        return f"{value}s"
+
+    def _format_fnumber(self, value):
+        """Format f-number value."""
+        if isinstance(value, tuple) and len(value) == 2:
+            if value[1] == 0:
+                return None
+            return f"f/{value[0]/value[1]:.1f}"
+        return f"f/{value}"
+
+    def _format_focal_length(self, value):
+        """Format focal length value."""
+        if isinstance(value, tuple) and len(value) == 2:
+            if value[1] == 0:
+                return None
+            return f"{value[0]/value[1]:.0f}mm"
+        return f"{value}mm"
+
+    def _format_exposure_bias(self, value):
+        """Format exposure bias value."""
+        if isinstance(value, tuple) and len(value) == 2:
+            if value[1] == 0:
+                return None
+            ev = value[0] / value[1]
+            sign = '+' if ev > 0 else ''
+            return f"{sign}{ev:.1f} EV"
+        return f"{value} EV"
+
+    def _format_metering_mode(self, value):
+        """Format metering mode value."""
+        modes = {
+            0: 'Unknown',
+            1: 'Average',
+            2: 'Center-weighted',
+            3: 'Spot',
+            4: 'Multi-spot',
+            5: 'Multi-segment',
+            6: 'Partial',
+            255: 'Other'
+        }
+        return modes.get(value, f'Mode {value}')
+
+    def _format_flash(self, value):
+        """Format flash value."""
+        if value == 0:
+            return 'No Flash'
+        elif value == 1:
+            return 'Fired'
+        elif value == 5:
+            return 'Fired, No Strobe'
+        elif value == 7:
+            return 'Fired, Strobe'
+        elif value == 9:
+            return 'Fired, Compulsory'
+        elif value == 16:
+            return 'No Flash (Compulsory)'
+        elif value == 24:
+            return 'No Flash (Auto)'
+        elif value == 25:
+            return 'Fired (Auto)'
+        elif value == 32:
+            return 'No Flash Function'
+        else:
+            return f'Flash ({value})'
+
+    def _format_exposure_program(self, value):
+        """Format exposure program value."""
+        programs = {
+            0: 'Not Defined',
+            1: 'Manual',
+            2: 'Program AE',
+            3: 'Aperture Priority',
+            4: 'Shutter Priority',
+            5: 'Creative',
+            6: 'Action',
+            7: 'Portrait',
+            8: 'Landscape'
+        }
+        return programs.get(value, f'Program {value}')
+
+    def _format_orientation(self, value):
+        """Format orientation value."""
+        orientations = {
+            1: 'Normal',
+            2: 'Mirrored',
+            3: 'Rotated 180°',
+            4: 'Mirrored & 180°',
+            5: 'Mirrored & 90° CW',
+            6: 'Rotated 90° CW',
+            7: 'Mirrored & 90° CCW',
+            8: 'Rotated 90° CCW'
+        }
+        return orientations.get(value, f'Orientation {value}')
+
+    def _format_gps(self, gps_info):
+        """Format GPS information."""
+        try:
+            from PIL.ExifTags import GPSTAGS
+
+            # Parse GPS dict
+            gps_dict = {}
+            for key, value in gps_info.items():
+                tag = GPSTAGS.get(key, key)
+                gps_dict[tag] = value
+
+            lat = gps_dict.get('GPSLatitude')
+            lat_ref = gps_dict.get('GPSLatitudeRef', 'N')
+            lon = gps_dict.get('GPSLongitude')
+            lon_ref = gps_dict.get('GPSLongitudeRef', 'E')
+
+            if lat and lon:
+                # Convert to decimal degrees
+                def to_degrees(values):
+                    d = float(values[0][0]) / float(values[0][1]) if isinstance(values[0], tuple) else float(values[0])
+                    m = float(values[1][0]) / float(values[1][1]) if isinstance(values[1], tuple) else float(values[1])
+                    s = float(values[2][0]) / float(values[2][1]) if isinstance(values[2], tuple) else float(values[2])
+                    return d + m/60 + s/3600
+
+                lat_deg = to_degrees(lat)
+                lon_deg = to_degrees(lon)
+
+                if lat_ref == 'S':
+                    lat_deg = -lat_deg
+                if lon_ref == 'W':
+                    lon_deg = -lon_deg
+
+                return f"{lat_deg:.6f}, {lon_deg:.6f}"
+            return "Present"
+        except Exception:
+            return "Present"
 
 
 class PhotoReviewWindow(QMainWindow):
@@ -354,7 +929,8 @@ class PhotoReviewWindow(QMainWindow):
         self.detached_preview = None
         self.search_bar = None
         self.action_bar = None
-        self.preview_info = None
+        self.file_details_panel = None
+        self.preview_splitter = None
 
         if self.splash_callback:
             self.splash_callback("Creating interface...")
@@ -832,7 +1408,7 @@ class PhotoReviewWindow(QMainWindow):
         self.grid_view.set_thumbnail_size_pixels(saved_thumb_size)
 
     def _create_preview_panel(self):
-        """Create the preview panel with info bar."""
+        """Create the preview panel with image viewer and file details."""
         from ui.preview import ZoomableImageViewer
 
         self.preview_panel = QWidget()
@@ -849,20 +1425,32 @@ class PhotoReviewWindow(QMainWindow):
         header_layout = QHBoxLayout(preview_header)
         header_layout.setContentsMargins(12, 8, 12, 8)
 
-        header_label = QLabel("👁 Preview")
+        header_label = QLabel("👁 Preview & Details")
         header_label.setStyleSheet("font-weight: 600; color: #FFFFFF; font-size: 13px;")
         header_layout.addWidget(header_label)
         header_layout.addStretch()
 
         preview_layout.addWidget(preview_header)
 
-        # Image viewer
-        self.image_viewer = ZoomableImageViewer(dark_mode=True)
-        preview_layout.addWidget(self.image_viewer, 1)
+        # Horizontal splitter for image viewer and file details
+        self.preview_splitter = QSplitter(Qt.Horizontal)
 
-        # Preview info bar
-        self.preview_info = PreviewInfoBar()
-        preview_layout.addWidget(self.preview_info)
+        # Image viewer (left side)
+        self.image_viewer = ZoomableImageViewer(dark_mode=True)
+        self.preview_splitter.addWidget(self.image_viewer)
+
+        # File details panel (right side)
+        self.file_details_panel = FileDetailsPanel()
+        self.file_details_panel.setMinimumWidth(280)
+        self.file_details_panel.setMaximumWidth(500)
+        self.preview_splitter.addWidget(self.file_details_panel)
+
+        # Set splitter sizes (70% image, 30% details)
+        self.preview_splitter.setSizes([700, 300])
+        self.preview_splitter.setStretchFactor(0, 1)  # Image viewer stretches
+        self.preview_splitter.setStretchFactor(1, 0)  # Details panel fixed
+
+        preview_layout.addWidget(self.preview_splitter, 1)
 
     def _connect_signals(self):
         """Connect component signals."""
@@ -923,6 +1511,18 @@ class PhotoReviewWindow(QMainWindow):
         if right_splitter_state:
             self.right_splitter.restoreState(right_splitter_state)
 
+        preview_splitter_state = self.settings.value("preview_splitter")
+        if preview_splitter_state and self.preview_splitter:
+            self.preview_splitter.restoreState(preview_splitter_state)
+
+        # Restore preview panel visibility (default to hidden for performance)
+        preview_visible = self.settings.value("preview_panel_visible", False, type=bool)
+        if self.preview_panel:
+            if preview_visible:
+                self.preview_panel.show()
+            else:
+                self.preview_panel.hide()
+
     # -------------------------------------------------------------------------
     # Query and Data Loading
     # -------------------------------------------------------------------------
@@ -955,21 +1555,30 @@ class PhotoReviewWindow(QMainWindow):
         if self.action_bar:
             self.action_bar.update_selection(count)
 
-        # Update preview
-        if count == 1 and selected_hashes:
-            record = self.grid_model.get_record_by_hash(selected_hashes[0])
-            if record:
-                file_path = record.get('archive_path') or record.get('source_path', '')
-                if file_path and os.path.exists(file_path):
-                    self.image_viewer.load_image(file_path)
+        # Update preview - ONLY if preview panel is visible (performance optimization)
+        # When preview is hidden, skip loading images and parsing EXIF data
+        if self.preview_panel and self.preview_panel.isVisible():
+            if count == 1 and selected_hashes:
+                record = self.grid_model.get_record_by_hash(selected_hashes[0])
+                if record:
+                    file_path = record.get('archive_path') or record.get('source_path', '')
+                    if file_path and os.path.exists(file_path):
+                        self.image_viewer.load_image(file_path)
 
-                # Update preview info bar
-                if self.preview_info:
-                    self.preview_info.update_info(record)
-        elif count == 0:
-            # Clear preview info
-            if self.preview_info:
-                self.preview_info.update_info(None)
+                    # Update file details panel
+                    if self.file_details_panel:
+                        self.file_details_panel.update_info(record)
+            elif count == 0:
+                # Clear file details panel
+                if self.file_details_panel:
+                    self.file_details_panel.update_info(None)
+
+        # Also update detached preview window if it's open (keep in sync with selection)
+        if self.detached_preview and self.detached_preview.isVisible():
+            if count >= 1 and selected_hashes:
+                record = self.grid_model.get_record_by_hash(selected_hashes[0])
+                if record:
+                    self.detached_preview.update_preview(record)
 
     def on_item_activated(self, record: dict):
         """Handle double-click or space on grid item."""
@@ -1038,6 +1647,24 @@ class PhotoReviewWindow(QMainWindow):
                 self.preview_panel.hide()
             else:
                 self.preview_panel.show()
+                # When showing the panel, load content for the current selection
+                self._load_preview_for_current_selection()
+
+    def _load_preview_for_current_selection(self):
+        """Load preview content for the currently selected item."""
+        if not self.grid_view:
+            return
+
+        selected_hashes = self.grid_view.get_selected_hashes()
+        if len(selected_hashes) == 1:
+            record = self.grid_model.get_record_by_hash(selected_hashes[0])
+            if record:
+                file_path = record.get('archive_path') or record.get('source_path', '')
+                if file_path and os.path.exists(file_path):
+                    self.image_viewer.load_image(file_path)
+
+                if self.file_details_panel:
+                    self.file_details_panel.update_info(record)
 
     # -------------------------------------------------------------------------
     # File Actions
@@ -1366,6 +1993,10 @@ class PhotoReviewWindow(QMainWindow):
             self.settings.setValue("main_splitter", self.main_splitter.saveState())
         if hasattr(self, 'right_splitter') and self.right_splitter:
             self.settings.setValue("right_splitter", self.right_splitter.saveState())
+        if hasattr(self, 'preview_splitter') and self.preview_splitter:
+            self.settings.setValue("preview_splitter", self.preview_splitter.saveState())
+        if hasattr(self, 'preview_panel') and self.preview_panel:
+            self.settings.setValue("preview_panel_visible", self.preview_panel.isVisible())
 
         if self.grid_model:
             self.settings.setValue("thumbnail_size", self.grid_model.thumbnail_size)
