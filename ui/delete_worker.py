@@ -56,14 +56,16 @@ class DeleteWorker(QThread):
 
         success_count = 0
         errors = []
+        deleted_hashes = []  # Track successfully deleted file hashes
 
         # Initialize database metadata
         try:
             db_metadata = DatabaseMetadata(self.db_path)
             archive_base = db_metadata.get_archive_location()
+            prior_revision_archive = db_metadata.get_prior_revision_archive_location()
         except Exception as e:
             self.worker_logger.error(f"Failed to initialize database: {e}", exc_info=True)
-            self.finished.emit({'success': 0, 'errors': [f"Failed to initialize: {e}"]})
+            self.finished.emit({'success': 0, 'errors': [f"Failed to initialize: {e}"], 'deleted_hashes': []})
             return
 
         # Initialize audit manager and create session
@@ -107,14 +109,25 @@ class DeleteWorker(QThread):
 
                 # CRITICAL: Ensure we're NOT deleting a source file
                 # Source files must NEVER be modified - this is a fundamental architecture rule
+                # Files can be in the main archive OR the prior revision archive
                 archive_path_normalized = os.path.realpath(archive_path)
                 archive_base_normalized = os.path.realpath(archive_base)
 
-                if not archive_path_normalized.startswith(archive_base_normalized):
+                # Check if file is in main archive
+                in_main_archive = archive_path_normalized.startswith(archive_base_normalized)
+
+                # Check if file is in prior revision archive (if configured)
+                in_prior_archive = False
+                if prior_revision_archive:
+                    prior_archive_normalized = os.path.realpath(prior_revision_archive)
+                    in_prior_archive = archive_path_normalized.startswith(prior_archive_normalized)
+
+                if not in_main_archive and not in_prior_archive:
                     raise ValueError(
                         f"CRITICAL: Attempted to delete source file!\n"
                         f"File path: {archive_path}\n"
                         f"Archive base: {archive_base}\n"
+                        f"Prior archive: {prior_revision_archive}\n"
                         f"Source files must NEVER be modified. "
                         f"This file appears to be in a source directory, not the archive."
                     )
@@ -125,8 +138,14 @@ class DeleteWorker(QThread):
                     self.worker_logger.info(f"  Calculated hash: {file_hash[:16]}...")
 
                 # Calculate Delete Vault path (preserve structure relative to archive)
-                relative_path = os.path.relpath(archive_path, archive_base)
-                vault_path = os.path.join(self.delete_vault_path, relative_path)
+                # Use appropriate base depending on where the file is located
+                if in_prior_archive:
+                    relative_path = os.path.relpath(archive_path, prior_revision_archive)
+                    # Prefix with "prior_revisions" to distinguish in delete vault
+                    vault_path = os.path.join(self.delete_vault_path, "prior_revisions", relative_path)
+                else:
+                    relative_path = os.path.relpath(archive_path, archive_base)
+                    vault_path = os.path.join(self.delete_vault_path, relative_path)
                 vault_dir = os.path.dirname(vault_path)
 
                 self.worker_logger.info(f"  Archive: {archive_path}")
@@ -217,6 +236,7 @@ class DeleteWorker(QThread):
                         self.worker_logger.warning(f"  ⚠ Failed to log audit: {audit_error}")
 
                 success_count += 1
+                deleted_hashes.append(file_hash)  # Track for UI removal
                 self.worker_logger.info(f"✓ File {idx+1} completed successfully")
 
             except Exception as e:
@@ -269,7 +289,8 @@ class DeleteWorker(QThread):
         # Emit results
         self.finished.emit({
             'success': success_count,
-            'errors': errors
+            'errors': errors,
+            'deleted_hashes': deleted_hashes
         })
 
     def _cleanup_empty_dirs(self, file_path, archive_base):

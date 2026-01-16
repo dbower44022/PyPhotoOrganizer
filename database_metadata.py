@@ -114,6 +114,20 @@ class DatabaseMetadata:
         );
     """
 
+    SAVED_QUERIES_TABLE_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS SavedQueries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            query_json TEXT NOT NULL,
+            is_favorite INTEGER DEFAULT 0,
+            is_system INTEGER DEFAULT 0,
+            created_date TEXT NOT NULL,
+            last_used_date TEXT,
+            use_count INTEGER DEFAULT 0
+        );
+    """
+
     def __init__(self, database_path: str):
         """
         Initialize database metadata manager.
@@ -128,6 +142,7 @@ class DatabaseMetadata:
         self._ensure_file_rename_history_table()
         self._ensure_thumbnail_cache_table()
         self._ensure_deleted_files_table()
+        self._ensure_saved_queries_table()
 
     def _get_connection(self) -> sqlite3.Connection:
         """
@@ -239,6 +254,11 @@ class DatabaseMetadata:
                 if 'delete_vault_location' not in columns:
                     logger.info("Upgrading database: adding delete_vault_location column")
                     cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN delete_vault_location TEXT")
+
+                # Add photo_review_state column if missing (for Photo Review app)
+                if 'photo_review_state' not in columns:
+                    logger.info("Upgrading database: adding photo_review_state column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN photo_review_state TEXT DEFAULT '{}'")
 
                 conn.commit()
                 logger.debug(f"Metadata table ensured in {self.database_path}")
@@ -364,6 +384,26 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to create DeletedFiles table: {e}")
+            raise
+
+    def _ensure_saved_queries_table(self):
+        """Ensure the SavedQueries table exists in the database."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Create table if it doesn't exist
+                cursor.execute(self.SAVED_QUERIES_TABLE_SCHEMA)
+
+                # Create indexes for performance
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_saved_queries_name ON SavedQueries(name)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_saved_queries_favorite ON SavedQueries(is_favorite)")
+
+                conn.commit()
+                logger.debug(f"SavedQueries table ensured in {self.database_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to create SavedQueries table: {e}")
             raise
 
     def ensure_all_tables(self):
@@ -2418,3 +2458,341 @@ class DatabaseMetadata:
         except Exception as e:
             logger.error(f"Failed to create database: {e}")
             raise
+
+    # -------------------------------------------------------------------------
+    # Photo Review State Methods
+    # -------------------------------------------------------------------------
+
+    def get_photo_review_state(self) -> Optional[Dict[str, Any]]:
+        """
+        Get the Photo Review application state.
+
+        Returns:
+            Dictionary with state data or empty dict if not found
+        """
+        import json
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT photo_review_state FROM DatabaseMetadata WHERE id = 1
+                """)
+                row = cursor.fetchone()
+                if row and row[0]:
+                    return json.loads(row[0])
+                return {}
+
+        except Exception as e:
+            logger.error(f"Failed to get photo review state: {e}")
+            return {}
+
+    def set_photo_review_state(self, state: Dict[str, Any]) -> bool:
+        """
+        Set the Photo Review application state.
+
+        Args:
+            state: Dictionary with state data (will be JSON-encoded)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        import json
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                state_json = json.dumps(state)
+                cursor.execute("""
+                    UPDATE DatabaseMetadata SET photo_review_state = ? WHERE id = 1
+                """, (state_json,))
+                conn.commit()
+                return cursor.rowcount > 0
+
+        except Exception as e:
+            logger.error(f"Failed to set photo review state: {e}")
+            return False
+
+    def get_thumbnail_cache_dir(self) -> Optional[str]:
+        """
+        Get the thumbnail cache directory.
+
+        Returns:
+            Thumbnail cache directory path or None if not set
+        """
+        metadata = self.get_metadata()
+        return metadata.get('thumbnail_cache_dir') if metadata else None
+
+    def set_thumbnail_cache_dir(self, cache_dir: str) -> bool:
+        """
+        Set the thumbnail cache directory.
+
+        Args:
+            cache_dir: Path to thumbnail cache directory
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE DatabaseMetadata SET thumbnail_cache_dir = ? WHERE id = 1
+                """, (cache_dir,))
+                conn.commit()
+                return cursor.rowcount > 0
+
+        except Exception as e:
+            logger.error(f"Failed to set thumbnail cache dir: {e}")
+            return False
+
+    # -------------------------------------------------------------------------
+    # Saved Queries Methods
+    # -------------------------------------------------------------------------
+
+    def save_query(self, name: str, query_filters: Dict[str, Any],
+                   description: str = None, is_favorite: bool = False) -> bool:
+        """
+        Save a named query to the database.
+
+        Args:
+            name: Unique name for the query
+            query_filters: Dictionary of query filters
+            description: Optional description
+            is_favorite: Whether to mark as favorite
+
+        Returns:
+            True if successful, False otherwise
+        """
+        import json
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                query_json = json.dumps(query_filters)
+                created_date = datetime.now().isoformat()
+
+                cursor.execute("""
+                    INSERT OR REPLACE INTO SavedQueries
+                    (name, description, query_json, is_favorite, is_system, created_date)
+                    VALUES (?, ?, ?, ?, 0, ?)
+                """, (name, description, query_json, 1 if is_favorite else 0, created_date))
+
+                conn.commit()
+                logger.info(f"Saved query: {name}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to save query: {e}")
+            return False
+
+    def get_saved_queries(self, favorites_only: bool = False) -> List[Dict[str, Any]]:
+        """
+        Get all saved queries.
+
+        Args:
+            favorites_only: If True, only return favorite queries
+
+        Returns:
+            List of query dictionaries
+        """
+        import json
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                if favorites_only:
+                    cursor.execute("""
+                        SELECT id, name, description, query_json, is_favorite, is_system,
+                               created_date, last_used_date, use_count
+                        FROM SavedQueries
+                        WHERE is_favorite = 1
+                        ORDER BY use_count DESC, name ASC
+                    """)
+                else:
+                    cursor.execute("""
+                        SELECT id, name, description, query_json, is_favorite, is_system,
+                               created_date, last_used_date, use_count
+                        FROM SavedQueries
+                        ORDER BY is_favorite DESC, use_count DESC, name ASC
+                    """)
+
+                results = []
+                for row in cursor.fetchall():
+                    results.append({
+                        'id': row[0],
+                        'name': row[1],
+                        'description': row[2],
+                        'filters': json.loads(row[3]) if row[3] else {},
+                        'is_favorite': bool(row[4]),
+                        'is_system': bool(row[5]),
+                        'created_date': row[6],
+                        'last_used_date': row[7],
+                        'use_count': row[8] or 0
+                    })
+
+                return results
+
+        except Exception as e:
+            logger.error(f"Failed to get saved queries: {e}")
+            return []
+
+    def get_query_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        """
+        Get a specific saved query by name.
+
+        Args:
+            name: Query name
+
+        Returns:
+            Query dictionary or None if not found
+        """
+        import json
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, name, description, query_json, is_favorite, is_system,
+                           created_date, last_used_date, use_count
+                    FROM SavedQueries
+                    WHERE name = ?
+                """, (name,))
+
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'id': row[0],
+                        'name': row[1],
+                        'description': row[2],
+                        'filters': json.loads(row[3]) if row[3] else {},
+                        'is_favorite': bool(row[4]),
+                        'is_system': bool(row[5]),
+                        'created_date': row[6],
+                        'last_used_date': row[7],
+                        'use_count': row[8] or 0
+                    }
+
+                return None
+
+        except Exception as e:
+            logger.error(f"Failed to get query by name: {e}")
+            return None
+
+    def delete_saved_query(self, name: str) -> bool:
+        """
+        Delete a saved query by name.
+
+        Args:
+            name: Query name to delete
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    DELETE FROM SavedQueries WHERE name = ? AND is_system = 0
+                """, (name,))
+                conn.commit()
+
+                if cursor.rowcount > 0:
+                    logger.info(f"Deleted query: {name}")
+                    return True
+                return False
+
+        except Exception as e:
+            logger.error(f"Failed to delete query: {e}")
+            return False
+
+    def update_query_usage(self, name: str) -> None:
+        """
+        Update last_used_date and increment use_count for a query.
+
+        Args:
+            name: Query name
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE SavedQueries
+                    SET last_used_date = ?, use_count = use_count + 1
+                    WHERE name = ?
+                """, (datetime.now().isoformat(), name))
+                conn.commit()
+
+        except Exception as e:
+            logger.error(f"Failed to update query usage: {e}")
+
+    def initialize_system_queries(self) -> None:
+        """
+        Initialize predefined system queries if they don't exist.
+        """
+        import json
+        from datetime import timedelta
+
+        system_queries = [
+            {
+                'name': 'Recent Imports (Last 7 Days)',
+                'description': 'Photos imported in the last week',
+                'filters': {
+                    'import_date_from': (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'),
+                    'import_date_to': datetime.now().strftime('%Y-%m-%d')
+                }
+            },
+            {
+                'name': 'Unreliable Dates - Pending',
+                'description': 'Files with unreliable dates that need correction',
+                'filters': {
+                    'has_unreliable_date': True,
+                    'has_corrected_date': False
+                }
+            },
+            {
+                'name': 'Needs Reorganization',
+                'description': 'Files with corrected dates waiting for reorganization',
+                'filters': {
+                    'needs_reorganization': True
+                }
+            },
+            {
+                'name': 'Photos This Year',
+                'description': 'All photos from current year',
+                'filters': {
+                    'creation_date_from': f'{datetime.now().year}-01-01',
+                    'creation_date_to': f'{datetime.now().year}-12-31'
+                }
+            },
+            {
+                'name': 'All Photos',
+                'description': 'Browse entire archive',
+                'filters': {}
+            }
+        ]
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                for query in system_queries:
+                    # Check if already exists
+                    cursor.execute("""
+                        SELECT id FROM SavedQueries WHERE name = ?
+                    """, (query['name'],))
+
+                    if cursor.fetchone() is None:
+                        # Insert system query
+                        cursor.execute("""
+                            INSERT INTO SavedQueries
+                            (name, description, query_json, is_favorite, is_system, created_date)
+                            VALUES (?, ?, ?, 0, 1, ?)
+                        """, (
+                            query['name'],
+                            query['description'],
+                            json.dumps(query['filters']),
+                            datetime.now().isoformat()
+                        ))
+                        logger.info(f"Initialized system query: {query['name']}")
+
+                conn.commit()
+
+        except Exception as e:
+            logger.error(f"Failed to initialize system queries: {e}")

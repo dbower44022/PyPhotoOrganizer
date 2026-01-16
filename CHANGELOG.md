@@ -5,6 +5,66 @@ All notable changes to PyPhotoOrganizer will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.4] - 2026-01-15
+
+### Added
+
+**Unified Preview Module** (`ui/preview/`)
+- **New Package**: Consolidated all image preview functionality into single reusable module
+- **UnifiedImageViewer Class**: Single implementation replacing 3 duplicate classes (~450 lines reduced to ~280 lines)
+  - Rubber band zoom (click and drag to zoom, double-click to reset)
+  - EXIF orientation handling via `PIL.ImageOps.exif_transpose()`
+  - Dark mode support via constructor parameter
+  - Graceful handling of corrupted/missing files with placeholders
+  - Support for grayscale, RGB, and RGBA images
+- **Backward Compatibility**: Aliases `ZoomableImageViewer` and `ImagePreviewWidget` preserved for existing code
+- **Files Created**:
+  - `ui/preview/__init__.py` - Package initialization with aliases
+  - `ui/preview/zoomable_viewer.py` - Unified viewer implementation
+
+**Enhanced Detachable Preview Window** (`ui/detachable_preview_window.py`)
+- **Source File Actions Group**: New button group for source file operations
+  - "Open Source File" - Opens source file with system default application
+  - "Open Source Folder" - Opens folder containing source file in file manager
+  - "Copy Source Path" - Copies source file path to clipboard
+- **Archive File Actions Group**: New button group for archive file operations
+  - "Open Archive File" - Opens archive file with system default application
+  - "Open Archive Folder" - Opens folder containing archive file in file manager
+  - "Copy Archive Path" - Copies archive file path to clipboard
+- **Styled File Details Panel**: Improved readability with consistent styling
+  - `StyledLabel` class for bold blue labels (#0066cc) and normal dark values (#333)
+  - Hash displayed in monospace font for better readability
+  - Status displayed with color coding (green for reorganized, orange for pending)
+- **Revisions Panel**: New split panel showing complete file version history
+  - QSplitter divides File Details (60%) and Revisions (40%)
+  - Lists all versions from original import to current state
+  - Displays: version number, modification type (rotation, date_correction, etc.), timestamp
+  - Current version highlighted with bold text and "[CURRENT]" marker
+  - Missing files shown in gray with "(missing)" indicator
+  - Double-click revision to preview or launch externally
+- **Secondary Preview Window**: Preview revisions without leaving current context
+  - Reusable window for viewing revision images
+  - Shows revision header, image preview, and metadata
+  - Close button to dismiss without affecting main preview
+- **Cross-Platform Support**: File operations work on Windows, macOS, and Linux
+  - Windows: `os.startfile()`, `explorer /select,`
+  - macOS: `open`, `open -R`
+  - Linux: `xdg-open`
+
+### Changed
+
+- **Date Corrections Tab**: Now uses `UnifiedImageViewer` from `ui.preview` module
+- **Import History Tab**: Now uses `UnifiedImageViewer` from `ui.preview` module (with dark_mode=True)
+- **Filtered Files Tab**: Upgraded from simple QLabel to `UnifiedImageViewer` (now has zoom capability!)
+- **Photo Review App**: Now uses `ZoomableImageViewer` from `ui.preview` module
+- **Preview loads archive file first**: Preview now correctly loads from `archive_path` (to show rotated/modified versions) and falls back to `source_path` only if archive doesn't exist
+
+### Fixed
+
+- **TypeError in preview window**: Fixed `setEnabled(None)` error when source_path is None
+  - Changed `has_source = source_path and os.path.exists(source_path)` to `has_source = bool(source_path and os.path.exists(source_path))`
+  - This was preventing revision chain from loading (exception caught before `_load_revisions()` called)
+
 ## [3.0.3] - 2026-01-15
 
 ### Added

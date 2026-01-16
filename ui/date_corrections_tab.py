@@ -7,18 +7,18 @@ Allows users to review, preview, and correct file dates.
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QGroupBox, QCheckBox, QMessageBox,
-                               QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
                                QLineEdit, QApplication, QComboBox, QDialog,
                                QTextBrowser, QAbstractItemView, QProgressDialog)
-from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QTimer
-from PySide6.QtGui import QPixmap, QImage, QPainter, QPen, QColor
-from PIL import Image, ImageOps
+from PySide6.QtCore import Qt, Signal, QTimer
 import os
 import logging
 from typing import List, Dict, Any, Optional
 
 # Import profiling utilities
 from utils import profile_block
+
+# Import unified preview component
+from ui.preview import ZoomableImageViewer
 
 # Import grid components
 from ui.unreliable_dates_grid_model import UnreliableDatesGridModel
@@ -272,185 +272,6 @@ class DateCorrectionsHelpDialog(QDialog):
         </body>
         </html>
         """
-
-
-class ZoomableImageViewer(QGraphicsView):
-    """Image viewer with zoom-to-fit and rubber band zoom capabilities."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.scene = QGraphicsScene(self)
-        self.setScene(self.scene)
-
-        # Enable antialiasing for smooth zooming
-        self.setRenderHint(QPainter.Antialiasing)
-        self.setRenderHint(QPainter.SmoothPixmapTransform)
-
-        # Disable scrollbars (we'll use zoom-to-fit)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-
-        # Image item
-        self.pixmap_item = None
-        self.original_pixmap = None
-
-        # Rubber band zoom state
-        self.rubber_band_origin = None
-        self.rubber_band_rect = None
-        self.is_rubber_banding = False
-        self.is_custom_zoom = False  # Track if user has applied a custom zoom
-
-        # Styling
-        self.setStyleSheet("border: 1px solid #ddd; background-color: #f5f5f5;")
-
-    def load_image(self, file_path):
-        """Load and display an image with zoom-to-fit."""
-        try:
-            # Clear previous image
-            self.scene.clear()
-            self.pixmap_item = None
-            self.original_pixmap = None
-            self.is_custom_zoom = False  # Reset zoom state for new image
-
-            if not os.path.exists(file_path):
-                return
-
-            # Load image with PIL (handles various formats)
-            pil_img = Image.open(file_path)
-
-            # Apply EXIF orientation tag to display image correctly
-            # Many cameras/phones save images in a default orientation and use EXIF
-            # orientation tag to indicate how the image should be displayed
-            pil_img = ImageOps.exif_transpose(pil_img)
-
-            # Convert to RGB if necessary
-            if pil_img.mode != 'RGB':
-                pil_img = pil_img.convert('RGB')
-
-            # Convert PIL image to QPixmap
-            img_data = pil_img.tobytes('raw', 'RGB')
-            qimage = QImage(img_data, pil_img.width, pil_img.height,
-                          pil_img.width * 3, QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qimage)
-
-            # Store original pixmap
-            self.original_pixmap = pixmap
-
-            # Add to scene
-            self.pixmap_item = QGraphicsPixmapItem(pixmap)
-            self.scene.addItem(self.pixmap_item)
-
-            # Zoom to fit
-            self.zoom_to_fit()
-
-        except Exception as e:
-            logger.error(f"Failed to load image {file_path}: {e}")
-
-    def zoom_to_fit(self):
-        """Zoom image to fit the view."""
-        if self.pixmap_item:
-            # Get the bounding rectangle of the image
-            rect = self.pixmap_item.boundingRect()
-            # Fit the entire image in the view
-            self.fitInView(rect, Qt.KeepAspectRatio)
-            self.is_custom_zoom = False  # Reset to fit-to-view mode
-            logger.debug("Zoom reset to fit-to-view")
-
-    def resizeEvent(self, event):
-        """Handle resize events - maintain zoom state."""
-        super().resizeEvent(event)
-        # Only auto-fit if not rubber banding and not in custom zoom mode
-        if self.pixmap_item and not self.is_rubber_banding and not self.is_custom_zoom:
-            self.zoom_to_fit()
-
-    def mousePressEvent(self, event):
-        """Start rubber band selection."""
-        if event.button() == Qt.LeftButton and self.pixmap_item:
-            self.rubber_band_origin = self.mapToScene(event.pos())
-            self.is_rubber_banding = True
-            event.accept()
-        else:
-            super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        """Update rubber band rectangle."""
-        if self.is_rubber_banding and self.rubber_band_origin:
-            current_pos = self.mapToScene(event.pos())
-
-            # Remove old rubber band
-            if self.rubber_band_rect:
-                self.scene.removeItem(self.rubber_band_rect)
-
-            # Create new rubber band rectangle
-            x = min(self.rubber_band_origin.x(), current_pos.x())
-            y = min(self.rubber_band_origin.y(), current_pos.y())
-            width = abs(current_pos.x() - self.rubber_band_origin.x())
-            height = abs(current_pos.y() - self.rubber_band_origin.y())
-
-            rect = QRectF(x, y, width, height)
-
-            # Draw rubber band
-            pen = QPen(QColor(0, 120, 215), 2, Qt.DashLine)
-            self.rubber_band_rect = self.scene.addRect(rect, pen)
-
-            event.accept()
-        else:
-            super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        """Complete rubber band zoom."""
-        if event.button() == Qt.LeftButton and self.is_rubber_banding:
-            if self.rubber_band_origin:
-                current_pos = self.mapToScene(event.pos())
-
-                # Calculate zoom rectangle in scene coordinates
-                x = min(self.rubber_band_origin.x(), current_pos.x())
-                y = min(self.rubber_band_origin.y(), current_pos.y())
-                width = abs(current_pos.x() - self.rubber_band_origin.x())
-                height = abs(current_pos.y() - self.rubber_band_origin.y())
-
-                logger.info(f"Rubber band zoom: x={x:.1f}, y={y:.1f}, w={width:.1f}, h={height:.1f}")
-
-                # Only zoom if rectangle is large enough (> 10 pixels)
-                if width > 10 and height > 10:
-                    zoom_rect = QRectF(x, y, width, height)
-                    logger.info(f"Applying zoom to rect: {zoom_rect}")
-
-                    # Apply the zoom
-                    self.fitInView(zoom_rect, Qt.KeepAspectRatio)
-                    self.is_custom_zoom = True  # Mark that user has zoomed in
-
-                    # Force view update
-                    self.viewport().update()
-                    logger.info("Zoom applied, custom zoom mode enabled, view updated")
-                else:
-                    logger.info(f"Zoom rectangle too small ({width:.1f} x {height:.1f}), ignoring")
-
-                # Remove rubber band
-                if self.rubber_band_rect:
-                    self.scene.removeItem(self.rubber_band_rect)
-                    self.rubber_band_rect = None
-
-            self.rubber_band_origin = None
-            self.is_rubber_banding = False
-            event.accept()
-        else:
-            super().mouseReleaseEvent(event)
-
-    def mouseDoubleClickEvent(self, event):
-        """Double-click to reset zoom to fit."""
-        if event.button() == Qt.LeftButton:
-            self.zoom_to_fit()
-            event.accept()
-        else:
-            super().mouseDoubleClickEvent(event)
-
-    def clear(self):
-        """Clear the viewer."""
-        self.scene.clear()
-        self.pixmap_item = None
-        self.original_pixmap = None
-        self.is_custom_zoom = False  # Reset zoom state
 
 
 class DateCorrectionsTab(QWidget):
