@@ -12,17 +12,17 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QSplitter,
     QLabel, QPushButton, QHeaderView, QFileDialog, QMessageBox,
     QComboBox, QTabWidget, QTextEdit, QAbstractItemView,
-    QTableView, QLineEdit, QApplication, QGraphicsView,
-    QGraphicsScene, QGraphicsPixmapItem, QFrame, QScrollArea,
+    QTableView, QLineEdit, QApplication, QFrame, QScrollArea,
     QFormLayout, QSizePolicy, QProgressDialog
 )
 import subprocess
 from PySide6.QtCore import (
     Qt, QAbstractTableModel, QModelIndex, QSortFilterProxyModel,
-    QTimer, QSize, QRectF
+    QTimer, QSize
 )
-from PySide6.QtGui import QColor, QBrush, QPixmap, QImage, QPainter, QPen
-from PIL import Image, ImageOps
+from PySide6.QtGui import QColor, QBrush
+from PIL import Image
+from PIL.ExifTags import TAGS
 import os
 import logging
 from datetime import datetime
@@ -30,6 +30,9 @@ from typing import List, Dict, Any, Optional
 
 # Import profiling utilities
 from utils import profile_block
+
+# Import unified preview component
+from ui.preview import ImagePreviewWidget
 
 logger = logging.getLogger(__name__)
 
@@ -395,212 +398,6 @@ class FileLogTableView(QTableView):
         """Reset to automatic column sizing."""
         self._user_resized = False
         self._do_resize_columns()
-
-
-class ImagePreviewWidget(QGraphicsView):
-    """
-    Widget for displaying image preview with rubber band zoom capabilities.
-    Drag to select area to zoom, double-click to reset to fit-to-view.
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._scene = QGraphicsScene(self)
-        self._pixmap_item = None
-        self.setScene(self._scene)
-
-        # Enable antialiasing for smooth zooming
-        self.setRenderHint(QPainter.Antialiasing)
-        self.setRenderHint(QPainter.SmoothPixmapTransform)
-
-        # Configure scrollbars
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-
-        # Styling
-        self.setBackgroundBrush(QBrush(QColor('#2d2d2d')))
-        self.setFrameShape(QFrame.NoFrame)
-
-        # Rubber band zoom state
-        self._rubber_band_origin = None
-        self._rubber_band_rect = None
-        self._is_rubber_banding = False
-        self._is_custom_zoom = False
-
-        # Set minimum size
-        self.setMinimumSize(200, 200)
-
-        # Timer for delayed fit after resize
-        self._resize_timer = QTimer(self)
-        self._resize_timer.setSingleShot(True)
-        self._resize_timer.timeout.connect(self._delayed_fit)
-
-    def setImage(self, file_path: str):
-        """Load and display image from file path."""
-        self._scene.clear()
-        self._pixmap_item = None
-        self._is_custom_zoom = False
-        self._rubber_band_rect = None
-
-        if not file_path or not os.path.exists(file_path):
-            self._show_placeholder("No image available")
-            return
-
-        # Check if file is an image
-        image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.webp'}
-        ext = os.path.splitext(file_path)[1].lower()
-        if ext not in image_extensions:
-            self._show_placeholder(f"Not an image file\n({ext})")
-            return
-
-        try:
-            # Use PIL to load image and apply EXIF orientation
-            # Many cameras/phones save images in a default orientation and use EXIF
-            # orientation tag to indicate how the image should be displayed
-            pil_img = Image.open(file_path)
-            pil_img = ImageOps.exif_transpose(pil_img)
-
-            # Convert to RGB if necessary
-            if pil_img.mode not in ('RGB', 'L'):
-                pil_img = pil_img.convert('RGB')
-
-            # Convert PIL image to QPixmap
-            if pil_img.mode == 'RGB':
-                img_data = pil_img.tobytes('raw', 'RGB')
-                qimage = QImage(img_data, pil_img.width, pil_img.height,
-                              pil_img.width * 3, QImage.Format_RGB888)
-            else:  # Grayscale
-                img_data = pil_img.tobytes('raw', 'L')
-                qimage = QImage(img_data, pil_img.width, pil_img.height,
-                              pil_img.width, QImage.Format_Grayscale8)
-
-            pixmap = QPixmap.fromImage(qimage)
-            if pixmap.isNull():
-                self._show_placeholder("Failed to load image")
-                return
-
-            self._pixmap_item = QGraphicsPixmapItem(pixmap)
-            self._scene.addItem(self._pixmap_item)
-            # Set scene rect to image bounds
-            self._scene.setSceneRect(self._pixmap_item.boundingRect())
-            self._zoom_to_fit()
-
-        except Exception as e:
-            logger.error(f"Failed to load image {file_path}: {e}", exc_info=True)
-            self._show_placeholder(f"Error loading image:\n{str(e)[:50]}")
-
-    def _zoom_to_fit(self):
-        """Zoom image to fit the view."""
-        if self._pixmap_item:
-            # Reset any transforms first
-            self.resetTransform()
-            # Get the image bounding rect
-            rect = self._pixmap_item.boundingRect()
-            # Set scene rect to match
-            self._scene.setSceneRect(rect)
-            # Fit the view to show the entire image
-            self.fitInView(rect, Qt.KeepAspectRatio)
-            self._is_custom_zoom = False
-
-    def _delayed_fit(self):
-        """Called after resize timer - ensures proper fitting."""
-        if self._pixmap_item and not self._is_rubber_banding and not self._is_custom_zoom:
-            self._zoom_to_fit()
-
-    def _show_placeholder(self, text: str):
-        """Show placeholder text when no image is available."""
-        self._scene.clear()
-        self._pixmap_item = None
-        text_item = self._scene.addText(text)
-        text_item.setDefaultTextColor(QColor('#888888'))
-        self._scene.setSceneRect(self._scene.itemsBoundingRect())
-
-    def clear(self):
-        """Clear the preview."""
-        self._scene.clear()
-        self._pixmap_item = None
-        self._is_custom_zoom = False
-        self._rubber_band_rect = None
-        self._show_placeholder("Select a file to preview")
-
-    def resizeEvent(self, event):
-        """Handle resize - maintain zoom state."""
-        super().resizeEvent(event)
-        # Use timer to delay fit until after resize is complete
-        if self._pixmap_item and not self._is_rubber_banding and not self._is_custom_zoom:
-            self._resize_timer.start(50)  # 50ms delay
-
-    def mousePressEvent(self, event):
-        """Start rubber band selection."""
-        if event.button() == Qt.LeftButton and self._pixmap_item:
-            self._rubber_band_origin = self.mapToScene(event.pos())
-            self._is_rubber_banding = True
-            event.accept()
-        else:
-            super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        """Update rubber band rectangle."""
-        if self._is_rubber_banding and self._rubber_band_origin:
-            current_pos = self.mapToScene(event.pos())
-
-            # Remove old rubber band
-            if self._rubber_band_rect:
-                self._scene.removeItem(self._rubber_band_rect)
-
-            # Create new rubber band rectangle
-            x = min(self._rubber_band_origin.x(), current_pos.x())
-            y = min(self._rubber_band_origin.y(), current_pos.y())
-            width = abs(current_pos.x() - self._rubber_band_origin.x())
-            height = abs(current_pos.y() - self._rubber_band_origin.y())
-
-            rect = QRectF(x, y, width, height)
-
-            # Draw rubber band
-            pen = QPen(QColor(0, 120, 215), 2, Qt.DashLine)
-            self._rubber_band_rect = self._scene.addRect(rect, pen)
-
-            event.accept()
-        else:
-            super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        """Complete rubber band zoom."""
-        if event.button() == Qt.LeftButton and self._is_rubber_banding:
-            if self._rubber_band_origin:
-                current_pos = self.mapToScene(event.pos())
-
-                # Calculate zoom rectangle
-                x = min(self._rubber_band_origin.x(), current_pos.x())
-                y = min(self._rubber_band_origin.y(), current_pos.y())
-                width = abs(current_pos.x() - self._rubber_band_origin.x())
-                height = abs(current_pos.y() - self._rubber_band_origin.y())
-
-                # Only zoom if rectangle is large enough (> 10 pixels)
-                if width > 10 and height > 10:
-                    zoom_rect = QRectF(x, y, width, height)
-                    self.fitInView(zoom_rect, Qt.KeepAspectRatio)
-                    self._is_custom_zoom = True
-                    self.viewport().update()
-
-                # Remove rubber band
-                if self._rubber_band_rect:
-                    self._scene.removeItem(self._rubber_band_rect)
-                    self._rubber_band_rect = None
-
-            self._rubber_band_origin = None
-            self._is_rubber_banding = False
-            event.accept()
-        else:
-            super().mouseReleaseEvent(event)
-
-    def mouseDoubleClickEvent(self, event):
-        """Double-click to reset zoom to fit."""
-        if event.button() == Qt.LeftButton:
-            self._zoom_to_fit()
-            event.accept()
-        else:
-            super().mouseDoubleClickEvent(event)
 
 
 class FileDetailsWidget(QScrollArea):
@@ -984,7 +781,7 @@ class ImportHistoryTab(QWidget):
         preview_group = QGroupBox("Image Preview (drag to zoom, double-click to reset)")
         preview_layout = QVBoxLayout(preview_group)
         preview_layout.setContentsMargins(4, 4, 4, 4)
-        self._image_preview = ImagePreviewWidget()
+        self._image_preview = ImagePreviewWidget(dark_mode=True)
         preview_layout.addWidget(self._image_preview)
         preview_splitter.addWidget(preview_group)
 

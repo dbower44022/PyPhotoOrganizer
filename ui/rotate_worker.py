@@ -162,6 +162,9 @@ class RotateWorker(QThread):
             self.worker_logger.info("-" * 60)
             self.worker_logger.info(f"Processing file {idx+1}/{len(self.records)}: {filename}")
 
+            # Initialize original_hash for exception handler
+            original_hash = None
+
             try:
                 # Validate file exists
                 if not os.path.exists(archive_path):
@@ -169,14 +172,25 @@ class RotateWorker(QThread):
 
                 # CRITICAL: Ensure we're NOT modifying a source file
                 # Source files must NEVER be modified - this is a fundamental architecture rule
+                # Files can be in the main archive OR the prior revision archive
                 archive_path_normalized = os.path.realpath(archive_path)
                 archive_base_normalized = os.path.realpath(self.archive_base)
 
-                if not archive_path_normalized.startswith(archive_base_normalized):
+                # Check if file is in main archive
+                in_main_archive = archive_path_normalized.startswith(archive_base_normalized)
+
+                # Check if file is in prior revision archive
+                in_prior_archive = False
+                if prior_archive_base:
+                    prior_archive_normalized = os.path.realpath(prior_archive_base)
+                    in_prior_archive = archive_path_normalized.startswith(prior_archive_normalized)
+
+                if not in_main_archive and not in_prior_archive:
                     raise ValueError(
                         f"CRITICAL: Attempted to rotate source file!\n"
                         f"File path: {archive_path}\n"
                         f"Archive base: {self.archive_base}\n"
+                        f"Prior archive: {prior_archive_base}\n"
                         f"Source files must NEVER be modified. "
                         f"This file appears to be in a source directory, not the archive."
                     )

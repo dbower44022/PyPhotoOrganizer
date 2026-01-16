@@ -47,7 +47,9 @@ class DateCorrectionDialog(QDialog):
             header = QLabel(f"Batch Correct Dates ({len(self.records)} files)")
         else:
             record = self.records[0]
-            filename = os.path.basename(record['source_path'])
+            # Use source_path if available, fall back to archive_path
+            path = record.get('source_path') or record.get('archive_path') or 'Unknown'
+            filename = os.path.basename(path)
             header = QLabel(f"Correct Date - {filename}")
 
         header.setStyleSheet("font-size: 14px; font-weight: bold; padding: 10px;")
@@ -309,11 +311,13 @@ class DateCorrectionDialog(QDialog):
                 break
 
             progress.setValue(idx)
-            filename = os.path.basename(record['source_path'])
+            # Use source_path if available, fall back to archive_path
+            file_path = record.get('source_path') or record.get('archive_path') or 'Unknown'
+            filename = os.path.basename(file_path)
             progress.setLabelText(f"Processing {filename}...")
 
             logger.info("-" * 60)
-            logger.info(f"Processing file {idx + 1}/{len(self.records)}: {record['source_path']}")
+            logger.info(f"Processing file {idx + 1}/{len(self.records)}: {file_path}")
             logger.info(f"File hash: {record.get('file_hash', 'UNKNOWN')[:16]}...")
 
             try:
@@ -411,7 +415,7 @@ class DateCorrectionDialog(QDialog):
                 logger.info(f"✓ File {idx + 1} completed successfully")
 
             except Exception as e:
-                logger.error(f"✗ EXCEPTION processing {record['source_path']}: {e}", exc_info=True)
+                logger.error(f"✗ EXCEPTION processing {file_path}: {e}", exc_info=True)
                 error_count += 1
 
         progress.setValue(len(self.records))

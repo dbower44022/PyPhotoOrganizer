@@ -10,11 +10,12 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QLabel, QTextEdit, QSplitter, QHeaderView,
                                QFileDialog, QMessageBox, QApplication, QComboBox)
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap, QImage
 import os
 from pathlib import Path
-from PIL import Image, ImageOps
 import subprocess
+
+# Import unified preview component
+from ui.preview import UnifiedImageViewer
 
 
 class FilteredFilesTab(QWidget):
@@ -123,16 +124,13 @@ class FilteredFilesTab(QWidget):
         details_group.setLayout(details_layout)
         right_splitter.addWidget(details_group)
 
-        # Image preview
-        preview_group = QGroupBox("Image Preview")
+        # Image preview (with zoom support)
+        preview_group = QGroupBox("Image Preview (drag to zoom, double-click to reset)")
         preview_layout = QVBoxLayout()
 
-        self.preview_label = QLabel()
-        self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumSize(400, 300)
-        self.preview_label.setStyleSheet("border: 1px solid #ccc; background-color: #f5f5f5;")
-        self.preview_label.setText("No preview available")
-        preview_layout.addWidget(self.preview_label)
+        self.preview_viewer = UnifiedImageViewer()
+        self.preview_viewer.setMinimumSize(400, 300)
+        preview_layout.addWidget(self.preview_viewer)
 
         # Preview controls
         preview_controls = QHBoxLayout()
@@ -306,8 +304,7 @@ class FilteredFilesTab(QWidget):
 
         if not selected_items:
             self.details_text.clear()
-            self.preview_label.clear()
-            self.preview_label.setText("No preview available")
+            self.preview_viewer.clear()
             self.open_file_btn.setEnabled(False)
             self.open_folder_btn.setEnabled(False)
             self.copy_path_btn.setEnabled(False)
@@ -376,38 +373,10 @@ class FilteredFilesTab(QWidget):
         self.details_text.setPlainText("\n".join(details))
 
     def display_file_preview(self, file_info):
-        """Display image preview if possible."""
+        """Display image preview using the unified viewer."""
         file_path = file_info.get('file_path', '')
-
-        if not os.path.exists(file_path):
-            self.preview_label.clear()
-            self.preview_label.setText("File not found")
-            return
-
-        try:
-            # Try to load image with PIL
-            img = Image.open(file_path)
-
-            # Apply EXIF orientation tag to display image correctly
-            img = ImageOps.exif_transpose(img)
-
-            # Convert to RGB if necessary
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
-
-            # Resize to fit preview area (max 400x300)
-            img.thumbnail((400, 300), Image.Resampling.LANCZOS)
-
-            # Convert PIL Image to QPixmap
-            img_data = img.tobytes("raw", "RGB")
-            qimage = QImage(img_data, img.width, img.height, QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qimage)
-
-            self.preview_label.setPixmap(pixmap)
-
-        except Exception as e:
-            self.preview_label.clear()
-            self.preview_label.setText(f"Preview not available\n{str(e)}")
+        # Use the unified viewer which handles EXIF orientation, zoom, etc.
+        self.preview_viewer.load_image(file_path)
 
     def open_selected_file(self):
         """Open the selected file with default application."""

@@ -199,6 +199,34 @@ python TestRoutines.py
   - Progress signals for UI updates
   - Cancellation support
 
+**Preview Components** (ui/preview/ directory - NEW in v3.0.4):
+- **`ui/preview/__init__.py`**: Package initialization with backward-compatible aliases
+  - Exports `UnifiedImageViewer` as the primary class
+  - Provides `ZoomableImageViewer` alias for backward compatibility
+  - Provides `ImagePreviewWidget` alias for backward compatibility
+- **`ui/preview/zoomable_viewer.py`**: Unified image viewer consolidating all preview functionality
+  - `UnifiedImageViewer` class: Single implementation replacing 3 duplicate classes
+  - Features: rubber band zoom, EXIF orientation handling, placeholder support
+  - Supports dark mode styling via constructor parameter
+  - Mouse interaction: drag to zoom region, double-click to reset
+  - Handles corrupted/missing files gracefully with placeholders
+  - Used by: Date Corrections tab, Import History tab, Filtered Files tab, Photo Review app
+- **`ui/detachable_preview_window.py`** (ENHANCED in v3.0.4): Large image preview window
+  - `DetachablePreviewWindow` class: Independent window for detailed image inspection
+  - `StyledLabel` class: Consistent styling for file details (bold blue labels, normal values)
+  - **Source File Actions**: Open Source File, Open Source Folder, Copy Source Path
+  - **Archive File Actions**: Open Archive File, Open Archive Folder, Copy Archive Path
+  - **File Details Panel**: Styled display of source/archive paths, dates, status, hash
+  - **Revisions Panel**: Shows complete revision chain for selected file
+    - Lists all versions from original to current
+    - Displays version number, modification type, timestamp
+    - Highlights current version with bold text
+    - Gray text for missing files
+    - Double-click to preview revision or launch external viewer
+  - **Secondary Preview Window**: Opens when previewing a revision internally
+  - Geometry persistence: Saves/restores window position across sessions
+  - Cross-platform file operations: Windows, macOS, Linux support
+
 **Database**: SQLite database (configurable via `settings.json`, defaults to `PhotoDB.db`)
 - **Table `DatabaseMetadata`**: Stores database metadata and configuration
   - `database_name`: User-friendly name for the database

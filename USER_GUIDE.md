@@ -272,6 +272,45 @@ Some photos have unreliable dates:
    - Flag reason (no_exif, suspicious, user_specified)
    - Current status (Pending, Corrected, Reorganized)
 
+### Using the Preview Panel
+
+When you select a file, the **Preview Panel** opens with detailed information and actions:
+
+**Image Preview:**
+- Large zoomable image viewer
+- **Rubber band zoom**: Click and drag to zoom into a region
+- **Reset zoom**: Double-click anywhere to fit image to view
+- Shows rotated/modified version (from archive) when available
+
+**File Details Panel** (left side):
+- **Source**: Original file location (never modified)
+- **Archive**: Current location in your archive
+- **Detected Date**: Date extracted during import (with source: EXIF, OS, fallback)
+- **Corrected Date**: Your corrected date (if set)
+- **Flag Reason**: Why file was flagged (No Exif, Year 1000, Suspicious, User Specified)
+- **Status**: Pending, Corrected, or Reorganized
+- **Hash**: SHA-256 hash (click to copy)
+
+**Source File Actions:**
+- **Open Source File**: Opens original file with system default application
+- **Open Source Folder**: Opens folder containing source file in file manager
+- **Copy Source Path**: Copies source path to clipboard
+
+**Archive File Actions:**
+- **Open Archive File**: Opens archive file with system default application
+- **Open Archive Folder**: Opens folder containing archive file in file manager
+- **Copy Archive Path**: Copies archive path to clipboard
+
+**Revisions Panel** (right side):
+- Shows complete version history of the file
+- Lists: original import, rotations, date corrections
+- Each entry shows: version number, modification type, timestamp
+- Current version marked with **[CURRENT]**
+- Missing files shown in gray with "(missing)"
+- **Double-click** a revision to:
+  - **Preview in new window**: Opens secondary preview without leaving current file
+  - **Open with system viewer**: Launches file in your default image application
+
 ### Correcting a Single File
 
 1. Click on file in the grid
