@@ -199,6 +199,51 @@ python TestRoutines.py
   - Progress signals for UI updates
   - Cancellation support
 
+**Theme System** (ui/theme.py - NEW in v3.0.5):
+- **`ThemeManager` Class**: Singleton manager for application-wide theming
+  - `get_theme()`: Get current Theme instance
+  - `set_dark_mode(enabled)`: Switch between dark/light mode and save preference
+  - `is_dark_mode()`: Check current theme mode
+  - `toggle_theme()`: Toggle between light and dark mode
+  - Theme preference persisted via QSettings
+- **`Theme` Class**: Complete theme definition with colors, fonts, spacing
+  - `colors`: ColorPalette or DarkColorPalette instance
+  - `spacing`: Dict with xs/sm/md/lg/xl/xxl values (4px base)
+  - `radius`: Dict with sm/md/lg/xl/full border radius values
+  - `font_size`: Dict with xs/sm/md/lg/xl/xxl font sizes
+  - `get_global_stylesheet()`: Returns complete stylesheet for all Qt widgets
+  - `get_status_color(status)`: Get QColor for photo status
+  - Specialized stylesheets: `get_grid_view_stylesheet()`, `get_search_bar_stylesheet()`, etc.
+- **`ColorPalette` Dataclass**: Light mode colors with semantic naming
+  - Primary: `#0066FF` (blue), hover: `#0052CC`
+  - Status colors: success (`#10B981`), warning (`#F59E0B`), error (`#EF4444`), info (`#0EA5E9`)
+  - Photo status: unreliable (amber), corrected (emerald), reorganized (sky), revision (violet)
+  - Neutral grays: gray_50 through gray_900
+  - Background: bg_primary (`#FFFFFF`), bg_secondary (`#F5F5F5`), bg_tertiary (`#E5E5E5`)
+  - Text: text_primary (`#171717`), text_secondary (`#525252`), text_muted (`#737373`)
+- **`DarkColorPalette` Dataclass**: Dark mode overrides
+  - Background: bg_primary (`#1A1A1A`), bg_secondary (`#262626`), bg_tertiary (`#333333`)
+  - Text: text_primary (`#FAFAFA`), text_secondary (`#A3A3A3`)
+  - Adjusted grays and selection colors for dark backgrounds
+- **Usage Pattern**:
+  ```python
+  from ui.theme import ThemeManager, get_theme
+
+  # Get current theme
+  theme = get_theme()
+  c = theme.colors
+
+  # Apply global stylesheet to window
+  self.setStyleSheet(theme.get_global_stylesheet())
+
+  # Use theme colors in custom styles
+  label.setStyleSheet(f"color: {c.text_primary}; background: {c.bg_secondary};")
+
+  # Check/toggle theme mode
+  if ThemeManager.is_dark_mode():
+      ThemeManager.toggle_theme()
+  ```
+
 **Preview Components** (ui/preview/ directory - NEW in v3.0.4):
 - **`ui/preview/__init__.py`**: Package initialization with backward-compatible aliases
   - Exports `UnifiedImageViewer` as the primary class
@@ -207,16 +252,19 @@ python TestRoutines.py
 - **`ui/preview/zoomable_viewer.py`**: Unified image viewer consolidating all preview functionality
   - `UnifiedImageViewer` class: Single implementation replacing 3 duplicate classes
   - Features: rubber band zoom, EXIF orientation handling, placeholder support
-  - Supports dark mode styling via constructor parameter
+  - Supports dark mode styling via constructor parameter or theme system
+  - `update_theme()`: Re-apply styling from current theme (call after theme changes)
   - Mouse interaction: drag to zoom region, double-click to reset
   - Handles corrupted/missing files gracefully with placeholders
   - Used by: Date Corrections tab, Import History tab, Filtered Files tab, Photo Review app
-- **`ui/detachable_preview_window.py`** (ENHANCED in v3.0.4): Large image preview window
+- **`ui/detachable_preview_window.py`** (ENHANCED in v3.0.6): Large image preview window
   - `DetachablePreviewWindow` class: Independent window for detailed image inspection
-  - `StyledLabel` class: Consistent styling for file details (bold blue labels, normal values)
+  - `StyledLabel` class: Theme-aware styling for file details with `update_theme()` method
+  - `_apply_theme()` method: Centralizes all theme-dependent styling
+  - **Red Close Button**: High visibility close button in bottom-right
   - **Source File Actions**: Open Source File, Open Source Folder, Copy Source Path
   - **Archive File Actions**: Open Archive File, Open Archive Folder, Copy Archive Path
-  - **File Details Panel**: Styled display of source/archive paths, dates, status, hash
+  - **File Details Panel**: Collapsible sections for Database Info, File Information, Image Properties, EXIF Data
   - **Revisions Panel**: Shows complete revision chain for selected file
     - Lists all versions from original to current
     - Displays version number, modification type, timestamp
@@ -226,6 +274,11 @@ python TestRoutines.py
   - **Secondary Preview Window**: Opens when previewing a revision internally
   - Geometry persistence: Saves/restores window position across sessions
   - Cross-platform file operations: Windows, macOS, Linux support
+  - **Consistent Selection Sync** (v3.0.6): All tabs update the detached preview when selection changes
+    - Import History: `_on_file_selected()` updates detached preview if visible
+    - Date Corrections: `on_grid_selection_changed()` updates detached preview if visible
+    - Photo Review: `on_selection_changed()` updates detached preview if visible
+    - User always sees currently selected file in detached preview
 
 **Database**: SQLite database (configurable via `settings.json`, defaults to `PhotoDB.db`)
 - **Table `DatabaseMetadata`**: Stores database metadata and configuration
@@ -3196,10 +3249,10 @@ CREATE INDEX idx_dupmap_duplicate_path ON DuplicateMapping(duplicate_source_path
   - Row 2: Statistics (Scanned, Processed, New, Duplicates, Filtered, Errors)
   - Vertical splitter separating grid from preview
   - File operations grid with 8 columns (sortable, resizable)
-  - Horizontal splitter separating preview from details
-  - Image preview panel with rubber band zoom (drag to zoom, double-click reset)
-  - File details panel with EXIF metadata
-  - Action buttons: Export JSON/CSV/Duplicates, Open File, Open Folder, Copy Path, Process File(s), Delete Session
+  - Horizontal splitter separating preview from details (hidden by default)
+  - Inline preview panel with rubber band zoom (optional, hidden by default)
+  - File details panel with EXIF metadata (optional, hidden by default)
+  - Action buttons: Show Preview Panel toggle, Export JSON/CSV/Duplicates, Open File, Open Folder, Copy Path, Process File(s), Delete Session
 
 - **Grid Features** (optimized for 100k+ records):
   - Columns: Source Folder, Source Filename, Dest Folder, Dest Filename, Operation, Status, Hash, Details
@@ -3210,12 +3263,27 @@ CREATE INDEX idx_dupmap_duplicate_path ON DuplicateMapping(duplicate_source_path
   - Operation filter: Copy, Move, Skip Duplicate, Skip Filtered, Error
   - Status filter: Success, Failed, Skipped
   - Text search with 300ms debounce
+  - **Double-click** any row to open DetachablePreviewWindow (v3.0.6)
 
-- **Image Preview** (`ImagePreviewWidget`):
-  - Rubber band zoom: Click and drag to select region, release to zoom
-  - Double-click to reset to fit-to-view
-  - Maintains custom zoom during window resize
-  - Dark background (#2d2d2d) for better image visibility
+- **Detached Preview Window** (v3.0.6):
+  - Opens via double-click on any file row
+  - Uses shared `DetachablePreviewWindow` class from `ui/detachable_preview_window.py`
+  - **Automatically syncs with selection** - when user selects different file, preview updates
+  - Shows comprehensive file details:
+    - Database Info (hash, source path, archive path, dates, status)
+    - File Information (size, type, modified date)
+    - Image Properties (dimensions, megapixels, aspect ratio, format, color mode)
+    - EXIF Data (camera make/model, exposure, aperture, ISO, focal length, GPS)
+    - Revisions panel (if file has been rotated/modified)
+  - Can be moved to second monitor for dual-screen workflows
+  - Window geometry persisted across sessions
+
+- **Inline Preview Panel** (optional, hidden by default v3.0.6):
+  - Toggle with "Show Preview Panel" button
+  - Contains `ImagePreviewWidget` with rubber band zoom
+  - Contains `FileDetailsWidget` with EXIF metadata
+  - Performance optimized: only loads when visible
+  - Hidden by default to maximize grid space
 
 - **File Details Panel** (`FileDetailsWidget`):
   - Operation details (operation type, status, errors)

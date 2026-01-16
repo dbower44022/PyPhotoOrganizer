@@ -34,6 +34,9 @@ from utils import profile_block
 # Import unified preview component
 from ui.preview import ImagePreviewWidget
 
+# Import detachable preview window for large image viewing
+from ui.detachable_preview_window import DetachablePreviewWindow
+
 logger = logging.getLogger(__name__)
 
 
@@ -621,8 +624,12 @@ class ImportHistoryTab(QWidget):
         super().__init__()
         self.audit_manager = None
         self.database_path = None
+        self.db_metadata = None  # DatabaseMetadata instance for DetachablePreviewWindow
         self.current_session_id = None
         self._sessions_cache = []
+
+        # Detachable preview window (created on demand)
+        self._detached_preview_window = None
 
         # Model and proxy for file logs
         self._model = FileLogTableModel(self)
@@ -764,6 +771,7 @@ class ImportHistoryTab(QWidget):
         self._view = FileLogTableView(self)
         self._view.setModel(self._proxy)
         self._view.selectionModel().selectionChanged.connect(self._on_file_selected)
+        self._view.doubleClicked.connect(self._on_file_double_clicked)  # Open detached preview
         grid_layout.addWidget(self._view)
 
         # Connect proxy model changes to update count
@@ -775,7 +783,8 @@ class ImportHistoryTab(QWidget):
         main_splitter.addWidget(grid_group)
 
         # === Bottom Section: Preview and File Details ===
-        preview_splitter = QSplitter(Qt.Horizontal)
+        # Store reference to preview splitter for visibility toggling
+        self._preview_splitter = QSplitter(Qt.Horizontal)
 
         # Image preview
         preview_group = QGroupBox("Image Preview (drag to zoom, double-click to reset)")
@@ -783,7 +792,7 @@ class ImportHistoryTab(QWidget):
         preview_layout.setContentsMargins(4, 4, 4, 4)
         self._image_preview = ImagePreviewWidget(dark_mode=True)
         preview_layout.addWidget(self._image_preview)
-        preview_splitter.addWidget(preview_group)
+        self._preview_splitter.addWidget(preview_group)
 
         # File details
         details_file_group = QGroupBox("File Details")
@@ -791,20 +800,33 @@ class ImportHistoryTab(QWidget):
         details_file_layout.setContentsMargins(4, 4, 4, 4)
         self._file_details = FileDetailsWidget()
         details_file_layout.addWidget(self._file_details)
-        preview_splitter.addWidget(details_file_group)
+        self._preview_splitter.addWidget(details_file_group)
 
         # Set horizontal splitter proportions (60% preview, 40% details)
-        preview_splitter.setSizes([400, 300])
+        self._preview_splitter.setSizes([400, 300])
 
-        main_splitter.addWidget(preview_splitter)
+        main_splitter.addWidget(self._preview_splitter)
 
         # Set vertical splitter proportions (60% grid, 40% preview)
         main_splitter.setSizes([400, 250])
+
+        # Hide inline preview by default - use detached preview instead (double-click)
+        self._preview_splitter.setVisible(False)
 
         main_layout.addWidget(main_splitter, 1)
 
         # === Export Buttons ===
         export_layout = QHBoxLayout()
+
+        # Toggle inline preview button
+        self._toggle_preview_btn = QPushButton("Show Preview Panel")
+        self._toggle_preview_btn.setCheckable(True)
+        self._toggle_preview_btn.setChecked(False)  # Hidden by default
+        self._toggle_preview_btn.clicked.connect(self._toggle_inline_preview)
+        self._toggle_preview_btn.setToolTip("Toggle inline preview panel (or double-click a file for detached preview)")
+        export_layout.addWidget(self._toggle_preview_btn)
+
+        export_layout.addSpacing(10)
 
         self.export_json_btn = QPushButton("Export to JSON...")
         self.export_json_btn.clicked.connect(self.export_to_json)
@@ -865,11 +887,14 @@ class ImportHistoryTab(QWidget):
         if database_path:
             try:
                 from audit_manager import AuditManager
+                from database_metadata import DatabaseMetadata
                 self.audit_manager = AuditManager(database_path)
+                self.db_metadata = DatabaseMetadata(database_path)
                 self.refresh_sessions()
             except Exception as e:
                 logger.error(f"Failed to initialize audit manager: {e}", exc_info=True)
                 self.audit_manager = None
+                self.db_metadata = None
                 self.session_combo.clear()
                 self._clear_session_display()
 
@@ -1318,9 +1343,90 @@ class ImportHistoryTab(QWidget):
         self.open_folder_btn.setEnabled(has_path)
         self.copy_path_btn.setEnabled(has_path)
 
-        # Update preview and details
-        self._image_preview.setImage(preview_path)
-        self._file_details.setFileDetails(log, preview_path)
+        # Update preview and details ONLY if inline preview is visible (performance optimization)
+        if self._preview_splitter.isVisible():
+            self._image_preview.setImage(preview_path)
+            self._file_details.setFileDetails(log, preview_path)
+
+        # Also update detached preview window if it's open (keep in sync with selection)
+        if self._detached_preview_window and self._detached_preview_window.isVisible():
+            # Build a record dict compatible with DetachablePreviewWindow
+            record = {
+                'file_hash': log.get('file_hash', ''),
+                'source_path': log.get('source_path', ''),
+                'archive_path': log.get('destination_path', ''),
+                'original_date': log.get('creation_date', ''),
+                'date_source': log.get('date_source', ''),
+                'flag_reason': log.get('filter_reason', ''),
+                'corrected_date': None,
+                'needs_reorganization': False,
+            }
+            self._detached_preview_window.update_preview(record)
+
+    def _toggle_inline_preview(self, checked: bool):
+        """Toggle the inline preview panel visibility."""
+        self._preview_splitter.setVisible(checked)
+        self._toggle_preview_btn.setText("Hide Preview Panel" if checked else "Show Preview Panel")
+
+        # If showing preview and a file is selected, load it now
+        if checked:
+            indexes = self._view.selectionModel().selectedRows()
+            if indexes:
+                proxy_index = indexes[0]
+                source_index = self._proxy.mapToSource(proxy_index)
+                log = self._model.getLog(source_index.row())
+                if log:
+                    preview_path = log.get('destination_path', '')
+                    if not preview_path or not os.path.exists(preview_path):
+                        preview_path = log.get('source_path', '')
+                    self._image_preview.setImage(preview_path)
+                    self._file_details.setFileDetails(log, preview_path)
+
+    def _on_file_double_clicked(self, index):
+        """Handle double-click on file row - open detached preview."""
+        if not index.isValid():
+            return
+
+        # Get the log entry for the clicked row
+        source_index = self._proxy.mapToSource(index)
+        log = self._model.getLog(source_index.row())
+        if not log:
+            return
+
+        self._open_detached_preview(log)
+
+    def _open_detached_preview(self, log: dict):
+        """Open the detached preview window for a file log entry."""
+        if not self.db_metadata:
+            logger.warning("Cannot open detached preview: database metadata not available")
+            return
+
+        # Create the detached preview window if it doesn't exist
+        if not self._detached_preview_window:
+            self._detached_preview_window = DetachablePreviewWindow(
+                db_metadata=self.db_metadata,
+                parent=self.window()
+            )
+            logger.info("Created DetachablePreviewWindow for Import History tab")
+
+        # Build a record dict compatible with DetachablePreviewWindow
+        # The log dict has slightly different keys than UnreliableDates records
+        record = {
+            'file_hash': log.get('file_hash', ''),
+            'source_path': log.get('source_path', ''),
+            'archive_path': log.get('destination_path', ''),  # destination_path is the archive location
+            'original_date': log.get('creation_date', ''),
+            'date_source': log.get('date_source', ''),
+            'flag_reason': log.get('filter_reason', ''),
+            'corrected_date': None,  # Not applicable for import history
+            'needs_reorganization': False,
+        }
+
+        # Update and show the preview window
+        self._detached_preview_window.update_preview(record)
+        self._detached_preview_window.show()
+        self._detached_preview_window.raise_()
+        self._detached_preview_window.activateWindow()
 
     def _set_export_buttons_enabled(self, enabled):
         """Enable or disable export buttons."""
