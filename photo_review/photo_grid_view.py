@@ -3,20 +3,32 @@ Photo Grid View
 
 QListView-based thumbnail grid for photo review.
 Adapted from UnreliableDatesGridView for the Photo Review application.
+
+Performance Features:
+- Scroll-based prefetching with direction detection
+- Throttled scroll handler (30fps) to prevent excessive calls
+- Biased prefetch in scroll direction for smooth scrolling
+- Initial prefetch on data load
 """
 
 import logging
 import os
 import subprocess
 import sys
+import time
 
 from PySide6.QtWidgets import QListView, QAbstractItemView, QMenu, QApplication
-from PySide6.QtCore import Qt, Signal, QSize, QPoint
+from PySide6.QtCore import Qt, Signal, QSize, QPoint, QTimer
 from PySide6.QtGui import QKeyEvent, QAction
 
 from photo_review.photo_grid_delegate import PhotoGridDelegate
 
 logger = logging.getLogger(__name__)
+
+# Performance constants
+SCROLL_THROTTLE_MS = 33  # ~30fps scroll handling
+PREFETCH_FORWARD = 100   # Items to prefetch in scroll direction
+PREFETCH_BACKWARD = 50   # Items to prefetch opposite to scroll direction
 
 
 class PhotoGridView(QListView):
@@ -74,6 +86,19 @@ class PhotoGridView(QListView):
             'large': 300
         }
 
+        # Scroll tracking for direction detection and throttling
+        self._last_scroll_pos = 0
+        self._scroll_direction = 0  # -1 = up, 0 = none, 1 = down
+        self._last_prefetch_time = 0
+        self._prefetch_pending = False
+        self._last_visible_range = (0, 0)
+
+        # Scroll throttle timer (coalesces rapid scroll events)
+        self._scroll_timer = QTimer(self)
+        self._scroll_timer.setSingleShot(True)
+        self._scroll_timer.setInterval(SCROLL_THROTTLE_MS)
+        self._scroll_timer.timeout.connect(self._do_prefetch)
+
         # Configure view for high performance
         self._configure_view()
 
@@ -81,14 +106,18 @@ class PhotoGridView(QListView):
         self.selectionModel().selectionChanged.connect(self._on_selection_changed)
         self.doubleClicked.connect(self._on_double_clicked)
 
-        # Prefetch on scroll
+        # Prefetch on scroll (throttled)
         self.verticalScrollBar().valueChanged.connect(self._on_scroll)
+
+        # Connect to model's data_loaded signal for initial prefetch
+        if hasattr(model, 'data_loaded'):
+            model.data_loaded.connect(self._on_data_loaded)
 
         # Enable context menu
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
 
-        logger.info("PhotoGridView initialized")
+        logger.info("PhotoGridView initialized with optimized scrolling")
 
     def _configure_view(self):
         """Configure view for high performance."""
@@ -171,31 +200,164 @@ class PhotoGridView(QListView):
         size_name = size_name_map.get(pixel_size, 'medium')
         self.set_thumbnail_size(size_name)
 
-    def _on_scroll(self):
-        """Handle scroll event - prefetch thumbnails."""
+    def _on_scroll(self, value: int = None):
+        """
+        Handle scroll event - throttled prefetch with direction detection.
+
+        This method is called frequently during scrolling. It detects scroll
+        direction and schedules a throttled prefetch to avoid overwhelming
+        the thumbnail generation system.
+        """
+        try:
+            # Get current scroll position
+            current_pos = self.verticalScrollBar().value() if value is None else value
+
+            # Detect scroll direction
+            if current_pos > self._last_scroll_pos:
+                self._scroll_direction = 1  # Scrolling down
+            elif current_pos < self._last_scroll_pos:
+                self._scroll_direction = -1  # Scrolling up
+            # else: direction unchanged
+
+            self._last_scroll_pos = current_pos
+
+            # Schedule throttled prefetch (coalesces rapid scroll events)
+            if not self._scroll_timer.isActive():
+                self._scroll_timer.start()
+
+        except Exception as e:
+            logger.error(f"Error in scroll handler: {e}", exc_info=True)
+
+    def _do_prefetch(self):
+        """
+        Execute prefetch operation (called by throttle timer).
+
+        Uses direction-aware prefetching: loads more items in the scroll
+        direction to stay ahead of the user.
+        """
         try:
             # Get visible range
             first_visible_index = self.indexAt(self.rect().topLeft())
             last_visible_index = self.indexAt(self.rect().bottomRight())
 
-            if first_visible_index.isValid() and last_visible_index.isValid():
-                start_row = first_visible_index.row()
-                end_row = last_visible_index.row() + 1
+            if not first_visible_index.isValid():
+                return
 
-                visible_range = (start_row, end_row)
+            start_row = first_visible_index.row()
+            end_row = last_visible_index.row() + 1 if last_visible_index.isValid() else start_row + 20
 
-                # Prefetch surrounding items if thumbnail cache has prefetch method
-                if hasattr(self.grid_model, 'thumbnail_cache') and self.grid_model.thumbnail_cache:
-                    if hasattr(self.grid_model.thumbnail_cache, 'prefetch'):
-                        prefetch_count = 50
-                        self.grid_model.thumbnail_cache.prefetch(
-                            self.grid_model.file_items,
-                            visible_range,
-                            prefetch_count
-                        )
+            # Skip if visible range hasn't changed significantly
+            if (start_row, end_row) == self._last_visible_range:
+                return
+
+            self._last_visible_range = (start_row, end_row)
+            visible_count = end_row - start_row
+
+            # Calculate direction-aware prefetch range
+            # Prefetch more items in the direction of scroll
+            if self._scroll_direction > 0:
+                # Scrolling down: prefetch more below
+                prefetch_before = PREFETCH_BACKWARD
+                prefetch_after = PREFETCH_FORWARD
+            elif self._scroll_direction < 0:
+                # Scrolling up: prefetch more above
+                prefetch_before = PREFETCH_FORWARD
+                prefetch_after = PREFETCH_BACKWARD
+            else:
+                # Not scrolling: symmetric prefetch
+                prefetch_before = (PREFETCH_FORWARD + PREFETCH_BACKWARD) // 2
+                prefetch_after = prefetch_before
+
+            # Call optimized prefetch if available
+            if hasattr(self.grid_model, 'thumbnail_cache') and self.grid_model.thumbnail_cache:
+                cache = self.grid_model.thumbnail_cache
+                if hasattr(cache, 'prefetch_directional'):
+                    # Use new directional prefetch
+                    cache.prefetch_directional(
+                        self.grid_model.file_items,
+                        visible_range=(start_row, end_row),
+                        prefetch_before=prefetch_before,
+                        prefetch_after=prefetch_after,
+                        thumbnail_size=self.grid_model.thumbnail_size
+                    )
+                elif hasattr(cache, 'prefetch'):
+                    # Fall back to standard prefetch
+                    cache.prefetch(
+                        self.grid_model.file_items,
+                        (start_row, end_row),
+                        max(prefetch_before, prefetch_after)
+                    )
+
+            logger.debug(f"Prefetch: visible={start_row}-{end_row}, dir={self._scroll_direction}, "
+                        f"before={prefetch_before}, after={prefetch_after}")
 
         except Exception as e:
-            logger.error(f"Error in scroll handler: {e}", exc_info=True)
+            logger.error(f"Error in prefetch: {e}", exc_info=True)
+
+    def _on_data_loaded(self, count: int):
+        """
+        Handle model data loaded - trigger initial prefetch.
+
+        Args:
+            count: Number of records loaded
+        """
+        if count > 0:
+            # Schedule immediate prefetch for visible area
+            QTimer.singleShot(50, self._initial_prefetch)
+
+    def _initial_prefetch(self):
+        """
+        Prefetch thumbnails for initially visible items.
+
+        Called after data is loaded to ensure smooth initial display.
+        """
+        try:
+            # Get visible range
+            first_visible_index = self.indexAt(self.rect().topLeft())
+            last_visible_index = self.indexAt(self.rect().bottomRight())
+
+            if not first_visible_index.isValid():
+                # View not laid out yet, try with estimated visible count
+                start_row = 0
+                # Estimate visible items based on viewport and thumbnail size
+                viewport_height = self.viewport().height()
+                item_height = self.grid_model.thumbnail_size + 14  # thumbnail + margins
+                items_per_row = max(1, self.viewport().width() // (item_height + 4))
+                rows_visible = max(1, viewport_height // item_height)
+                end_row = min(items_per_row * (rows_visible + 2), len(self.grid_model.file_items))
+            else:
+                start_row = first_visible_index.row()
+                end_row = last_visible_index.row() + 1 if last_visible_index.isValid() else start_row + 50
+
+            # Prefetch visible + buffer
+            if hasattr(self.grid_model, 'thumbnail_cache') and self.grid_model.thumbnail_cache:
+                cache = self.grid_model.thumbnail_cache
+                total_items = len(self.grid_model.file_items)
+
+                # Prefetch visible area + generous buffer on both sides
+                prefetch_start = max(0, start_row - PREFETCH_BACKWARD)
+                prefetch_end = min(total_items, end_row + PREFETCH_FORWARD)
+
+                if hasattr(cache, 'prefetch_directional'):
+                    cache.prefetch_directional(
+                        self.grid_model.file_items,
+                        visible_range=(start_row, end_row),
+                        prefetch_before=PREFETCH_BACKWARD,
+                        prefetch_after=PREFETCH_FORWARD,
+                        thumbnail_size=self.grid_model.thumbnail_size
+                    )
+                elif hasattr(cache, 'prefetch'):
+                    cache.prefetch(
+                        self.grid_model.file_items,
+                        (start_row, end_row),
+                        PREFETCH_FORWARD
+                    )
+
+                logger.info(f"Initial prefetch: visible={start_row}-{end_row}, "
+                           f"range={prefetch_start}-{prefetch_end}")
+
+        except Exception as e:
+            logger.error(f"Error in initial prefetch: {e}", exc_info=True)
 
     def keyPressEvent(self, event: QKeyEvent):
         """

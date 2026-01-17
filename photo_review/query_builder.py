@@ -10,6 +10,8 @@ import sqlite3
 from datetime import datetime
 from typing import Dict, Any, List, Tuple, Optional
 
+import constants
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,6 +68,7 @@ class PhotoQueryBuilder:
                 - has_corrected_date: bool
                 - needs_reorganization: bool
                 - has_revisions: bool
+                - hide_videos: bool (exclude video files)
                 - version_filter: str ('current', 'all', 'prior')
                 - filename_pattern: str (substring match)
                 - folder_path: str (exact folder match)
@@ -158,6 +161,18 @@ class PhotoQueryBuilder:
 
         if filters.get('has_revisions'):
             conditions.append("up.revised_photo IS NOT NULL")
+
+        # -----------------------------------------------------------------
+        # Hide videos filter (exclude video file extensions)
+        # -----------------------------------------------------------------
+        if filters.get('hide_videos'):
+            # Build condition to exclude video files by extension
+            video_conditions = []
+            for ext in constants.VIDEO_EXTENSIONS:
+                video_conditions.append("LOWER(up.file_name) LIKE ?")
+                params.append(f"%{ext.lower()}")
+            if video_conditions:
+                conditions.append(f"NOT ({' OR '.join(video_conditions)})")
 
         # -----------------------------------------------------------------
         # Flag reason filter

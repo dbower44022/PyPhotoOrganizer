@@ -443,6 +443,10 @@ class QueryPanel(QWidget):
         self.has_revisions_cb.setStyleSheet("QCheckBox { color: #8B5CF6; }")
         status_content.addWidget(self.has_revisions_cb)
 
+        self.hide_videos_cb = QCheckBox("🎬 Hide Videos")
+        self.hide_videos_cb.setStyleSheet("QCheckBox { color: #0EA5E9; }")
+        status_content.addWidget(self.hide_videos_cb)
+
         container = QWidget()
         container.setLayout(status_content)
         self.status_section.add_widget(container)
@@ -753,6 +757,9 @@ class QueryPanel(QWidget):
         if self.has_revisions_cb.isChecked():
             filters['has_revisions'] = True
 
+        if self.hide_videos_cb.isChecked():
+            filters['hide_videos'] = True
+
         # Filename pattern
         pattern = self.filename_pattern.text().strip()
         if pattern:
@@ -774,6 +781,7 @@ class QueryPanel(QWidget):
         self.needs_correction_cb.setChecked(False)
         self.needs_reorganization_cb.setChecked(False)
         self.has_revisions_cb.setChecked(False)
+        self.hide_videos_cb.setChecked(False)
         self.filename_pattern.clear()
 
         # Apply filters
@@ -816,6 +824,9 @@ class QueryPanel(QWidget):
         if filters.get('has_revisions'):
             self.has_revisions_cb.setChecked(True)
 
+        if filters.get('hide_videos'):
+            self.hide_videos_cb.setChecked(True)
+
         if filters.get('filename_pattern'):
             self.filename_pattern.setText(filters['filename_pattern'])
 
@@ -847,6 +858,7 @@ class QueryPanel(QWidget):
         self.needs_correction_cb.setChecked(False)
         self.needs_reorganization_cb.setChecked(False)
         self.has_revisions_cb.setChecked(False)
+        self.hide_videos_cb.setChecked(False)
         self.filename_pattern.clear()
         self._current_folder = None
         self._current_filters = {}
