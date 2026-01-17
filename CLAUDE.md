@@ -35,11 +35,34 @@ This is a fundamental architectural principle of the application:
 
 **When implementing new features**: Always ask "Does this modify a source file?" If yes, redesign to only modify archive files.
 
+## CRITICAL: UI Design Guidelines
+
+**Controls must NEVER be grayed out or disabled.**
+
+This is a fundamental UI principle of the application:
+
+1. **All buttons always enabled**: Every button in the interface must be clickable at all times
+2. **Handle empty states gracefully**: If an action requires a selection, show an informative message when clicked without selection
+3. **No disabled styling**: Do not use `:disabled` CSS states or `setEnabled(False)` on buttons
+4. **Visual feedback**: Use hover states and active states, but never disabled/grayed-out states
+
+**Rationale**:
+- Grayed-out controls confuse users about what actions are available
+- Users should always be able to click and receive feedback
+- Better UX to explain why an action can't complete than to prevent the click
+
+**Implementation**:
+- `SelectionActionBar` in Photo Review app: All buttons always enabled, handlers check for selection
+- Action handlers show `QMessageBox.information()` if preconditions not met
+
 ## Running the Application
 
 ```bash
-# Run the GUI application (recommended)
+# Run the Import GUI (archive setup and import management)
 python main_gui.py
+
+# Run the Photo Review app (browse, review, correct photos)
+python photo_review_app.py
 
 # Run the CLI photo organizer
 python main.py
@@ -51,7 +74,38 @@ python DuplicateFileDetection.py
 python TestRoutines.py
 ```
 
-**GUI Mode** (`main_gui.py`): Full-featured interface with database management, source directory configuration, real-time progress tracking, and date correction tools. Database-first approach where each database is bound to a specific archive location.
+### Two-Application Architecture (v3.1.0)
+
+PyPhotoOrganizer uses a separation of concerns between two GUI applications:
+
+**Import GUI** (`main_gui.py`): Archive setup and import management
+- 6 tabs: Import Settings, Archive Settings, System Settings, Progress, Import History, Logs
+- Configure source folders and filtering rules
+- Start/stop import processing
+- View complete import accounting (new files, duplicates, filtered, errors)
+- Database-first approach where each database is bound to a specific archive location
+
+**Photo Review** (`photo_review_app.py`): Photo browsing, review, and correction
+- Grid-based photo browsing with thumbnails
+- Search and filter capabilities (including unreliable dates filters)
+- **Date Correction Workflow** (v3.1.0):
+  - Query filters: "Has unreliable date", "Needs date correction", "Needs reorganization"
+  - Visual status indicators on thumbnails (amber=unreliable, green=corrected, blue=reorganized)
+  - Actions menu → "Reorganize Marked Files" (Ctrl+M) - batch reorganize corrected files
+  - Actions menu → "Manage Unreliable Paths" - configure paths that should be flagged
+  - Right-click context menu includes "Reorganize Marked Files" option
+  - Uses shared `reorganize_files()` function from `ui/reorganize_worker.py`
+  - Uses shared `ManageUnreliablePathsDialog` from ui/ directory
+- **UI Layout** (v3.1.0):
+  - Fixed bottom action bar with Delete, Rotate, Fix Date, Deselect All buttons (left-aligned)
+  - Close button (right-aligned) in same bottom bar
+  - All buttons always enabled (no grayed-out states per design guidelines)
+  - Consistent 34px fixed button height
+  - `SelectionActionBar` class manages action buttons and selection count display
+- Image rotation with version history
+- File deletion with restore capability
+
+This separation allows users who only need to review photos (without import permissions) to use the Photo Review app independently.
 
 **CLI Mode** (`main.py`): Command-line interface using configuration from `settings.json` in the project root directory.
 
@@ -152,20 +206,22 @@ python TestRoutines.py
 - `verify_exif_write(file_path, year, month, day)`: Verifies EXIF write succeeded
 
 **GUI Modules** (ui/ directory):
-- `main_window.py`: Main application window with tab-based interface
-- **`import_settings_tab.py`** (NEW in v2.4): Import settings and processing controls
+
+**Active Tabs (main_gui.py - v3.1.0):**
+- `main_window.py`: Main application window with 6-tab interface (streamlined in v3.1.0)
+- **`import_settings_tab.py`**: Import settings and processing controls
   - Source directory selection and management
   - Ignored directories configuration
   - File processing settings (subdirectories, batch size)
   - Photo filtering settings (dimensions, file size, EXIF)
   - Filename pattern filtering
   - Start/Stop processing buttons
-- **`archive_settings_tab.py`** (NEW in v2.4): Archive organization and file renaming
+- **`archive_settings_tab.py`**: Archive organization and file renaming
   - Archive location display (read-only from database)
   - Organization template configuration (folder structure presets + custom)
   - File type organization (combined/subfolder/separate for videos)
   - File renaming settings with template editor
-- **`system_settings_tab.py`** (NEW in v2.4): System-level settings
+- **`system_settings_tab.py`**: System-level settings
   - Database information and statistics
   - Operation mode (Copy vs Move)
   - Performance settings (partial hash configuration)
@@ -173,14 +229,17 @@ python TestRoutines.py
   - Import history retention
   - Settings file management (Load/Save/Restore/Validate)
 - `progress_tab.py`: Real-time processing progress display
-- `results_tab.py`: Processing results summary
-- `filtered_files_tab.py`: Files filtered by photo filter
+- **`import_history_tab.py`**: Complete import accounting (new files, duplicates, filtered, errors)
+  - Replaces Results tab and Filtered Files tab functionality
+  - Session management with "All Sessions" aggregate view
+  - File preview with detachable window
+  - Export to JSON/CSV
 - `logs_tab.py`: Application log viewer
-- **`date_corrections_tab.py`** (NEW in v2.2): Date correction interface
-  - Grid view with sortable columns and filtering
-  - Image preview panel
-  - Single and batch date correction
-  - Reorganization management
+
+**Removed from main_gui (v3.1.0) - Functionality moved to Photo Review app:**
+- `results_tab.py`: ~~Processing results summary~~ (redundant with Import History)
+- `filtered_files_tab.py`: ~~Files filtered by photo filter~~ (now shown in Import History)
+- `date_corrections_tab.py`: ~~Date correction interface~~ (moved to Photo Review app)
 - **`date_correction_dialog.py`** (NEW in v2.2): Date input dialog
   - Single file mode with date picker
   - Batch mode with same/sequential date options
@@ -257,13 +316,18 @@ python TestRoutines.py
   - Mouse interaction: drag to zoom region, double-click to reset
   - Handles corrupted/missing files gracefully with placeholders
   - Used by: Date Corrections tab, Import History tab, Filtered Files tab, Photo Review app
-- **`ui/detachable_preview_window.py`** (ENHANCED in v3.0.6): Large image preview window
+- **`ui/detachable_preview_window.py`** (ENHANCED in v3.1.0): Large image preview window
   - `DetachablePreviewWindow` class: Independent window for detailed image inspection
   - `StyledLabel` class: Theme-aware styling for file details with `update_theme()` method
   - `_apply_theme()` method: Centralizes all theme-dependent styling
   - **Red Close Button**: High visibility close button in bottom-right
   - **Source File Actions**: Open Source File, Open Source Folder, Copy Source Path
   - **Archive File Actions**: Open Archive File, Open Archive Folder, Copy Archive Path
+  - **Consistent Button Styling** (v3.1.0): All action buttons have theme-aware styling
+    - Uses `bg_tertiary` background with `text_primary` color for good contrast
+    - Hover state changes to `primary` blue with white text
+    - Disabled state uses `text_disabled` color
+    - Applied to all 6 action buttons via shared `action_button_style` CSS
   - **File Details Panel**: Collapsible sections for Database Info, File Information, Image Properties, EXIF Data
   - **Revisions Panel**: Shows complete revision chain for selected file
     - Lists all versions from original to current

@@ -5,6 +5,67 @@ All notable changes to PyPhotoOrganizer will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-01-17
+
+### Changed
+
+**Simplified main_gui Application - Separation of Concerns**
+
+The main_gui application has been streamlined to focus exclusively on archive setup and import management. Photo review, corrections, and adjustments are now the responsibility of the dedicated Photo Review app.
+
+**Removed Tabs:**
+- **Results Tab**: Removed - redundant with Import History tab which provides complete accounting
+- **Filtered Files Tab**: Removed - filtered files now shown in Import History tab
+- **Date Corrections Tab**: Removed - date correction functionality moved to Photo Review app
+
+**New Tab Structure (6 tabs, down from 9):**
+1. **Import Settings** - Source folders, filtering, Start/Stop processing
+2. **Archive Settings** - Organization templates, file renaming
+3. **System Settings** - Database info, operation mode, performance
+4. **Progress** - Real-time processing status during import
+5. **Import History** - Complete accounting: new files, duplicates, filtered, errors
+6. **Logs** - Application logs for troubleshooting
+
+**Benefits:**
+- Cleaner, focused interface for import operations
+- Allows separation of permissions (import vs review)
+- Users without import access can still use Photo Review app
+- Import History now provides single source of truth for all import data
+
+### Improved
+
+**Import History Tab**
+- Now the primary destination after processing completes
+- Shows all file operations in one place: successful imports, duplicates, filtered, errors
+- Filter dropdown to view specific categories
+- Complete replacement for Results and Filtered Files tabs
+
+**Photo Review App - Full Date Correction Support**
+- **Actions Menu**: New menu with date correction workflow commands
+  - **Reorganize Marked Files (Ctrl+M)**: Batch reorganize all files marked for reorganization after date corrections
+  - **Manage Unreliable Paths**: Configure folder paths that should always be flagged for date review
+- **Right-Click Context Menu**: Added "Reorganize Marked Files" option for quick access
+- **Query Filters**: Already supported filters for unreliable dates, needs correction, needs reorganization
+- **Visual Status Indicators**: Grid thumbnails show status badges (unreliable/amber, corrected/green, reorganized/blue, has revisions/violet)
+- **ReorganizeWorker Integration**: Background thread processes file moves with progress dialog
+- **Complete Workflow**: Users can now filter → correct dates → reorganize, all within Photo Review app
+
+**Photo Review App - UI Improvements**
+- **Fixed Bottom Action Bar**: Action buttons (Delete, Rotate, Fix Date, Deselect All) moved from floating overlay to fixed bottom bar
+  - Buttons always visible regardless of grid scroll position
+  - Aligned left with Close button on right
+  - All buttons always enabled (no grayed-out states per design guidelines)
+  - Consistent 34px button height across all buttons
+- **Selection Count Display**: Shows "No selection" or "X selected" in bottom bar
+
+**Detachable Preview Window - Button Styling**
+- **Consistent Action Buttons**: All action buttons (Source, Source Folder, Copy Source, Archive, Archive Folder, Copy Archive) now have consistent styling
+  - Theme-aware colors with good contrast in both light and dark modes
+  - Hover state changes to primary blue color
+  - Proper disabled state for unavailable actions
+
+---
+
 ## [3.0.6] - 2026-01-16
 
 ### Added

@@ -429,6 +429,34 @@ class DetachablePreviewWindow(QMainWindow):
         # Revision info label
         self.revision_info_label.setStyleSheet(f"color: {c.text_muted}; font-style: italic; font-size: 12px; background-color: transparent;")
 
+        # Action buttons (secondary style with good contrast)
+        action_button_style = f"""
+            QPushButton {{
+                background-color: {c.bg_tertiary};
+                color: {c.text_primary};
+                font-weight: 500;
+                border-radius: 4px;
+                border: 1px solid {c.border_light};
+                padding: 4px 12px;
+            }}
+            QPushButton:hover {{
+                background-color: {c.primary};
+                color: white;
+                border-color: {c.primary};
+            }}
+            QPushButton:disabled {{
+                background-color: {c.bg_secondary};
+                color: {c.text_disabled};
+                border-color: {c.border_light};
+            }}
+        """
+        self.open_source_file_btn.setStyleSheet(action_button_style)
+        self.open_source_folder_btn.setStyleSheet(action_button_style)
+        self.copy_source_path_btn.setStyleSheet(action_button_style)
+        self.open_archive_file_btn.setStyleSheet(action_button_style)
+        self.open_archive_folder_btn.setStyleSheet(action_button_style)
+        self.copy_archive_path_btn.setStyleSheet(action_button_style)
+
         # Correct date button (primary action)
         self.correct_btn.setStyleSheet(f"""
             QPushButton {{

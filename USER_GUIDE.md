@@ -9,14 +9,13 @@
 5. [Database Management](#database-management)
 6. [Source Folders](#source-folders)
 7. [Processing Photos](#processing-photos)
-8. [Viewing Results](#viewing-results)
-9. [Date Corrections](#date-corrections)
-10. [File Version Management](#file-version-management)
-11. [Photo Review App](#photo-review-app)
-12. [Import History](#import-history)
-13. [Settings](#settings)
-14. [Troubleshooting](#troubleshooting)
-15. [FAQ](#faq)
+8. [Import History](#import-history)
+9. [Photo Review App](#photo-review-app)
+10. [Date Corrections (in Photo Review App)](#date-corrections)
+11. [File Version Management](#file-version-management)
+12. [Settings](#settings)
+13. [Troubleshooting](#troubleshooting)
+14. [FAQ](#faq)
 
 ---
 
@@ -99,21 +98,40 @@ pip install PySide6 Pillow pillow-heif piexif tqdm
 
 ## Understanding the Interface
 
-PyPhotoOrganizer uses a tabbed interface:
+PyPhotoOrganizer consists of two applications:
+- **main_gui** (main_gui.py) - For archive setup and import management
+- **Photo Review** (photo_review_app.py) - For browsing, reviewing, and correcting photos
 
-### Tab Overview
+### Main GUI Tab Overview
 
 | Tab | Purpose |
 |-----|---------|
-| **Setup** | Configure source folders, start/stop processing |
+| **Import Settings** | Configure source folders, filtering, start/stop processing |
+| **Archive Settings** | Organization templates, file renaming |
+| **System Settings** | Database info, operation mode, performance |
 | **Progress** | Real-time progress during processing |
-| **Results** | Summary of completed processing |
-| **Filtered Files** | Files skipped (icons, thumbnails, etc.) |
+| **Import History** | Complete accounting of all imports (new, duplicates, filtered, errors) |
 | **Logs** | Application log viewer |
-| **Settings** | Organization template, filters, retention |
-| **Database** | View/change current database |
-| **Date Corrections** | Fix files with wrong dates |
-| **Import History** | Audit trail of all import sessions |
+
+### Photo Review App
+
+For reviewing imported photos, correcting dates, rotating images, and deleting unwanted files, use the separate **Photo Review** application:
+
+```bash
+python photo_review_app.py
+```
+
+The Photo Review app provides:
+- Grid-based photo browsing with thumbnail view
+- Search and filter capabilities
+- **Date corrections** with unreliable date filters
+- **Reorganization** of corrected files (Actions menu or right-click → Reorganize Marked Files)
+- **Unreliable paths management** (Actions menu → Manage Unreliable Paths)
+- Image rotation with version history
+- File deletion with restore capability
+- Visual status indicators (unreliable/corrected/reorganized/has revisions)
+- **Fixed bottom action bar** with Delete, Rotate, Fix Date, Deselect All buttons (always visible)
+- **Right-click context menu** for quick access to all actions
 
 ---
 
@@ -219,25 +237,40 @@ Click "Stop" to halt processing. Progress is saved to the database, so you can r
 
 ---
 
-## Viewing Results
+## Import History
 
-After processing completes, the **Results** tab shows:
+After processing completes, the **Import History** tab shows complete accounting of all operations:
 
-### Statistics
+### Statistics Row
 
-- **Total Files Examined**: All files found in source folders
-- **New Originals**: Unique files copied to archive
-- **Duplicates Found**: Files already in your archive
-- **Filtered**: Non-photo files (icons, thumbnails)
-- **Unreliable Dates**: Files needing date correction
+- **Total Scanned**: All files found in source folders
+- **Processed**: Files that were evaluated
+- **New Files**: Unique files copied to archive
+- **Duplicates**: Files already in your archive
+- **Filtered**: Non-photo files (icons, thumbnails, web graphics)
+- **Errors**: Files that encountered processing errors
 
-### Filtered Files Tab
+### File Categories
 
-Shows files that were skipped with reasons:
-- Too small (under 50KB)
-- Too small dimensions (under 800x600)
-- Icon/thumbnail patterns in filename
-- Small square images (likely icons)
+Use the "Show" dropdown to filter the file list:
+- **All Files**: Complete list of all operations
+- **New Files (Added to Archive)**: Successfully imported photos
+- **Duplicates**: Files that matched existing archive photos
+- **Filtered (Icons/Thumbnails)**: Files skipped by photo filter with reasons:
+  - Too small (under 50KB)
+  - Too small dimensions (under 800x600)
+  - Icon/thumbnail patterns in filename
+  - Small square images (likely icons)
+- **Errors**: Files that failed processing
+
+### Preview and Details
+
+Double-click any file row to open the **Detachable Preview Window** with:
+- Large zoomable image preview
+- File information (size, modified date)
+- Image properties (dimensions, format)
+- EXIF data (camera, date taken, exposure settings)
+- Revision history
 
 ### Archive Structure
 
@@ -260,15 +293,19 @@ The exact structure depends on your organization template (see Settings).
 
 ## Date Corrections
 
+> **Note**: Date corrections are now handled in the **Photo Review** application.
+> Launch it with: `python photo_review_app.py`
+
 Some photos have unreliable dates:
 - Scanned photos (scanner assigns scan date, not photo date)
 - Files with corrupted or missing EXIF data
 - Photos from old cameras with wrong date settings
 
-### Viewing Flagged Files
+### Viewing Files with Unreliable Dates
 
-1. Go to **Date Corrections** tab
-2. Files are listed with:
+1. Launch **Photo Review** app
+2. Use the Query Builder to filter for files with unreliable dates
+3. Files are listed with:
    - Original detected date
    - Flag reason (no_exif, suspicious, user_specified)
    - Current status (Pending, Corrected, Reorganized)
@@ -337,20 +374,26 @@ For multiple files from the same event:
 
 ### Reorganization
 
-After correcting dates:
+After correcting dates, files need to be moved to their correct date-based folders:
 
-1. Click "Reorganize All Marked"
-2. Confirm the operation
-3. Files are moved to correct date-based folders
-4. Empty source folders are cleaned up
+**Using the Actions Menu:**
+1. Go to **Actions** menu → **Reorganize Marked Files** (or press **Ctrl+M**)
+2. Review the count of files to be reorganized
+3. Confirm the operation
+4. Progress dialog shows each file being processed
+5. Files are moved to correct date-based folders
+6. Empty source folders are cleaned up
+7. Database is updated with new file locations
 
 ### Managing Unreliable Paths
 
 If you have folders that always have wrong dates (e.g., scanned photos):
 
-1. Click "Manage Unreliable Paths..."
-2. Add folder paths
-3. Future imports from these paths are automatically flagged
+**Using the Actions Menu:**
+1. Go to **Actions** menu → **Manage Unreliable Paths...**
+2. Add folder paths (e.g., `/mnt/scans/family_photos/`)
+3. Click "Add Path" for each folder
+4. Future imports from these paths are automatically flagged for review
 
 ---
 
@@ -795,7 +838,7 @@ Day 3: Rotate 180° (total 270°)
 
 **Single Undo:**
 
-1. Select rotated file in Date Corrections tab
+1. Select rotated file in Photo Review app
 2. Click **Undo Last Rotation**
 3. System performs undo:
    - Moves current revision → Prior Archive
@@ -893,7 +936,7 @@ Before manually cleaning up prior revisions:
 - Consider backing up prior archive before deletion
 
 **5. Document Rotation Rationale:**
-Use Date Corrections tab comments/notes to record:
+Use Photo Review app to track:
 - Why file was rotated (camera was sideways)
 - Original orientation
 - Date rotation was performed
@@ -1307,7 +1350,7 @@ For Import History cleanup:
 - Edited photos are not duplicates of originals
 
 #### Wrong date in archive
-- Use Date Corrections tab to fix
+- Use Photo Review app to fix dates and reorganize files
 - Set up Unreliable Paths for known problematic sources
 
 #### Application won't start

@@ -42,6 +42,7 @@ class PhotoGridView(QListView):
     delete_requested = Signal()  # Context menu: Delete to Vault
     rotate_requested = Signal()  # Context menu: Rotate Image
     correct_date_requested = Signal()  # Context menu: Correct Date
+    reorganize_requested = Signal()  # Context menu: Reorganize Marked Files
     open_file_requested = Signal()  # Context menu: Open File
     open_folder_requested = Signal()  # Context menu: Open in Folder
     copy_path_requested = Signal()  # Context menu: Copy Path
@@ -409,6 +410,12 @@ class PhotoGridView(QListView):
             correct_action.setEnabled(has_selection)
             correct_action.triggered.connect(lambda: self.correct_date_requested.emit())
             menu.addAction(correct_action)
+
+            # Action: Reorganize Marked Files
+            reorganize_action = QAction("📦  Reorganize Marked Files...", self)
+            reorganize_action.setShortcut("Ctrl+M")
+            reorganize_action.triggered.connect(lambda: self.reorganize_requested.emit())
+            menu.addAction(reorganize_action)
 
             # Action: Rotate Image
             rotate_action = QAction("🔄  Rotate Image...", self)
