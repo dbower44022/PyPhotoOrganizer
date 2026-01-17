@@ -3,6 +3,10 @@ Photo Grid Model
 
 QAbstractListModel for displaying photos in a thumbnail grid.
 Adapted from UnreliableDatesGridModel for the Photo Review application.
+
+Performance Features:
+- O(1) hash-to-index lookup for thumbnail ready notifications
+- Efficient model reset with index pre-building
 """
 
 import logging
@@ -50,6 +54,9 @@ class PhotoGridModel(QAbstractListModel):
 
         # File data: List of dicts from query results
         self.file_items: List[Dict[str, Any]] = []
+
+        # Hash-to-index lookup for O(1) thumbnail ready notifications
+        self._hash_to_index: Dict[str, int] = {}
 
         # Current thumbnail size
         self.thumbnail_size = 200
@@ -249,6 +256,14 @@ class PhotoGridModel(QAbstractListModel):
 
         self.beginResetModel()
         self.file_items = records
+
+        # Build hash-to-index lookup for O(1) thumbnail ready notifications
+        self._hash_to_index = {}
+        for i, item in enumerate(records):
+            file_hash = item.get('file_hash')
+            if file_hash:
+                self._hash_to_index[file_hash] = i
+
         self.endResetModel()
 
         self._is_resetting = False
@@ -267,17 +282,17 @@ class PhotoGridModel(QAbstractListModel):
         return None
 
     def get_record_by_hash(self, file_hash: str) -> Optional[Dict[str, Any]]:
-        """Get record by file hash."""
-        for item in self.file_items:
-            if item.get('file_hash') == file_hash:
-                return item
+        """Get record by file hash (O(1) lookup)."""
+        row = self._hash_to_index.get(file_hash)
+        if row is not None and 0 <= row < len(self.file_items):
+            return self.file_items[row]
         return None
 
     def get_index_for_hash(self, file_hash: str) -> Optional[QModelIndex]:
-        """Get model index for a file hash."""
-        for i, item in enumerate(self.file_items):
-            if item.get('file_hash') == file_hash:
-                return self.index(i, 0)
+        """Get model index for a file hash (O(1) lookup)."""
+        row = self._hash_to_index.get(file_hash)
+        if row is not None and 0 <= row < len(self.file_items):
+            return self.index(row, 0)
         return None
 
     def set_thumbnail_size(self, size: int):
@@ -297,38 +312,46 @@ class PhotoGridModel(QAbstractListModel):
                     [Qt.DecorationRole]
                 )
 
-    def _on_thumbnail_ready(self, file_hash: str, size: int, thumbnail_path: str):
+    def _on_thumbnail_ready(self, file_hash: str, size: int):
         """
         Handle thumbnail ready signal from cache.
 
         Updates the view when a thumbnail finishes loading.
+        Uses O(1) hash lookup instead of linear search for performance.
+
+        Args:
+            file_hash: SHA-256 hash of the file
+            size: Thumbnail size in pixels
         """
+        # Skip if size doesn't match current display size
         if size != self.thumbnail_size:
             return
 
-        # Find the item with this hash and emit dataChanged
-        for i, item in enumerate(self.file_items):
-            if item.get('file_hash') == file_hash:
-                index = self.index(i, 0)
-                self.dataChanged.emit(index, index, [Qt.DecorationRole])
-                break
+        # O(1) lookup using hash index
+        row = self._hash_to_index.get(file_hash)
+        if row is not None and 0 <= row < len(self.file_items):
+            index = self.index(row, 0)
+            self.dataChanged.emit(index, index, [Qt.DecorationRole])
 
     def refresh_thumbnail(self, file_hash: str):
         """
-        Force refresh of a specific thumbnail.
+        Force refresh of a specific thumbnail (O(1) lookup).
 
         Args:
             file_hash: Hash of file to refresh
         """
         if self.thumbnail_cache:
-            self.thumbnail_cache.invalidate(file_hash)
+            # Invalidate the cached thumbnail
+            if hasattr(self.thumbnail_cache, 'invalidate_hash'):
+                self.thumbnail_cache.invalidate_hash(file_hash)
+            elif hasattr(self.thumbnail_cache, 'invalidate'):
+                self.thumbnail_cache.invalidate(file_hash)
 
-        # Find and update the item
-        for i, item in enumerate(self.file_items):
-            if item.get('file_hash') == file_hash:
-                index = self.index(i, 0)
-                self.dataChanged.emit(index, index, [Qt.DecorationRole])
-                break
+        # Find and update the item using hash index
+        row = self._hash_to_index.get(file_hash)
+        if row is not None and 0 <= row < len(self.file_items):
+            index = self.index(row, 0)
+            self.dataChanged.emit(index, index, [Qt.DecorationRole])
 
     def remove_items(self, file_hashes: List[str]):
         """
@@ -340,27 +363,39 @@ class PhotoGridModel(QAbstractListModel):
         hash_set = set(file_hashes)
         indices_to_remove = []
 
-        for i, item in enumerate(self.file_items):
-            if item.get('file_hash') in hash_set:
-                indices_to_remove.append(i)
+        # Use hash index for O(1) lookups
+        for file_hash in file_hashes:
+            row = self._hash_to_index.get(file_hash)
+            if row is not None:
+                indices_to_remove.append(row)
+                # Remove from hash index
+                del self._hash_to_index[file_hash]
 
-        # Remove in reverse order to maintain indices
-        for i in reversed(indices_to_remove):
-            self.beginRemoveRows(QModelIndex(), i, i)
-            del self.file_items[i]
-            self.endRemoveRows()
+        # Sort and remove in reverse order to maintain indices
+        indices_to_remove.sort(reverse=True)
+        for i in indices_to_remove:
+            if 0 <= i < len(self.file_items):
+                self.beginRemoveRows(QModelIndex(), i, i)
+                del self.file_items[i]
+                self.endRemoveRows()
+
+        # Rebuild hash index after removals (indices have shifted)
+        self._hash_to_index = {}
+        for i, item in enumerate(self.file_items):
+            file_hash = item.get('file_hash')
+            if file_hash:
+                self._hash_to_index[file_hash] = i
 
     def update_item(self, file_hash: str, updates: Dict[str, Any]):
         """
-        Update an item's data.
+        Update an item's data (O(1) lookup).
 
         Args:
             file_hash: Hash of file to update
             updates: Dictionary of fields to update
         """
-        for i, item in enumerate(self.file_items):
-            if item.get('file_hash') == file_hash:
-                item.update(updates)
-                index = self.index(i, 0)
-                self.dataChanged.emit(index, index)
-                break
+        row = self._hash_to_index.get(file_hash)
+        if row is not None and 0 <= row < len(self.file_items):
+            self.file_items[row].update(updates)
+            index = self.index(row, 0)
+            self.dataChanged.emit(index, index)

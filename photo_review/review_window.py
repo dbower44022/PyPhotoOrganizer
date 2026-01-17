@@ -18,6 +18,7 @@ from PySide6.QtGui import QAction, QColor, QKeySequence
 
 from database_metadata import DatabaseMetadata
 from ui.database_selector_dialog import DatabaseSelectorDialog
+from photo_review.settings_dialog import PhotoReviewSettingsDialog
 
 logger = logging.getLogger(__name__)
 
@@ -1122,6 +1123,14 @@ class PhotoReviewWindow(QMainWindow):
         self.theme_action.triggered.connect(self.toggle_theme)
         view_menu.addAction(self.theme_action)
 
+        view_menu.addSeparator()
+
+        # Settings
+        settings_action = QAction("⚙ &Settings...", self)
+        settings_action.setShortcut("Ctrl+,")
+        settings_action.triggered.connect(self.show_settings_dialog)
+        view_menu.addAction(settings_action)
+
         # Actions menu
         actions_menu = menubar.addMenu("&Actions")
 
@@ -1190,6 +1199,56 @@ class PhotoReviewWindow(QMainWindow):
         # Save preference
         self.settings.setValue("dark_mode", self._is_dark_mode)
 
+    def show_settings_dialog(self):
+        """Show the settings dialog."""
+        if not hasattr(self, 'database_metadata') or not self.database_metadata:
+            QMessageBox.information(
+                self,
+                "No Database",
+                "Please open a database first before accessing settings."
+            )
+            return
+
+        # Get thumbnail cache if available
+        thumbnail_cache = getattr(self, 'thumbnail_cache', None)
+
+        dialog = PhotoReviewSettingsDialog(
+            db_metadata=self.database_metadata,
+            thumbnail_cache=thumbnail_cache,
+            is_dark_mode=self._is_dark_mode,
+            parent=self
+        )
+
+        # Connect settings changed signal to reinitialize cache
+        dialog.settings_changed.connect(self._on_cache_settings_changed)
+
+        dialog.exec()
+
+    def _on_cache_settings_changed(self):
+        """Handle cache settings change - reinitialize thumbnail cache."""
+        logger.info("Cache settings changed, reinitializing thumbnail cache...")
+
+        # Store current state
+        old_cache = getattr(self, 'thumbnail_cache', None)
+
+        # Reinitialize the thumbnail cache with new settings
+        self._init_thumbnail_cache()
+
+        # Update grid view with new cache if it exists
+        if hasattr(self, 'grid_view') and self.grid_view:
+            self.grid_view.set_thumbnail_cache(self.thumbnail_cache)
+            # Refresh the current view to use new cache
+            self.grid_view.viewport().update()
+
+        # Clean up old cache if it exists
+        if old_cache:
+            try:
+                old_cache.shutdown()
+            except Exception as e:
+                logger.warning(f"Failed to shutdown old cache: {e}")
+
+        self.status_bar.showMessage("Cache settings applied", 3000)
+
     def select_database_on_startup(self):
         """Show database selector on startup."""
         dialog = DatabaseSelectorDialog(self)
@@ -1242,7 +1301,7 @@ class PhotoReviewWindow(QMainWindow):
         self._restore_last_query()
 
     def _init_thumbnail_cache(self):
-        """Initialize the thumbnail cache system."""
+        """Initialize the thumbnail cache system using database settings."""
         from triage.thumbnail_cache import ThumbnailCache
 
         cache_dir = self.database_metadata.get_thumbnail_cache_dir()
@@ -1253,14 +1312,23 @@ class PhotoReviewWindow(QMainWindow):
             else:
                 cache_dir = os.path.join(os.path.dirname(self.current_database_path), '.thumbnails')
 
+        # Read cache settings from database
+        cache_memory_mb = self.database_metadata.get_cache_memory_mb()
+        worker_threads = self.database_metadata.get_cache_worker_threads()
+
+        # Calculate memory items from MB (estimate ~150KB per thumbnail)
+        memory_items = int((cache_memory_mb * 1024 * 1024) / (150 * 1024))
+
         logger.info(f"Initializing thumbnail cache at: {cache_dir}")
+        logger.info(f"  Memory cache: {cache_memory_mb}MB (~{memory_items:,} thumbnails)")
+        logger.info(f"  Worker threads: {worker_threads}")
 
         self.thumbnail_cache = ThumbnailCache(
             db_path=self.current_database_path,
             cache_dir=cache_dir,
-            memory_size=500,
+            memory_size=memory_items,
             disk_size_gb=5,
-            worker_threads=8
+            worker_threads=worker_threads
         )
 
     def _build_main_ui(self):

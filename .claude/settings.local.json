@@ -37,7 +37,9 @@
       "Bash(python:*)",
       "Bash(./venv/bin/python3:*)",
       "Bash(source venv/bin/activate)",
-      "Bash(QT_QPA_PLATFORM=offscreen python:*)"
+      "Bash(QT_QPA_PLATFORM=offscreen python:*)",
+      "Bash(tree:*)",
+      "Bash(source .venv/bin/activate)"
     ]
   }
 }

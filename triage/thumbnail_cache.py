@@ -167,14 +167,13 @@ class ThumbnailCache(QObject):
 
         # L3: Generate from original (async) - return None (delegate will draw placeholder)
         self.stats['misses'] += 1
-        logger.info(f"Cache miss: {file_hash[:8]}... size={size} - queueing generation")
+        logger.debug(f"Cache miss: {file_hash[:8]}... size={size} - queueing generation")
         self._queue_generation(file_hash, file_path, size, priority)
 
         # CRITICAL FIX: Return None instead of creating QPixmap placeholder
         # Qt crashes when trying to render QPixmaps created in memory (even simple fill)
         # But works fine with QPixmaps loaded from disk
         # Let the delegate draw the placeholder directly during paint() instead
-        logger.info(f"Returning None for {file_hash[:8]}... - delegate will draw placeholder")
         return None
 
     def prefetch(self, file_items: List[Dict[str, Any]],
@@ -221,6 +220,94 @@ class ThumbnailCache(QObject):
         logger.debug(f"Prefetched {prefetched} thumbnails "
                     f"(visible: {end_idx - start_idx}, "
                     f"range: {prefetch_start}-{prefetch_end})")
+
+    def prefetch_directional(self, file_items: List[Dict[str, Any]],
+                            visible_range: Tuple[int, int],
+                            prefetch_before: int = 50,
+                            prefetch_after: int = 100,
+                            thumbnail_size: int = 200):
+        """
+        Direction-aware prefetch with asymmetric before/after counts.
+
+        This method is optimized for smooth scrolling by:
+        1. Loading visible items with HIGH priority
+        2. Loading items in scroll direction with NORMAL priority
+        3. Loading items opposite to scroll direction with LOW priority
+        4. Using the correct thumbnail size (not hardcoded)
+
+        Args:
+            file_items: List of file dicts with 'file_hash' and 'file_path'/'archive_path' keys
+            visible_range: (start_index, end_index) of visible items
+            prefetch_before: Number of items to prefetch before visible area
+            prefetch_after: Number of items to prefetch after visible area
+            thumbnail_size: Size of thumbnails to generate (default: 200)
+        """
+        if not file_items:
+            return
+
+        start_idx, end_idx = visible_range
+        total_items = len(file_items)
+
+        if start_idx >= total_items or end_idx <= 0:
+            return
+
+        # Clamp ranges
+        start_idx = max(0, start_idx)
+        end_idx = min(total_items, end_idx)
+
+        # Calculate prefetch ranges
+        prefetch_start = max(0, start_idx - prefetch_before)
+        prefetch_end = min(total_items, end_idx + prefetch_after)
+
+        # Track stats
+        high_priority_count = 0
+        normal_priority_count = 0
+        low_priority_count = 0
+
+        # Process in order: visible (high), after (normal), before (low)
+        # This ensures scroll direction gets priority in the thread pool
+
+        # 1. High priority: visible items
+        for i in range(start_idx, end_idx):
+            if i >= total_items:
+                break
+            item = file_items[i]
+            file_hash = item.get('file_hash')
+            # Support both 'file_path' and 'archive_path' keys
+            file_path = item.get('file_path') or item.get('archive_path')
+
+            if file_hash and file_path:
+                self.get_thumbnail(file_hash, file_path, size=thumbnail_size, priority='high')
+                high_priority_count += 1
+
+        # 2. Normal priority: items after visible (scroll down direction)
+        for i in range(end_idx, prefetch_end):
+            if i >= total_items:
+                break
+            item = file_items[i]
+            file_hash = item.get('file_hash')
+            file_path = item.get('file_path') or item.get('archive_path')
+
+            if file_hash and file_path:
+                self.get_thumbnail(file_hash, file_path, size=thumbnail_size, priority='normal')
+                normal_priority_count += 1
+
+        # 3. Low priority: items before visible (scroll up direction - less common)
+        for i in range(prefetch_start, start_idx):
+            if i >= total_items:
+                break
+            item = file_items[i]
+            file_hash = item.get('file_hash')
+            file_path = item.get('file_path') or item.get('archive_path')
+
+            if file_hash and file_path:
+                self.get_thumbnail(file_hash, file_path, size=thumbnail_size, priority='low')
+                low_priority_count += 1
+
+        total_prefetched = high_priority_count + normal_priority_count + low_priority_count
+        logger.debug(f"Directional prefetch: visible={end_idx - start_idx}, "
+                    f"high={high_priority_count}, normal={normal_priority_count}, "
+                    f"low={low_priority_count}, total={total_prefetched}, size={thumbnail_size}")
 
     def _add_to_memory_cache(self, cache_key: str, pixmap: QPixmap):
         """
@@ -327,9 +414,7 @@ class ThumbnailCache(QObject):
                 return
 
             # Load QPixmap from disk (MAIN THREAD - SAFE!)
-            logger.info(f"Loading QPixmap from disk: {disk_path}")
             pixmap = QPixmap(disk_path)
-            logger.info(f"QPixmap loaded: type={type(pixmap)}, isNull={pixmap.isNull()}, size={pixmap.width()}x{pixmap.height()}")
 
             if pixmap.isNull():
                 logger.warning(f"QPixmap failed to load thumbnail from {disk_path} (file exists but is invalid)")
@@ -343,19 +428,16 @@ class ThumbnailCache(QObject):
                     logger.debug(f"Could not delete corrupted thumbnail: {del_error}")
                 return
 
-            logger.info(f"Adding to memory cache: {cache_key}")
             # Add to memory cache
             self._add_to_memory_cache(cache_key, pixmap)
-            logger.info(f"Added to memory cache successfully")
 
             # Mark as no longer generating
             self._generating.discard(cache_key)
 
             self.stats['generated'] += 1
-            logger.info(f"Thumbnail generated and loaded: {file_hash[:8]}... size={size}")
+            logger.debug(f"Thumbnail generated: {file_hash[:8]}... size={size}")
 
             # Emit signal to notify model/view that thumbnail is ready
-            logger.info(f"Emitting thumbnail_ready signal for {file_hash[:8]}... size={size}")
             self.thumbnail_ready.emit(file_hash, size)
 
         except Exception as e:
