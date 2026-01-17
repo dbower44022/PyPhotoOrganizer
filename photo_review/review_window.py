@@ -10,7 +10,7 @@ import logging
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QStatusBar, QMessageBox, QApplication, QMenu, QProgressDialog,
-    QLabel, QLineEdit, QPushButton, QFrame, QGraphicsDropShadowEffect,
+    QLabel, QLineEdit, QPushButton, QFrame,
     QSizePolicy
 )
 from PySide6.QtCore import Qt, QSettings, QTimer, QPropertyAnimation, QEasingCurve, Signal
@@ -132,11 +132,10 @@ class SelectionActionBar(QWidget):
         super().__init__(parent)
         self._selection_count = 0
         self._init_ui()
-        self.hide()  # Hidden by default
 
     def _init_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setContentsMargins(0, 0, 0, 0)  # No margins - parent bottom bar handles spacing
         layout.setSpacing(8)
 
         # Selection count
@@ -174,8 +173,8 @@ class SelectionActionBar(QWidget):
                 background-color: transparent;
                 border: 1px solid #666666;
                 color: #CCCCCC;
-                padding: 8px 16px;
-                border-radius: 6px;
+                padding: 0px 16px;
+                border-radius: 4px;
                 font-size: 13px;
             }
             QPushButton:hover {
@@ -185,30 +184,24 @@ class SelectionActionBar(QWidget):
         """)
         layout.addWidget(self.deselect_btn)
 
+        # Transparent background - inherits from parent bottom bar
         self.setStyleSheet("""
             QWidget {
-                background-color: #1A1A1A;
-                border-radius: 12px;
+                background-color: transparent;
             }
         """)
-
-        # Add shadow effect
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(20)
-        shadow.setColor(QColor(0, 0, 0, 100))
-        shadow.setOffset(0, 4)
-        self.setGraphicsEffect(shadow)
 
     def _create_action_button(self, text, signal):
         btn = QPushButton(text)
         btn.clicked.connect(signal.emit)
+        btn.setFixedHeight(34)
         btn.setStyleSheet("""
             QPushButton {
                 background-color: #333333;
                 border: none;
                 color: #FFFFFF;
-                padding: 8px 16px;
-                border-radius: 6px;
+                padding: 0px 16px;
+                border-radius: 4px;
                 font-size: 13px;
             }
             QPushButton:hover {
@@ -218,13 +211,12 @@ class SelectionActionBar(QWidget):
         return btn
 
     def update_selection(self, count):
-        """Update the selection count and visibility."""
+        """Update the selection count display."""
         self._selection_count = count
         if count > 0:
             self.count_label.setText(f"{count:,} selected")
-            self.show()
         else:
-            self.hide()
+            self.count_label.setText("No selection")
 
 
 class CollapsibleSection(QWidget):
@@ -1148,6 +1140,17 @@ class PhotoReviewWindow(QMainWindow):
         correct_date_action.triggered.connect(self.correct_date_selected)
         actions_menu.addAction(correct_date_action)
 
+        reorganize_action = QAction("📦 Reorganize &Marked Files...", self)
+        reorganize_action.setShortcut("Ctrl+M")
+        reorganize_action.triggered.connect(self.reorganize_marked_files)
+        actions_menu.addAction(reorganize_action)
+
+        actions_menu.addSeparator()
+
+        manage_paths_action = QAction("⚠ Manage &Unreliable Paths...", self)
+        manage_paths_action.triggered.connect(self.manage_unreliable_paths)
+        actions_menu.addAction(manage_paths_action)
+
         actions_menu.addSeparator()
 
         select_all_action = QAction("☑ Select &All", self)
@@ -1332,22 +1335,6 @@ class PhotoReviewWindow(QMainWindow):
         self.grid_view = PhotoGridView(self.grid_model, parent=self)
         grid_layout.addWidget(self.grid_view)
 
-        # Selection action bar (floating at bottom of grid)
-        self.action_bar = SelectionActionBar()
-        self.action_bar.delete_clicked.connect(self.delete_selected)
-        self.action_bar.rotate_clicked.connect(self.rotate_selected)
-        self.action_bar.correct_date_clicked.connect(self.correct_date_selected)
-        self.action_bar.deselect_clicked.connect(self.deselect_all)
-
-        # Position action bar at bottom center of grid
-        action_container = QWidget()
-        action_layout = QHBoxLayout(action_container)
-        action_layout.setContentsMargins(20, 8, 20, 16)
-        action_layout.addStretch()
-        action_layout.addWidget(self.action_bar)
-        action_layout.addStretch()
-        grid_layout.addWidget(action_container)
-
         self.right_splitter.addWidget(grid_container)
 
         # Preview panel with info bar
@@ -1356,7 +1343,7 @@ class PhotoReviewWindow(QMainWindow):
 
         self.main_layout.addWidget(content_widget)
 
-        # Bottom bar with close button
+        # Bottom bar with action buttons (left) and close button (right)
         bottom_bar = QWidget()
         bottom_bar.setStyleSheet("""
             QWidget {
@@ -1367,10 +1354,19 @@ class PhotoReviewWindow(QMainWindow):
         bottom_bar.setFixedHeight(50)
         bottom_layout = QHBoxLayout(bottom_bar)
         bottom_layout.setContentsMargins(16, 8, 16, 8)
+
+        # Selection action bar (left side of bottom bar)
+        self.action_bar = SelectionActionBar()
+        self.action_bar.delete_clicked.connect(self.delete_selected)
+        self.action_bar.rotate_clicked.connect(self.rotate_selected)
+        self.action_bar.correct_date_clicked.connect(self.correct_date_selected)
+        self.action_bar.deselect_clicked.connect(self.deselect_all)
+        bottom_layout.addWidget(self.action_bar)
+
         bottom_layout.addStretch()
 
         self.close_btn = QPushButton("Close")
-        self.close_btn.setMinimumHeight(34)
+        self.close_btn.setFixedHeight(34)
         self.close_btn.setMinimumWidth(100)
         self.close_btn.setStyleSheet("""
             QPushButton {
@@ -1379,7 +1375,7 @@ class PhotoReviewWindow(QMainWindow):
                 font-weight: bold;
                 border-radius: 4px;
                 border: none;
-                padding: 8px 20px;
+                padding: 0px 20px;
             }
             QPushButton:hover {
                 background-color: #DC2626;
@@ -1464,6 +1460,7 @@ class PhotoReviewWindow(QMainWindow):
         self.grid_view.delete_requested.connect(self.delete_selected)
         self.grid_view.rotate_requested.connect(self.rotate_selected)
         self.grid_view.correct_date_requested.connect(self.correct_date_selected)
+        self.grid_view.reorganize_requested.connect(self.reorganize_marked_files)
         self.grid_view.open_file_requested.connect(self.open_selected_file)
         self.grid_view.open_folder_requested.connect(self.open_selected_folder)
         self.grid_view.copy_path_requested.connect(self.copy_selected_path)
@@ -1792,6 +1789,78 @@ class PhotoReviewWindow(QMainWindow):
         dialog = DateCorrectionDialog(self, selected, batch_mode=batch_mode)
         dialog.exec()
         self.run_current_query()
+
+    def reorganize_marked_files(self):
+        """Reorganize files that have been marked for reorganization after date correction."""
+        if not self.database_metadata:
+            QMessageBox.warning(
+                self, "No Database",
+                "Please select a database first."
+            )
+            return
+
+        # Get files needing reorganization
+        files_to_reorganize = self.database_metadata.get_files_needing_reorganization()
+
+        if not files_to_reorganize:
+            QMessageBox.information(
+                self, "No Files to Reorganize",
+                "There are no files marked for reorganization.\n\n"
+                "Files are marked for reorganization when you correct their dates."
+            )
+            return
+
+        # Confirm reorganization
+        reply = QMessageBox.question(
+            self, "Confirm Reorganization",
+            f"📦 Reorganize {len(files_to_reorganize)} file(s)?\n\n"
+            f"Files will be moved to folders matching their corrected dates.\n\n"
+            f"This operation can be undone by correcting dates again.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Use the reorganize_files function which handles progress dialog internally
+        from ui.reorganize_worker import reorganize_files
+
+        success_count, failed_count = reorganize_files(
+            parent_widget=self,
+            db_metadata=self.database_metadata,
+            files_to_reorganize=files_to_reorganize
+        )
+
+        # Show completion message
+        if failed_count > 0:
+            QMessageBox.warning(
+                self, "Reorganization Complete with Errors",
+                f"✓ Reorganized {success_count} files.\n"
+                f"✗ {failed_count} files failed.\n\n"
+                f"Check the logs for details."
+            )
+        elif success_count > 0:
+            QMessageBox.information(
+                self, "Reorganization Complete",
+                f"✓ Successfully reorganized {success_count} files."
+            )
+
+        # Refresh the query to show updated data
+        self.run_current_query()
+
+    def manage_unreliable_paths(self):
+        """Open dialog to manage user-specified unreliable paths."""
+        if not self.database_metadata:
+            QMessageBox.warning(
+                self, "No Database",
+                "Please select a database first."
+            )
+            return
+
+        from ui.manage_unreliable_paths_dialog import ManageUnreliablePathsDialog
+
+        dialog = ManageUnreliablePathsDialog(self.database_metadata, self)
+        dialog.exec()
 
     def open_selected_file(self):
         """Open selected file with default application."""

@@ -15,10 +15,7 @@ from ui.import_settings_tab import ImportSettingsTab
 from ui.archive_settings_tab import ArchiveSettingsTab
 from ui.system_settings_tab import SystemSettingsTab
 from ui.progress_tab import ProgressTab
-from ui.results_tab import ResultsTab
 from ui.logs_tab import LogsTab
-from ui.filtered_files_tab import FilteredFilesTab
-from ui.date_corrections_tab import DateCorrectionsTab
 from ui.import_history_tab import ImportHistoryTab
 from ui.database_selector_dialog import DatabaseSelectorDialog
 from ui.worker import ProcessingWorker
@@ -77,10 +74,7 @@ class MainWindow(QMainWindow):
         self.archive_settings_tab = ArchiveSettingsTab()
         self.system_settings_tab = SystemSettingsTab()
         self.progress_tab = ProgressTab()
-        self.results_tab = ResultsTab()
-        self.filtered_files_tab = FilteredFilesTab()
         self.logs_tab = LogsTab()
-        self.date_corrections_tab = DateCorrectionsTab()
         self.import_history_tab = ImportHistoryTab()
 
         # Add tabs in workflow order
@@ -100,26 +94,13 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.progress_tab, "▶️ Progress")
         self.tabs.setTabToolTip(3, "View real-time processing status and statistics")
 
-        # Tab 4: Results (processing summary)
-        self.tabs.addTab(self.results_tab, "✅ Results")
-        self.tabs.setTabToolTip(4, "Review processing results and summary statistics")
-
-        # Review/maintenance tabs
-        # Tab 5: Date Corrections
-        self.tabs.addTab(self.date_corrections_tab, "📅 Date Corrections")
-        self.tabs.setTabToolTip(5, "Fix files with unreliable dates and reorganize them")
-
-        # Tab 6: Import History
+        # Tab 4: Import History (complete accounting of imports)
         self.tabs.addTab(self.import_history_tab, "📜 Import History")
-        self.tabs.setTabToolTip(6, "Review past import sessions and reprocess files if needed")
+        self.tabs.setTabToolTip(4, "Review past import sessions - new files, duplicates, filtered, and errors")
 
-        # Tab 7: Filtered Files
-        self.tabs.addTab(self.filtered_files_tab, "🔍 Filtered Files")
-        self.tabs.setTabToolTip(7, "Review files that were excluded by photo filters")
-
-        # Tab 8: Logs (troubleshooting)
+        # Tab 5: Logs (troubleshooting)
         self.tabs.addTab(self.logs_tab, "📋 Logs")
-        self.tabs.setTabToolTip(8, "View detailed application logs for troubleshooting")
+        self.tabs.setTabToolTip(5, "View detailed application logs for troubleshooting")
 
         # Connect signals
         self.import_settings_tab.start_clicked.connect(self.start_processing)
@@ -289,18 +270,10 @@ class MainWindow(QMainWindow):
             # Refresh the import settings tab to show updated last_scanned times
             self.import_settings_tab.load_sources_from_database()
 
-        # Update results tab
-        self.results_tab.display_results(results)
+        # Switch to Import History tab to show results
+        self.tabs.setCurrentWidget(self.import_history_tab)
 
-        # Update filtered files tab
-        filtered_files = results.get('filtered_files', [])
-        filter_statistics = results.get('filter_statistics', {})
-        self.filtered_files_tab.display_filtered_files(filtered_files, filter_statistics)
-
-        # Switch to results tab
-        self.tabs.setCurrentWidget(self.results_tab)
-
-        # Show completion message
+        # Show completion message with summary
         total_examined = results.get('total_files_examined', 0)
         originals = results.get('total_new_original_files', 0)
         duplicates = results.get('total_duplicates', 0)
@@ -313,7 +286,8 @@ class MainWindow(QMainWindow):
                               f"New original photos: {originals}\n"
                               f"Duplicates found: {duplicates}\n"
                               f"Filtered files: {filtered}\n"
-                              f"Files with suspicious dates: {unreliable_dates}")
+                              f"Files with suspicious dates: {unreliable_dates}\n\n"
+                              f"View the Import History tab for full details.")
 
     def processing_error(self, error_msg):
         """Handle processing error."""
@@ -369,9 +343,6 @@ class MainWindow(QMainWindow):
 
         # Update system settings tab with database (loads database info, cache settings, retention)
         self.system_settings_tab.set_database(self.database_metadata)
-
-        # Update date corrections tab with database
-        self.date_corrections_tab.set_database(self.database_metadata)
 
         # Update import history tab with database
         self.import_history_tab.set_database(database_path)
