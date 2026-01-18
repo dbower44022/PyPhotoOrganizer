@@ -39,7 +39,13 @@
       "Bash(source venv/bin/activate)",
       "Bash(QT_QPA_PLATFORM=offscreen python:*)",
       "Bash(tree:*)",
-      "Bash(source .venv/bin/activate)"
+      "Bash(source .venv/bin/activate)",
+      "Bash(pip3 install:*)",
+      "Bash(venv/bin/pip install:*)",
+      "Bash(venv/bin/python:*)",
+      "Bash(\"/home/doug/Dropbox/Projects/python Projects/PyPhotoOrganizer/PyPhotoOrganizer/dist/PyPhotoOrganizer/PyPhotoOrganizer\" --help)",
+      "Bash(\"/home/doug/Dropbox/Projects/python Projects/PyPhotoOrganizer/PyPhotoOrganizer/dist/PyPhotoOrganizer/PyPhotoOrganizer\" --version)",
+      "Bash(apt list:*)"
     ]
   }
 }

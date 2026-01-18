@@ -1,0 +1,123 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "PyPhotoOrganizer"
+version = "3.2.0"
+description = "Photo and video duplicate detection, organization, and review system with GUI"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Doug"}
+]
+keywords = [
+    "photo",
+    "video",
+    "organizer",
+    "duplicate",
+    "detection",
+    "EXIF",
+    "archive",
+    "photo-frame",
+    "albums",
+    "PySide6",
+    "Qt"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications :: Qt",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: MacOS X",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Multimedia :: Video",
+    "Topic :: System :: Archiving",
+]
+dependencies = [
+    "Pillow>=10.0.0",
+    "piexif>=1.1.3",
+    "pillow-heif>=0.13.0",
+    "tqdm>=4.65.0",
+    "PySide6>=6.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-qt>=4.2.0",
+    "pyinstaller>=6.0.0",
+]
+
+[project.scripts]
+# Command-line entry points
+pyphotoorganizer-cli = "main:main"
+
+[project.gui-scripts]
+# GUI entry points (no console window on Windows)
+pyphotoorganizer = "main_gui:main"
+photoreview = "photo_review:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/PyPhotoOrganizer"
+Documentation = "https://github.com/yourusername/PyPhotoOrganizer#readme"
+Repository = "https://github.com/yourusername/PyPhotoOrganizer"
+"Bug Tracker" = "https://github.com/yourusername/PyPhotoOrganizer/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*"]
+exclude = [
+    "tests*",
+    "venv*",
+    ".venv*",
+    "build*",
+    "dist*",
+    "*.egg-info",
+]
+
+[tool.setuptools.package-data]
+"*" = [
+    "*.json",
+    "*.md",
+    "*.txt",
+    "*.ico",
+    "*.png",
+]
+
+# Pytest configuration
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+# Coverage configuration (if using pytest-cov)
+[tool.coverage.run]
+source = ["."]
+omit = [
+    "tests/*",
+    "venv/*",
+    ".venv/*",
+    "build/*",
+    "dist/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
