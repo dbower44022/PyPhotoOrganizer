@@ -127,6 +127,7 @@ class SelectionActionBar(QWidget):
     delete_clicked = Signal()
     rotate_clicked = Signal()
     correct_date_clicked = Signal()
+    album_clicked = Signal()
     deselect_clicked = Signal()
 
     def __init__(self, parent=None):
@@ -164,6 +165,9 @@ class SelectionActionBar(QWidget):
 
         self.date_btn = self._create_action_button("📅 Fix Date", self.correct_date_clicked)
         layout.addWidget(self.date_btn)
+
+        self.album_btn = self._create_action_button("📁 Album", self.album_clicked)
+        layout.addWidget(self.album_btn)
 
         layout.addStretch()
 
@@ -1172,6 +1176,20 @@ class PhotoReviewWindow(QMainWindow):
         deselect_all_action.triggered.connect(self.deselect_all)
         actions_menu.addAction(deselect_all_action)
 
+        # Albums menu
+        albums_menu = menubar.addMenu("Al&bums")
+
+        add_to_album_action = QAction("➕ Add to &Album...", self)
+        add_to_album_action.setShortcut("Ctrl+Shift+A")
+        add_to_album_action.triggered.connect(self.add_selected_to_album)
+        albums_menu.addAction(add_to_album_action)
+
+        albums_menu.addSeparator()
+
+        manage_albums_action = QAction("📁 &Manage Albums...", self)
+        manage_albums_action.triggered.connect(self.manage_albums)
+        albums_menu.addAction(manage_albums_action)
+
         # Help menu
         help_menu = menubar.addMenu("&Help")
 
@@ -1428,6 +1446,7 @@ class PhotoReviewWindow(QMainWindow):
         self.action_bar.delete_clicked.connect(self.delete_selected)
         self.action_bar.rotate_clicked.connect(self.rotate_selected)
         self.action_bar.correct_date_clicked.connect(self.correct_date_selected)
+        self.action_bar.album_clicked.connect(self.add_selected_to_album)
         self.action_bar.deselect_clicked.connect(self.deselect_all)
         bottom_layout.addWidget(self.action_bar)
 
@@ -1528,6 +1547,7 @@ class PhotoReviewWindow(QMainWindow):
         self.grid_view.delete_requested.connect(self.delete_selected)
         self.grid_view.rotate_requested.connect(self.rotate_selected)
         self.grid_view.correct_date_requested.connect(self.correct_date_selected)
+        self.grid_view.add_to_album_requested.connect(self.add_selected_to_album)
         self.grid_view.reorganize_requested.connect(self.reorganize_marked_files)
         self.grid_view.open_file_requested.connect(self.open_selected_file)
         self.grid_view.open_folder_requested.connect(self.open_selected_folder)
@@ -1915,6 +1935,49 @@ class PhotoReviewWindow(QMainWindow):
 
         # Refresh the query to show updated data
         self.run_current_query()
+
+    # -------------------------------------------------------------------------
+    # Album Actions
+    # -------------------------------------------------------------------------
+
+    def add_selected_to_album(self):
+        """Add selected photos to an album."""
+        if not self.grid_view:
+            return
+
+        selected = self.grid_view.get_selected_items()
+        if not selected:
+            QMessageBox.information(
+                self, "No Selection",
+                "Please select photos to add to an album."
+            )
+            return
+
+        if not self.current_database_path:
+            QMessageBox.warning(
+                self, "No Database",
+                "Please select a database first."
+            )
+            return
+
+        from ui.add_to_album_dialog import AddToAlbumDialog
+
+        dialog = AddToAlbumDialog(selected, self.current_database_path, self)
+        dialog.exec()
+
+    def manage_albums(self):
+        """Open album management dialog."""
+        if not self.current_database_path:
+            QMessageBox.warning(
+                self, "No Database",
+                "Please select a database first."
+            )
+            return
+
+        from ui.album_management_dialog import AlbumManagementDialog
+
+        dialog = AlbumManagementDialog(self.current_database_path, self)
+        dialog.exec()
 
     def manage_unreliable_paths(self):
         """Open dialog to manage user-specified unreliable paths."""

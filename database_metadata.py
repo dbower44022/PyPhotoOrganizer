@@ -128,6 +128,36 @@ class DatabaseMetadata:
         );
     """
 
+    ALBUMS_TABLE_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS Albums (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            album_name TEXT NOT NULL UNIQUE,
+            album_description TEXT,
+            storage_location TEXT NOT NULL,
+            created_timestamp TEXT NOT NULL,
+            updated_timestamp TEXT,
+            photo_count INTEGER DEFAULT 0,
+            total_size_bytes INTEGER DEFAULT 0,
+            sync_deletions INTEGER DEFAULT 1,
+            is_active INTEGER DEFAULT 1,
+            sort_order INTEGER DEFAULT 0
+        );
+    """
+
+    ALBUM_PHOTOS_TABLE_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS AlbumPhotos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            album_id INTEGER NOT NULL,
+            file_hash TEXT NOT NULL,
+            album_file_path TEXT NOT NULL,
+            added_timestamp TEXT NOT NULL,
+            display_order INTEGER DEFAULT 0,
+            FOREIGN KEY (album_id) REFERENCES Albums(id) ON DELETE CASCADE,
+            FOREIGN KEY (file_hash) REFERENCES UniquePhotos(file_hash),
+            UNIQUE(album_id, file_hash)
+        );
+    """
+
     def __init__(self, database_path: str):
         """
         Initialize database metadata manager.
@@ -143,6 +173,7 @@ class DatabaseMetadata:
         self._ensure_thumbnail_cache_table()
         self._ensure_deleted_files_table()
         self._ensure_saved_queries_table()
+        self._ensure_albums_table()
 
     def _get_connection(self) -> sqlite3.Connection:
         """
@@ -404,6 +435,32 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to create SavedQueries table: {e}")
+            raise
+
+    def _ensure_albums_table(self):
+        """Ensure the Albums and AlbumPhotos tables exist in the database."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Create Albums table if it doesn't exist
+                cursor.execute(self.ALBUMS_TABLE_SCHEMA)
+
+                # Create AlbumPhotos table if it doesn't exist
+                cursor.execute(self.ALBUM_PHOTOS_TABLE_SCHEMA)
+
+                # Create indexes for performance
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_albums_name ON Albums(album_name)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_albums_active ON Albums(is_active)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_albumphoto_album ON AlbumPhotos(album_id)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_albumphoto_hash ON AlbumPhotos(file_hash)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_albumphoto_album_order ON AlbumPhotos(album_id, display_order)")
+
+                conn.commit()
+                logger.debug(f"Albums and AlbumPhotos tables ensured in {self.database_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to create Albums tables: {e}")
             raise
 
     def ensure_all_tables(self):

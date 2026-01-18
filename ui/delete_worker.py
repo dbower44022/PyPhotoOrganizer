@@ -220,6 +220,17 @@ class DeleteWorker(QThread):
                 except Exception as e:
                     self.worker_logger.warning(f"  ⚠ Failed to remove from UnreliableDates: {e}")
 
+                # Sync deletion to albums (remove from albums with sync_deletions=1)
+                try:
+                    from album_manager import AlbumManager
+                    album_manager = AlbumManager(self.db_path)
+                    sync_result = album_manager.sync_deletion_to_albums(file_hash)
+
+                    if sync_result.get('albums_updated'):
+                        self.worker_logger.info(f"  ✓ Removed from albums: {', '.join(sync_result['albums_updated'])}")
+                except Exception as e:
+                    self.worker_logger.warning(f"  ⚠ Failed to sync album deletion: {e}")
+
                 # Log to audit trail
                 if audit_manager:
                     try:

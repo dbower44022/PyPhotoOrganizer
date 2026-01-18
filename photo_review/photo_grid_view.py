@@ -54,6 +54,7 @@ class PhotoGridView(QListView):
     delete_requested = Signal()  # Context menu: Delete to Vault
     rotate_requested = Signal()  # Context menu: Rotate Image
     correct_date_requested = Signal()  # Context menu: Correct Date
+    add_to_album_requested = Signal()  # Context menu: Add to Album
     reorganize_requested = Signal()  # Context menu: Reorganize Marked Files
     open_file_requested = Signal()  # Context menu: Open File
     open_folder_requested = Signal()  # Context menu: Open in Folder
@@ -585,6 +586,15 @@ class PhotoGridView(QListView):
             rotate_action.setEnabled(has_selection)
             rotate_action.triggered.connect(lambda: self.rotate_requested.emit())
             menu.addAction(rotate_action)
+
+            menu.addSeparator()
+
+            # Action: Add to Album
+            add_album_action = QAction("📁  Add to Album...", self)
+            add_album_action.setShortcut("Ctrl+Shift+A")
+            add_album_action.setEnabled(has_selection)
+            add_album_action.triggered.connect(lambda: self.add_to_album_requested.emit())
+            menu.addAction(add_album_action)
 
             menu.addSeparator()
 
