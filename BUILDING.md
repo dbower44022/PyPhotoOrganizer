@@ -12,6 +12,7 @@ This document explains how to build PyPhotoOrganizer for distribution and instal
 - [Build Script Reference](#build-script-reference)
 - [Platform-Specific Notes](#platform-specific-notes)
 - [Troubleshooting](#troubleshooting)
+- [Installation from ZIP Archive (End Users)](#installation-from-zip-archive-end-users)
 - [Distribution](#distribution)
 
 ---
@@ -376,6 +377,119 @@ If builds fail with strange errors, try a clean build:
 python build.py --clean
 python build.py --exe
 ```
+
+---
+
+## Installation from ZIP Archive (End Users)
+
+This section is for users who download a pre-built release ZIP archive.
+
+### Step 1: Download and Extract
+
+1. Download the release ZIP file (e.g., `PyPhotoOrganizer-3.2.0-linux-20260117.zip`)
+2. Extract to your preferred location:
+
+**Windows:**
+- Right-click the ZIP file → "Extract All..."
+- Choose destination (e.g., `C:\Program Files\PyPhotoOrganizer\`)
+
+**macOS:**
+- Double-click the ZIP file to extract
+- Move the folder to `/Applications/` or your preferred location
+
+**Linux:**
+```bash
+unzip PyPhotoOrganizer-3.2.0-linux-20260117.zip -d ~/Applications/
+```
+
+### Step 2: Install System Dependencies
+
+**Windows:**
+- No additional dependencies required
+
+**macOS:**
+- No additional dependencies required
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt install libxcb-cursor0
+```
+
+**Linux (Fedora):**
+```bash
+sudo dnf install xcb-util-cursor
+```
+
+**Linux (Arch Linux):**
+```bash
+sudo pacman -S xcb-util-cursor
+```
+
+### Step 3: Run the Applications
+
+Navigate to the extracted `PyPhotoOrganizer/` folder and run the executables:
+
+**Windows:**
+- Double-click `PyPhotoOrganizer.exe` for the Import GUI
+- Double-click `PhotoReview.exe` for Photo Review
+
+**macOS/Linux:**
+```bash
+cd ~/Applications/PyPhotoOrganizer/
+./PyPhotoOrganizer    # Import GUI
+./PhotoReview         # Photo Review
+```
+
+### Step 4: Create Desktop Shortcuts (Optional)
+
+**Windows:**
+1. Right-click `PyPhotoOrganizer.exe` → "Create shortcut"
+2. Move shortcut to Desktop or Start Menu
+
+**macOS:**
+1. Drag the application to the Dock for quick access
+2. Or create an alias and move to Desktop
+
+**Linux (Desktop Entry):**
+
+Create `~/.local/share/applications/pyphotoorganizer.desktop`:
+```ini
+[Desktop Entry]
+Type=Application
+Name=PyPhotoOrganizer
+Comment=Photo Import and Organization
+Exec=/path/to/PyPhotoOrganizer/PyPhotoOrganizer
+Icon=/path/to/PyPhotoOrganizer/icon.png
+Terminal=false
+Categories=Graphics;Photography;
+```
+
+Create `~/.local/share/applications/photoreview.desktop`:
+```ini
+[Desktop Entry]
+Type=Application
+Name=Photo Review
+Comment=Photo Review and Correction
+Exec=/path/to/PyPhotoOrganizer/PhotoReview
+Icon=/path/to/PyPhotoOrganizer/icon.png
+Terminal=false
+Categories=Graphics;Photography;
+```
+
+Then update the desktop database:
+```bash
+update-desktop-database ~/.local/share/applications/
+```
+
+### Verifying the Installation
+
+1. Launch `PyPhotoOrganizer` - you should see the Import GUI window
+2. Launch `PhotoReview` - you should see the Photo Review window
+3. If you encounter errors, check the Troubleshooting section below
+
+### Uninstallation
+
+Simply delete the `PyPhotoOrganizer/` folder and any desktop shortcuts you created. The application stores its database files separately (in your chosen archive location), so your photo database is preserved.
 
 ---
 
