@@ -97,13 +97,22 @@ PyPhotoOrganizer uses a separation of concerns between two GUI applications:
   - Uses shared `reorganize_files()` function from `ui/reorganize_worker.py`
   - Uses shared `ManageUnreliablePathsDialog` from ui/ directory
 - **UI Layout** (v3.1.0):
-  - Fixed bottom action bar with Delete, Rotate, Fix Date, Deselect All buttons (left-aligned)
+  - Fixed bottom action bar with Delete, Rotate, Fix Date, Album, Deselect All buttons (left-aligned)
   - Close button (right-aligned) in same bottom bar
   - All buttons always enabled (no grayed-out states per design guidelines)
   - Consistent 34px fixed button height
   - `SelectionActionBar` class manages action buttons and selection count display
 - Image rotation with version history
 - File deletion with restore capability
+- **Albums Feature** (NEW in v3.2.0):
+  - Create organized photo collections stored in separate locations
+  - Ideal for photo frames and screensavers that read from specific folders
+  - Albums menu → "Add to Album..." (Ctrl+Shift+A), "Manage Albums..."
+  - Right-click context menu includes "Add to Album..." option
+  - Album button in SelectionActionBar for quick access
+  - Flat file structure within albums (no date subfolders)
+  - Automatic sync: when photos deleted from archive, removed from albums
+  - See "Albums System" section below for detailed documentation
 
 This separation allows users who only need to review photos (without import permissions) to use the Photo Review app independently.
 
@@ -258,6 +267,28 @@ This separation allows users who only need to review photos (without import perm
   - Progress signals for UI updates
   - Cancellation support
 
+**Albums Feature** (NEW in v3.2.0):
+- **`album_manager.py`** (root directory): Core album management class
+  - Album CRUD: `create_album()`, `get_album()`, `get_all_albums()`, `update_album()`, `delete_album()`
+  - Photo operations: `add_photo_to_album()`, `remove_photo_from_album()`, `get_album_photos()`
+  - Sync operations: `sync_deletion_to_albums()`, `verify_album_storage()`
+  - Filename collision handling for flat album structure
+  - See "Albums System" section for detailed documentation
+- **`ui/album_worker.py`**: Background workers for album operations
+  - `AddToAlbumWorker`: Copies photos to album with progress tracking
+  - `RemoveFromAlbumWorker`: Removes photos from album
+  - `SyncAlbumDeletionWorker`: Syncs archive deletions to albums
+  - Follows `DeleteWorker` pattern with signals: `progress(int, int, str)`, `finished(dict)`
+- **`ui/add_to_album_dialog.py`**: Quick dialog for adding photos to albums
+  - `AddToAlbumDialog`: Album selection dropdown, progress dialog, result summary
+  - `CreateAlbumDialog`: Create new album with name, description, location, sync setting
+  - Uses theme system for consistent styling
+- **`ui/album_management_dialog.py`**: Full album management dialog
+  - Album list with selection
+  - Album details panel (name, description, location, sync setting)
+  - Statistics display (photo count, size, dates)
+  - Actions: New, Delete, Open Folder, Verify, Save Changes
+
 **Theme System** (ui/theme.py - NEW in v3.0.5):
 - **`ThemeManager` Class**: Singleton manager for application-wide theming
   - `get_theme()`: Get current Theme instance
@@ -373,6 +404,26 @@ This separation allows users who only need to review photos (without import perm
   - `correction_timestamp`: When correction was made
   - `needs_reorganization`: Flag indicating file needs to be moved to correct date folder
   - Automatically populated during processing when unreliable dates detected
+- **Table `Albums`** (NEW in v3.2.0): Stores album metadata for photo collections
+  - `id`: Primary key (auto-increment)
+  - `album_name`: Unique display name (e.g., "Living Room Frame")
+  - `album_description`: Optional description text
+  - `storage_location`: Absolute path to album folder (per-album locations supported)
+  - `created_timestamp`, `updated_timestamp`: ISO format timestamps
+  - `photo_count`, `total_size_bytes`: Cached statistics for UI
+  - `sync_deletions`: 1=auto-remove photos when deleted from archive, 0=keep
+  - `is_active`: 0=storage unavailable, 1=active
+  - `sort_order`: For future ordering feature
+  - Indexes: `idx_albums_name`, `idx_albums_active`
+- **Table `AlbumPhotos`** (NEW in v3.2.0): Junction table linking albums to photos
+  - `id`: Primary key (auto-increment)
+  - `album_id`: Foreign key to Albums.id (CASCADE delete)
+  - `file_hash`: Foreign key to UniquePhotos.file_hash
+  - `album_file_path`: Full path to photo copy in album folder
+  - `added_timestamp`: When photo was added to album
+  - `display_order`: For future ordering feature
+  - Unique constraint: `(album_id, file_hash)` prevents duplicate entries
+  - Indexes: `idx_albumphoto_album`, `idx_albumphoto_hash`, `idx_albumphoto_album_order`
 
 ### Database Connection Management (v2.3.1)
 
@@ -3417,3 +3468,584 @@ CREATE INDEX idx_dupmap_duplicate_path ON DuplicateMapping(duplicate_source_path
    - Duplicate relationships
 7. User can export reports to JSON/CSV for external analysis
 8. Retention settings automatically clean up old sessions
+
+### Albums System (NEW in v3.2.0)
+
+**Purpose**: Allow users to create organized photo collections ("albums") that are copies of archive photos stored in separate locations. This is ideal for:
+- Digital photo frames that read from a specific folder
+- PC screensavers and wallpaper slideshows
+- Sharing curated photo collections via external drives
+- Creating backups of favorite photos in different locations
+
+**Key Design Decisions:**
+- **Per-album storage locations**: Each album can be stored on a different drive (USB, network, etc.)
+- **Flat file structure**: All photos directly in album folder (no date subfolders) - best for photo frame compatibility
+- **Sync deletions**: When a photo is deleted from the main archive, it's automatically removed from all albums with sync enabled
+- **Copy-based**: Photos are COPIED to albums, preserving the archive as the single source of truth
+
+**Database Schema:**
+
+**Albums Table** - Stores album metadata:
+```sql
+CREATE TABLE IF NOT EXISTS Albums (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    album_name TEXT NOT NULL UNIQUE,      -- Display name (e.g., "Living Room Frame")
+    album_description TEXT,                -- Optional description
+    storage_location TEXT NOT NULL,        -- Absolute path to album folder
+    created_timestamp TEXT NOT NULL,       -- ISO format timestamp
+    updated_timestamp TEXT,                -- Last modification timestamp
+    photo_count INTEGER DEFAULT 0,         -- Cached count for UI
+    total_size_bytes INTEGER DEFAULT 0,    -- Cached size for UI
+    sync_deletions INTEGER DEFAULT 1,      -- 1=auto-remove when archive file deleted
+    is_active INTEGER DEFAULT 1,           -- 0=storage unavailable
+    sort_order INTEGER DEFAULT 0           -- For future ordering feature
+);
+
+-- Performance indexes
+CREATE INDEX IF NOT EXISTS idx_albums_name ON Albums(album_name);
+CREATE INDEX IF NOT EXISTS idx_albums_active ON Albums(is_active);
+```
+
+**AlbumPhotos Table** - Junction table linking albums to photos:
+```sql
+CREATE TABLE IF NOT EXISTS AlbumPhotos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    album_id INTEGER NOT NULL,             -- Links to Albums.id
+    file_hash TEXT NOT NULL,               -- Links to UniquePhotos.file_hash
+    album_file_path TEXT NOT NULL,         -- Full path in album folder
+    added_timestamp TEXT NOT NULL,         -- When photo was added to album
+    display_order INTEGER DEFAULT 0,       -- For future ordering feature
+    FOREIGN KEY (album_id) REFERENCES Albums(id) ON DELETE CASCADE,
+    FOREIGN KEY (file_hash) REFERENCES UniquePhotos(file_hash),
+    UNIQUE(album_id, file_hash)            -- Prevent duplicate entries
+);
+
+-- Performance indexes
+CREATE INDEX IF NOT EXISTS idx_albumphoto_album ON AlbumPhotos(album_id);
+CREATE INDEX IF NOT EXISTS idx_albumphoto_hash ON AlbumPhotos(file_hash);
+CREATE INDEX IF NOT EXISTS idx_albumphoto_album_order ON AlbumPhotos(album_id, display_order);
+```
+
+**Database Relationships:**
+```
+UniquePhotos (file_hash) <------ AlbumPhotos (file_hash)
+                                     |
+Albums (id) <----------------------- AlbumPhotos (album_id)
+```
+
+**Core Module: `album_manager.py`**
+
+The `AlbumManager` class provides all album CRUD and photo management operations:
+
+```python
+class AlbumManager:
+    def __init__(self, database_path: str)
+
+    # ========== Album CRUD Operations ==========
+
+    def create_album(self, name: str, storage_location: str,
+                     description: str = "", sync_deletions: bool = True) -> int:
+        """
+        Create a new album.
+
+        Args:
+            name: Unique album name (e.g., "Kitchen Photo Frame")
+            storage_location: Absolute path to album folder (will be created if needed)
+            description: Optional description
+            sync_deletions: If True, auto-remove photos when deleted from archive
+
+        Returns:
+            Album ID on success, None on failure (e.g., duplicate name)
+
+        Raises:
+            ValueError: If name is empty or storage_location is invalid
+        """
+
+    def get_album(self, album_id: int) -> dict:
+        """
+        Get album details by ID.
+
+        Returns:
+            Dict with keys: id, album_name, album_description, storage_location,
+            created_timestamp, updated_timestamp, photo_count, total_size_bytes,
+            sync_deletions, is_active, sort_order
+            Returns None if album not found.
+        """
+
+    def get_all_albums(self, include_inactive: bool = False) -> list:
+        """
+        Get all albums.
+
+        Args:
+            include_inactive: If True, include albums with unavailable storage
+
+        Returns:
+            List of album dicts, ordered by sort_order then name
+        """
+
+    def update_album(self, album_id: int, name: str = None,
+                     description: str = None, storage_location: str = None,
+                     sync_deletions: bool = None) -> bool:
+        """
+        Update album properties.
+
+        Args:
+            album_id: Album to update
+            name, description, storage_location, sync_deletions: Properties to update
+                (None = keep existing value)
+
+        Returns:
+            True on success, False on failure
+        """
+
+    def delete_album(self, album_id: int, delete_files: bool = True) -> bool:
+        """
+        Delete an album.
+
+        Args:
+            album_id: Album to delete
+            delete_files: If True, delete all photo files in album folder
+
+        Returns:
+            True on success, False on failure
+        """
+
+    # ========== Photo Management Operations ==========
+
+    def add_photo_to_album(self, album_id: int, file_hash: str,
+                           archive_path: str) -> str:
+        """
+        Add a photo to an album (copies file to album folder).
+
+        Args:
+            album_id: Target album
+            file_hash: SHA-256 hash of the photo
+            archive_path: Path to photo in main archive
+
+        Returns:
+            Path to copied file in album folder on success, None on failure
+
+        Notes:
+            - Uses copy-verify pattern (copy, verify size, then commit to DB)
+            - Handles filename collisions with hash suffix
+            - Updates album's photo_count and total_size_bytes
+        """
+
+    def remove_photo_from_album(self, album_id: int, file_hash: str,
+                                delete_file: bool = True) -> bool:
+        """
+        Remove a photo from an album.
+
+        Args:
+            album_id: Album containing the photo
+            file_hash: Photo to remove
+            delete_file: If True, delete the file from album folder
+
+        Returns:
+            True on success, False on failure
+
+        Notes:
+            - Updates album's photo_count and total_size_bytes
+        """
+
+    def get_album_photos(self, album_id: int) -> list:
+        """
+        Get all photos in an album.
+
+        Returns:
+            List of dicts with keys: id, album_id, file_hash, album_file_path,
+            added_timestamp, display_order
+        """
+
+    def get_albums_containing_photo(self, file_hash: str) -> list:
+        """
+        Get all albums that contain a specific photo.
+
+        Returns:
+            List of album dicts (same format as get_all_albums)
+        """
+
+    # ========== Sync Operations ==========
+
+    def sync_deletion_to_albums(self, file_hash: str) -> dict:
+        """
+        Remove a photo from all albums that have sync_deletions enabled.
+        Called by DeleteWorker when a file is deleted from the archive.
+
+        Args:
+            file_hash: Hash of the deleted file
+
+        Returns:
+            Dict with keys:
+            - albums_updated: List of album names where photo was removed
+            - errors: List of error messages
+        """
+
+    def verify_album_storage(self, album_id: int) -> dict:
+        """
+        Verify album storage is accessible and count missing files.
+
+        Returns:
+            Dict with keys:
+            - accessible: True if storage location exists and is writable
+            - total_photos: Number of photos in database
+            - files_found: Number of files actually on disk
+            - files_missing: Number of missing files
+            - missing_files: List of missing file paths
+        """
+
+    # ========== Filename Generation ==========
+
+    def _generate_album_filename(self, storage_location: str,
+                                 original_filename: str, file_hash: str) -> str:
+        """
+        Generate a unique filename for a photo in an album.
+
+        Algorithm (handles collisions for flat structure):
+        1. Try original filename (e.g., "vacation.jpg")
+        2. If collision, add hash suffix: "vacation_a1b2c3d4.jpg"
+        3. If still collision, add counter: "vacation_a1b2c3d4_1.jpg"
+
+        Returns:
+            Full path to use for the album file
+        """
+```
+
+**Background Workers: `ui/album_worker.py`**
+
+Workers follow the existing `DeleteWorker` pattern with signals for progress tracking:
+
+```python
+class AddToAlbumWorker(QThread):
+    """Background worker for adding photos to an album."""
+
+    progress = Signal(int, int, str)  # current, total, filename
+    finished = Signal(dict)  # {'added': int, 'skipped': int, 'errors': list}
+
+    def __init__(self, album_id: int, records: list, db_path: str,
+                 album_storage_path: str, worker_logger):
+        """
+        Args:
+            album_id: Target album ID
+            records: List of photo record dicts (must have 'file_hash', 'archive_path')
+            db_path: Path to database
+            album_storage_path: Path to album folder
+            worker_logger: Logger instance for detailed logging
+        """
+
+    def cancel(self):
+        """Cancel the operation."""
+
+    def run(self):
+        """
+        Execute add operation in background thread.
+
+        For each record:
+        1. Check if already in album (skip if so)
+        2. Copy file from archive to album folder
+        3. Verify copy succeeded (file exists, size matches)
+        4. Add record to AlbumPhotos table
+        5. Update album statistics
+        6. Emit progress signal
+
+        Emits finished signal with results dict.
+        """
+
+
+class RemoveFromAlbumWorker(QThread):
+    """Background worker for removing photos from an album."""
+
+    progress = Signal(int, int, str)  # current, total, filename
+    finished = Signal(dict)  # {'removed': int, 'errors': list}
+
+    def __init__(self, album_id: int, file_hashes: list, db_path: str,
+                 delete_files: bool, worker_logger):
+        """
+        Args:
+            album_id: Album to remove from
+            file_hashes: List of file hashes to remove
+            db_path: Path to database
+            delete_files: If True, delete files from album folder
+            worker_logger: Logger instance
+        """
+
+    def run(self):
+        """Execute removal operation in background thread."""
+
+
+class SyncAlbumDeletionWorker(QThread):
+    """Background worker for syncing archive deletions to albums."""
+
+    finished = Signal(dict)  # {'albums_updated': list, 'errors': list}
+
+    def __init__(self, file_hash: str, db_path: str, worker_logger):
+        """
+        Args:
+            file_hash: Hash of file being deleted from archive
+            db_path: Path to database
+            worker_logger: Logger instance
+        """
+
+    def run(self):
+        """Remove photo from all albums with sync_deletions=1."""
+```
+
+**UI Dialogs:**
+
+**`ui/add_to_album_dialog.py`** - Quick dialog for adding selected photos:
+
+```python
+class AddToAlbumDialog(QDialog):
+    """Dialog for adding photos to an album."""
+
+    def __init__(self, selected_records: list, db_path: str, parent=None):
+        """
+        Args:
+            selected_records: List of selected photo record dicts
+            db_path: Database path
+        """
+
+    # UI Components:
+    # - Header showing number of selected photos
+    # - Album dropdown (shows name + photo count)
+    # - "Create New Album" button
+    # - Album info label (location, size)
+    # - Cancel / Add to Album buttons
+
+    # Workflow:
+    # 1. User selects album from dropdown (or creates new)
+    # 2. User clicks "Add to Album"
+    # 3. Progress dialog shows copy progress
+    # 4. Result message shows added/skipped/error counts
+
+
+class CreateAlbumDialog(QDialog):
+    """Dialog for creating a new album."""
+
+    # UI Components (in QGroupBox "Album Details"):
+    # - Album Name (QLineEdit)
+    # - Description (QLineEdit, optional)
+    # - Storage Location (QLineEdit + Browse button)
+    # - Sync deletions checkbox (default: checked)
+    # - Info text explaining album purpose
+    # - Cancel / Create Album buttons
+
+    # Validation:
+    # - Name required and must be unique
+    # - Storage location required and must exist/be creatable
+```
+
+**`ui/album_management_dialog.py`** - Full album management:
+
+```python
+class AlbumManagementDialog(QDialog):
+    """Dialog for managing all albums."""
+
+    # Layout:
+    # +------------------+--------------------------------+
+    # | Album List       | Album Details                  |
+    # | (QListWidget)    | - Name, Description, Location  |
+    # |                  | - Sync setting checkbox        |
+    # | [New] [Delete]   | - Statistics (count, size)     |
+    # | [Open Folder]    | - Created/Updated dates        |
+    # | [Verify]         |                                |
+    # +------------------+--------------------------------+
+    # |                  [Save Changes]    [Close]        |
+    # +---------------------------------------------------+
+
+    # Actions:
+    # - New: Opens CreateAlbumDialog
+    # - Delete: Confirms and deletes album (with files option)
+    # - Open Folder: Opens album folder in file manager
+    # - Verify: Checks storage accessibility and file integrity
+    # - Save Changes: Saves edits to selected album
+```
+
+**Integration Points:**
+
+**1. Photo Review Window (`photo_review/review_window.py`):**
+
+```python
+# SelectionActionBar - added Album button after Fix Date
+self.album_btn = self._create_action_button("📁 Album", self.album_clicked)
+
+# Albums menu in menu bar
+albums_menu = menubar.addMenu("Al&bums")
+add_to_album_action = QAction("➕ Add to &Album...", self)
+add_to_album_action.setShortcut("Ctrl+Shift+A")
+manage_albums_action = QAction("📁 &Manage Albums...", self)
+
+# Handler methods
+def add_selected_to_album(self):
+    """Add selected photos to an album."""
+    selected = self.grid_view.get_selected_items()
+    if not selected:
+        QMessageBox.information(self, "No Selection",
+            "Please select photos to add to an album.")
+        return
+    dialog = AddToAlbumDialog(selected, self.current_database_path, self)
+    dialog.exec()
+
+def manage_albums(self):
+    """Open album management dialog."""
+    dialog = AlbumManagementDialog(self.current_database_path, self)
+    dialog.exec()
+```
+
+**2. Photo Grid View (`photo_review/photo_grid_view.py`):**
+
+```python
+# Added signal
+add_to_album_requested = Signal()
+
+# Context menu item
+add_album_action = QAction("📁  Add to Album...", self)
+add_album_action.setShortcut("Ctrl+Shift+A")
+add_album_action.triggered.connect(lambda: self.add_to_album_requested.emit())
+```
+
+**3. Delete Worker (`ui/delete_worker.py`):**
+
+```python
+# After successful file deletion, sync to albums
+try:
+    from album_manager import AlbumManager
+    album_manager = AlbumManager(self.db_path)
+    sync_result = album_manager.sync_deletion_to_albums(file_hash)
+
+    if sync_result.get('albums_updated'):
+        self.worker_logger.info(
+            f"  ✓ Removed from albums: {', '.join(sync_result['albums_updated'])}"
+        )
+except Exception as e:
+    self.worker_logger.warning(f"  ⚠ Failed to sync album deletion: {e}")
+```
+
+**4. Database Metadata (`database_metadata.py`):**
+
+```python
+# Added in __init__():
+self._ensure_albums_table()
+
+# New method:
+def _ensure_albums_table(self):
+    """Ensure the Albums and AlbumPhotos tables exist in the database."""
+    # Creates tables with indexes using auto-upgrade pattern
+```
+
+**File Handling - Flat Structure with Collision Resolution:**
+
+Albums use a flat file structure (no date subfolders) for maximum compatibility with photo frames. Filename collisions are handled with hash suffixes:
+
+```
+Original file: vacation.jpg
+
+Collision resolution:
+1. vacation.jpg (if unique)
+2. vacation_a1b2c3d4.jpg (add first 8 chars of hash)
+3. vacation_a1b2c3d4_1.jpg (add counter if still collision)
+```
+
+**Copy-Verify Pattern:**
+
+All file copies use the established pattern:
+```python
+old_size = os.path.getsize(archive_path)
+shutil.copy2(archive_path, album_path)  # Preserves metadata
+
+if not os.path.exists(album_path):
+    raise Exception("Copy verification failed")
+if os.path.getsize(album_path) != old_size:
+    raise Exception("Size mismatch")
+```
+
+**Storage Availability:**
+
+- `os.path.exists()` and `os.access(path, os.W_OK)` checked before operations
+- Albums marked `is_active=0` when storage becomes unavailable
+- Clear error message: "Album storage not available. Please connect the drive."
+
+**UI Integration Summary:**
+
+| Location | Component | Action |
+|----------|-----------|--------|
+| Menu Bar | Albums → Add to Album... | Opens AddToAlbumDialog (Ctrl+Shift+A) |
+| Menu Bar | Albums → Manage Albums... | Opens AlbumManagementDialog |
+| Action Bar | Album button | Opens AddToAlbumDialog |
+| Context Menu | Add to Album... | Opens AddToAlbumDialog (Ctrl+Shift+A) |
+
+**Usage Example:**
+
+1. User opens Photo Review app
+2. User selects multiple photos in the grid (Shift/Ctrl+click)
+3. User clicks "Album" button (or Albums menu → Add to Album, or right-click → Add to Album)
+4. AddToAlbumDialog opens showing selected count
+5. User selects existing album from dropdown (or clicks "Create New Album")
+6. User clicks "Add to Album"
+7. Progress dialog shows copy progress
+8. Completion message: "Added 15 photo(s) to album. Skipped 2 (already in album)."
+
+**Managing Albums:**
+
+1. User clicks Albums menu → Manage Albums
+2. AlbumManagementDialog opens showing all albums
+3. User selects album to see details (photo count, size, location)
+4. User can:
+   - Create new album (New button)
+   - Delete album (Delete button, with option to keep/delete files)
+   - Open album folder in file manager (Open Folder button)
+   - Verify storage and file integrity (Verify button)
+   - Edit album properties (name, description, sync setting)
+5. User clicks "Save Changes" to save edits
+
+**Sync Deletion Behavior:**
+
+When a photo is deleted from the main archive:
+1. DeleteWorker completes the deletion
+2. DeleteWorker calls `AlbumManager.sync_deletion_to_albums(file_hash)`
+3. AlbumManager finds all albums containing this photo with `sync_deletions=1`
+4. For each album:
+   - Delete the album copy of the file
+   - Remove the AlbumPhotos record
+   - Update album statistics
+5. Log which albums were updated
+
+**Testing Checklist:**
+
+- [ ] Create album with valid storage location
+- [ ] Create album - verify directory created automatically
+- [ ] Create album with invalid/read-only path (should fail gracefully)
+- [ ] Add single photo to album - verify file copied
+- [ ] Add multiple photos (batch) - verify progress dialog
+- [ ] Add photos with same filename - verify collision handling
+- [ ] Add photo already in album - verify skipped count
+- [ ] Remove photos from album - verify files deleted
+- [ ] Delete photo from archive - verify removed from synced albums
+- [ ] Delete album with files
+- [ ] Delete album keeping files
+- [ ] Rename album
+- [ ] Change album storage location
+- [ ] Album on USB drive - disconnect drive - verify graceful handling
+- [ ] Verify button - check storage accessibility report
+- [ ] Open Folder button - verify file manager opens
+- [ ] Keyboard shortcuts (Ctrl+Shift+A) work correctly
+
+**Database Verification:**
+```sql
+-- Check tables created
+SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Album%';
+
+-- Check indexes
+SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_album%';
+
+-- Check album with photos
+SELECT a.album_name, COUNT(ap.id) as photo_count
+FROM Albums a LEFT JOIN AlbumPhotos ap ON a.id = ap.album_id
+GROUP BY a.id;
+
+-- Check photos in specific album
+SELECT ap.*, up.file_name
+FROM AlbumPhotos ap
+JOIN UniquePhotos up ON ap.file_hash = up.file_hash
+WHERE ap.album_id = 1;
+```
