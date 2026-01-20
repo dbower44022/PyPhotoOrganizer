@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
 from PySide6.QtCore import Qt
 import json
 import os
+from datetime import datetime
 import constants
 from config import Config
 import logging
@@ -74,6 +75,11 @@ class SystemSettingsTab(QWidget):
 
         self.db_file_label = QLabel("-")
         db_layout.addRow("Database File:", self.db_file_label)
+
+        self.db_path_label = QLabel("-")
+        self.db_path_label.setWordWrap(True)
+        self.db_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        db_layout.addRow("Database Path:", self.db_path_label)
 
         self.db_created_label = QLabel("-")
         db_layout.addRow("Created:", self.db_created_label)
@@ -313,6 +319,39 @@ class SystemSettingsTab(QWidget):
 
     # ========== Database Methods ==========
 
+    def _format_date(self, date_str: str) -> str:
+        """Format a date string into a user-friendly format.
+
+        Args:
+            date_str: Date string in various formats (ISO format, etc.)
+
+        Returns:
+            Formatted date string like "January 15, 2025 at 3:45 PM"
+        """
+        if not date_str or date_str == '-':
+            return '-'
+
+        try:
+            # Try ISO format first (e.g., "2025-01-15T14:30:00" or "2025-01-15 14:30:00")
+            if 'T' in date_str:
+                dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            elif ' ' in date_str and ':' in date_str:
+                # Try "YYYY-MM-DD HH:MM:SS" format
+                dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+            elif '-' in date_str and len(date_str) == 10:
+                # Try "YYYY-MM-DD" format
+                dt = datetime.strptime(date_str, "%Y-%m-%d")
+                return dt.strftime("%B %d, %Y")
+            else:
+                # Unknown format, return as-is
+                return date_str
+
+            # Format with time
+            return dt.strftime("%B %d, %Y at %I:%M %p").replace(" 0", " ")
+        except (ValueError, AttributeError) as e:
+            logger.debug(f"Could not parse date '{date_str}': {e}")
+            return date_str
+
     def set_database(self, db_metadata):
         """Set the database metadata and update UI."""
         self.db_metadata = db_metadata
@@ -320,6 +359,7 @@ class SystemSettingsTab(QWidget):
         if db_metadata is None:
             self.db_name_label.setText("No database loaded")
             self.db_file_label.setText("-")
+            self.db_path_label.setText("-")
             self.db_created_label.setText("-")
             self.db_last_used_label.setText("-")
             self.total_photos_label.setText("0")
@@ -331,18 +371,13 @@ class SystemSettingsTab(QWidget):
         if metadata:
             self.db_name_label.setText(metadata.get('database_name', 'Unknown'))
             self.db_file_label.setText(os.path.basename(db_metadata.database_path))
+            self.db_path_label.setText(db_metadata.database_path)
 
             created = metadata.get('created_date', '-')
-            if created and created != '-':
-                self.db_created_label.setText(created)
-            else:
-                self.db_created_label.setText("-")
+            self.db_created_label.setText(self._format_date(created))
 
             last_used = metadata.get('last_used_date', '-')
-            if last_used and last_used != '-':
-                self.db_last_used_label.setText(last_used)
-            else:
-                self.db_last_used_label.setText("-")
+            self.db_last_used_label.setText(self._format_date(last_used))
 
             self.total_photos_label.setText(f"{metadata.get('total_photos', 0):,}")
             self.schema_version_label.setText(str(metadata.get('schema_version', 1)))

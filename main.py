@@ -425,6 +425,11 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                         operation_type = 'copy' if copy_files else 'move'
                         operation_success = False
 
+                        # Initialize album tracking variables (will be populated if file is added to album)
+                        audit_album_name = None
+                        audit_album_path = None
+                        audit_sub_album_name = None
+
                         if copy_files and not move_files:
                             # use the copyfile not copy or copy2 in order to maintain the existing hash code of the original file!
                             shutil.copyfile(file_path, target_path)
@@ -436,29 +441,6 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                             operation_success = True
                         else:
                             logger.info("ERROR - Move and Copy files are not supported simultaneously")
-
-                        # Log successful operation to audit
-                        if operation_success and audit_manager and session_id:
-                            try:
-                                operation_duration = int((time_module.time() - operation_start) * 1000)
-                                file_size = os.path.getsize(target_path) if os.path.exists(target_path) else 0
-                                file_hash = original_file.get("file_hash")
-
-                                audit_manager.log_file_operation(
-                                    session_id=session_id,
-                                    source_path=file_path,
-                                    operation=operation_type,
-                                    status='success',
-                                    destination_path=target_path,
-                                    file_hash=file_hash,
-                                    file_size=file_size,
-                                    creation_date=f"{year}-{month}-{day}",
-                                    date_source=date_source if 'date_source' in dir() else None,
-                                    date_reliable=is_reliable if 'is_reliable' in dir() else None,
-                                    duration_ms=operation_duration
-                                )
-                            except Exception as audit_err:
-                                logger.debug(f"Failed to log audit: {audit_err}")
 
                         # Update database with archive path after successful organization
                         try:
@@ -546,6 +528,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                                     enable_sub_albums = album_config.get('enable_sub_albums', False)
 
                                     target_album_id = album_id
+                                    current_sub_album_name = None  # Track sub-album name for audit
 
                                     # Handle sub-albums if enabled and file is in a subdirectory
                                     if enable_sub_albums and relative_subdir:
@@ -555,6 +538,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                                             # Generate sub-album name: "Parent Album - Subdir1 - Subdir2"
                                             subdir_parts = relative_subdir.replace(os.sep, ' - ')
                                             sub_album_name = f"{parent_album['album_name']} - {subdir_parts}"
+                                            current_sub_album_name = sub_album_name  # Track for audit
 
                                             # Check if sub-album exists, create if not
                                             existing_sub_album = album_manager.get_album_by_name(sub_album_name)
@@ -588,6 +572,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                                                     logger.warning(f"Failed to create sub-album '{sub_album_name}': {sub_err}")
                                                     # Fall back to parent album
                                                     target_album_id = album_id
+                                                    current_sub_album_name = None  # Clear sub-album name on failure
 
                                     # Add file to album (copies to album storage)
                                     album_file_path = album_manager.add_photo_to_album(
@@ -599,9 +584,44 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                                         total_album_additions += 1
                                         logger.debug(f"Added to album: {os.path.basename(target_path)}")
 
+                                        # Track album info for audit logging
+                                        target_album = album_manager.get_album(target_album_id)
+                                        if target_album:
+                                            audit_album_name = target_album['album_name']
+                                            audit_album_path = album_file_path
+                                            # If this is a sub-album, track the sub-album name
+                                            if current_sub_album_name:
+                                                audit_sub_album_name = current_sub_album_name
+
                             except Exception as album_err:
                                 # Album errors are non-fatal - log and continue
                                 logger.warning(f"Failed to add file to album: {album_err}")
+
+                        # Log successful operation to audit (after album addition so we have album info)
+                        if operation_success and audit_manager and session_id:
+                            try:
+                                operation_duration = int((time_module.time() - operation_start) * 1000)
+                                file_size = os.path.getsize(target_path) if os.path.exists(target_path) else 0
+                                file_hash = original_file.get("file_hash")
+
+                                audit_manager.log_file_operation(
+                                    session_id=session_id,
+                                    source_path=file_path,
+                                    operation=operation_type,
+                                    status='success',
+                                    destination_path=target_path,
+                                    file_hash=file_hash,
+                                    file_size=file_size,
+                                    creation_date=f"{year}-{month}-{day}",
+                                    date_source=date_source if 'date_source' in dir() else None,
+                                    date_reliable=is_reliable if 'is_reliable' in dir() else None,
+                                    duration_ms=operation_duration,
+                                    album_name=audit_album_name,
+                                    album_path=audit_album_path,
+                                    sub_album_name=audit_sub_album_name
+                                )
+                            except Exception as audit_err:
+                                logger.debug(f"Failed to log audit: {audit_err}")
 
                         # if file = heic convert to jpeg
                         try:
