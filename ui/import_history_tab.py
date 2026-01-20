@@ -54,6 +54,7 @@ class FileLogTableModel(QAbstractTableModel):
         ("dest_filename", "Dest Filename"),
         ("operation", "Operation"),
         ("status", "Status"),
+        ("album", "Album"),
         ("file_hash", "Hash"),
         ("details", "Details"),
     ]
@@ -142,6 +143,16 @@ class FileLogTableModel(QAbstractTableModel):
         elif col_key == "status":
             return (log.get('status') or '').title()
 
+        elif col_key == "album":
+            # Display sub-album name if present, otherwise album name
+            sub_album = log.get('sub_album_name') or ''
+            album_name = log.get('album_name') or ''
+            if sub_album:
+                return sub_album
+            elif album_name:
+                return album_name
+            return ''
+
         elif col_key == "file_hash":
             h = log.get('file_hash') or ''
             return h[:12] + "..." if h and len(h) > 12 else h
@@ -160,6 +171,14 @@ class FileLogTableModel(QAbstractTableModel):
             return log.get('destination_path') or ''
         elif col_key == "file_hash":
             return log.get('file_hash') or ''
+        elif col_key == "album":
+            # Show album path in tooltip
+            album_path = log.get('album_path') or ''
+            album_name = log.get('album_name') or ''
+            sub_album = log.get('sub_album_name') or ''
+            if album_path:
+                return f"Album: {album_name}\nSub-Album: {sub_album}\nPath: {album_path}" if sub_album else f"Album: {album_name}\nPath: {album_path}"
+            return ''
         elif col_key == "details":
             return log.get('error_message') or log.get('filter_reason') or ''
         return ''
@@ -182,6 +201,11 @@ class FileLogTableModel(QAbstractTableModel):
             return (log.get('operation') or '').lower()
         elif col_key == "status":
             return (log.get('status') or '').lower()
+        elif col_key == "album":
+            # Sort by sub-album name if present, otherwise album name
+            sub_album = log.get('sub_album_name') or ''
+            album_name = log.get('album_name') or ''
+            return (sub_album or album_name).lower()
         elif col_key == "file_hash":
             return log.get('file_hash') or ''
         elif col_key == "details":
@@ -278,6 +302,8 @@ class FileLogFilterProxyModel(QSortFilterProxyModel):
                 log.get('file_hash') or '',
                 log.get('error_message') or '',
                 log.get('filter_reason') or '',
+                log.get('album_name') or '',
+                log.get('sub_album_name') or '',
             ]).lower()
             if self._search_text not in searchable:
                 return False
@@ -292,9 +318,9 @@ class FileLogTableView(QTableView):
     """
 
     # Minimum column widths to prevent columns from becoming too narrow
-    MIN_WIDTHS = [100, 80, 100, 80, 70, 60, 80, 80]
+    MIN_WIDTHS = [100, 80, 100, 80, 70, 60, 80, 80, 80]
     # Column weight ratios for proportional resizing
-    COLUMN_WEIGHTS = [2.5, 1.5, 2.5, 1.5, 1.0, 0.8, 1.0, 1.5]
+    COLUMN_WEIGHTS = [2.5, 1.5, 2.5, 1.5, 1.0, 0.8, 1.2, 1.0, 1.5]
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -362,7 +388,7 @@ class FileLogTableView(QTableView):
 
     def _do_resize_columns(self):
         """Actually perform the column resize."""
-        if not self.model() or self.model().columnCount() < 8:
+        if not self.model() or self.model().columnCount() < 9:
             return
 
         self._auto_resizing = True
@@ -504,6 +530,18 @@ class FileDetailsWidget(QScrollArea):
         # Hash
         if log.get('file_hash'):
             self._add_field("SHA-256", log.get('file_hash'))
+
+        # Album details (if file was added to album)
+        album_name = log.get('album_name')
+        if album_name:
+            self._add_heading("Album Details")
+            self._add_field("Album", album_name)
+            sub_album_name = log.get('sub_album_name')
+            if sub_album_name:
+                self._add_field("Sub-Album", sub_album_name)
+            album_path = log.get('album_path')
+            if album_path:
+                self._add_field("Album Path", album_path)
 
         # File information (if file exists)
         if actual_path and os.path.exists(actual_path):
@@ -957,10 +995,11 @@ class ImportHistoryTab(QWidget):
 
             self.session_combo.blockSignals(False)
 
-            # Select first session
+            # Select most recent session (index 1, since index 0 is "All Sessions")
+            # This is faster to load and more likely what the user wants to see
             if sessions:
-                self.session_combo.setCurrentIndex(0)
-                self.on_session_selected(0)
+                self.session_combo.setCurrentIndex(1)
+                self.on_session_selected(1)
 
         except Exception as e:
             logger.error(f"Failed to refresh sessions: {e}", exc_info=True)

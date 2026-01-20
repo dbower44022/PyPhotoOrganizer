@@ -8,14 +8,15 @@
 4. [Understanding the Interface](#understanding-the-interface)
 5. [Database Management](#database-management)
 6. [Source Folders](#source-folders)
-7. [Processing Photos](#processing-photos)
-8. [Import History](#import-history)
-9. [Photo Review App](#photo-review-app)
-10. [Date Corrections (in Photo Review App)](#date-corrections)
-11. [File Version Management](#file-version-management)
-12. [Settings](#settings)
-13. [Troubleshooting](#troubleshooting)
-14. [FAQ](#faq)
+7. [Album Association for Source Folders](#album-association-for-source-folders)
+8. [Processing Photos](#processing-photos)
+9. [Import History](#import-history)
+10. [Photo Review App](#photo-review-app)
+11. [Date Corrections (in Photo Review App)](#date-corrections)
+12. [File Version Management](#file-version-management)
+13. [Settings](#settings)
+14. [Troubleshooting](#troubleshooting)
+15. [FAQ](#faq)
 
 ---
 
@@ -194,6 +195,94 @@ Source folders are where your unorganized photos currently reside. Common source
 - Don't add folders inside your archive as sources
 - Keep source folders accessible during processing
 - Large sources (100,000+ files) may take hours on first run
+
+---
+
+## Album Association for Source Folders
+
+You can associate an album with each source folder to automatically add imported photos to that album. This is perfect for:
+
+- **Phone backups**: All photos from your phone automatically go to a "Phone Photos" album
+- **Camera imports**: SD card imports go to a "Camera" album
+- **Photo frame folders**: Automatically populate albums that sync to digital photo frames
+- **Family collections**: Different family members' photos go to separate albums
+
+### Setting Up Album Association
+
+1. Go to **Import Settings** tab
+2. In the source folder table, find the **Album** column
+3. Click the dropdown and select an album, or choose **"+ New Album..."** to create one
+
+### Creating a New Album
+
+When you select **"+ New Album..."** from the dropdown:
+
+1. **Album Name**: Enter a descriptive name (e.g., "Phone Photos", "2024 Vacation")
+2. **Storage Location**: Browse to select where album copies will be stored
+   - This is separate from your main archive
+   - Ideal for folders that sync to photo frames or cloud services
+3. **Description**: Optional notes about the album
+4. **Sync Deletions**: When checked, photos removed from archive are also removed from album
+5. Click **OK** to create the album
+
+### Sub-Albums for Subdirectories
+
+Enable the **Sub-Albums** checkbox to automatically create sub-albums based on your source folder structure.
+
+**Example**: If your phone backup has this structure:
+```
+/Phone/
+├── Camera/
+│   └── photo1.jpg
+├── Screenshots/
+│   └── screenshot1.png
+└── WhatsApp/
+    └── Media/
+        └── image1.jpg
+```
+
+With "Phone Photos" album and Sub-Albums enabled, you get:
+- "Phone Photos - Camera" album (contains photo1.jpg)
+- "Phone Photos - Screenshots" album (contains screenshot1.png)
+- "Phone Photos - WhatsApp - Media" album (contains image1.jpg)
+
+**Sub-Album Storage**: Sub-albums are stored in subfolders of the parent album's location:
+```
+/Albums/Phone Photos/
+├── Camera/
+│   └── photo1.jpg
+├── Screenshots/
+│   └── screenshot1.png
+└── WhatsApp/
+    └── Media/
+        └── image1.jpg
+```
+
+### How It Works
+
+During import:
+
+1. Photos are first copied to your main archive (as always)
+2. If the source folder has an album association:
+   - A copy is also added to the album's storage location
+   - If sub-albums are enabled, the appropriate sub-album is used
+   - New sub-albums are created automatically when needed
+3. The import summary shows how many files were added to albums
+
+### Important Notes
+
+- **Files are copied twice**: Once to archive, once to album storage
+- **Album failures don't stop import**: If album storage is unavailable, archive import continues
+- **Albums are separate from archive**: Deleting from archive optionally removes from albums (sync_deletions)
+- **Sub-Albums checkbox**: Only enabled when an album is selected
+- **Settings persist**: Album associations are saved and restored when you restart the application
+
+### Best Practices
+
+1. **Use fast storage for albums**: Album storage can be on slower drives since it's secondary
+2. **Consider sync_deletions carefully**: Disable if album is your only backup
+3. **Organize by device/source**: Associate each device's backup folder with its own album
+4. **Use sub-albums for complex sources**: Great for phones with many app folders
 
 ---
 

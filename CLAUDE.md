@@ -58,7 +58,7 @@ python main.py              # CLI mode
 | Module | Purpose |
 |--------|---------|
 | `main_window.py` | Main window, 6-tab interface |
-| `import_settings_tab.py` | Source folders, filtering, Start/Stop buttons |
+| `import_settings_tab.py` | Source folders, album associations, filtering, Start/Stop buttons |
 | `archive_settings_tab.py` | Organization template, file renaming |
 | `system_settings_tab.py` | Database info, copy/move mode, performance |
 | `progress_tab.py` | Real-time progress display |
@@ -74,7 +74,8 @@ All tables in SQLite database (default: `PhotoDB.db`):
 |-------|---------|
 | `DatabaseMetadata` | Archive location, settings, schema version |
 | `UniquePhotos` | File hashes, paths, creation dates |
-| `SourceDirectories` | Persistent source folder configs |
+| `SourceDirectories` | Persistent source folder configs with album associations |
+| `SourceDirectorySubAlbums` | Tracks auto-created sub-albums for source subdirectories |
 | `UnreliableDates` | Files with questionable dates |
 | `FileHashHistory` | Hash history for duplicate detection after EXIF edits |
 | `FileRenameHistory` | Original→renamed filename mappings |
@@ -203,6 +204,83 @@ Albums are photo collections stored in separate locations (ideal for photo frame
 - Flat file structure (no date subfolders)
 - `sync_deletions` option: auto-remove when deleted from archive
 - `AlbumManager` handles CRUD and photo operations
+- Can be associated with source directories for automatic import-time additions
+
+### Source Directory Album Association
+
+Allows automatic album population during import by associating albums with source directories.
+
+**Database Schema:**
+
+```sql
+-- SourceDirectories table (extended columns)
+album_id INTEGER,                    -- FK to Albums.id, NULL = no association
+enable_sub_albums INTEGER DEFAULT 0  -- 0 = disabled, 1 = create sub-albums
+
+-- SourceDirectorySubAlbums table (tracks auto-created sub-albums)
+CREATE TABLE SourceDirectorySubAlbums (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_directory_id INTEGER NOT NULL,
+    parent_album_id INTEGER NOT NULL,
+    sub_album_id INTEGER NOT NULL,
+    relative_subdir_path TEXT NOT NULL,
+    created_timestamp TEXT NOT NULL,
+    UNIQUE(source_directory_id, relative_subdir_path)
+);
+```
+
+**UI Components:**
+
+The source directory table in Import Settings includes two additional columns:
+- **Album dropdown**: Select album or "(None)" or "+ New Album..."
+- **Sub-Albums checkbox**: Enable automatic sub-album creation (only enabled when album selected)
+
+`NewAlbumDialog` allows creating albums directly from the import settings without switching tabs.
+
+**Import Flow Integration:**
+
+Hook point in `main.py:organize_files()` after successful file copy:
+
+```
+For each file successfully copied to archive:
+1. Find matching source directory from source_album_mapping
+2. If source has album association:
+   a. If sub-albums disabled: add to parent album
+   b. If sub-albums enabled AND file is in subdirectory:
+      - Derive sub-album name: "{Parent Album} - {Subdir1} - {Subdir2}"
+      - Get existing or create new sub-album
+      - Sub-album storage: parent_storage/{relative_subdir}/
+      - Track mapping in SourceDirectorySubAlbums table
+      - Add file to sub-album
+   c. Copy file to album storage via AlbumManager.add_photo_to_album()
+```
+
+**Sub-Album Naming Convention:**
+
+| Source Path | File Location | Sub-Album Name |
+|-------------|---------------|----------------|
+| `/Photos/Phone` (Album: "Phone") | `/Photos/Phone/Camera/pic.jpg` | "Phone - Camera" |
+| `/Photos/Phone` (Album: "Phone") | `/Photos/Phone/Screenshots/img.png` | "Phone - Screenshots" |
+| `/Photos/Phone` (Album: "Phone") | `/Photos/Phone/WhatsApp/Media/photo.jpg` | "Phone - WhatsApp - Media" |
+
+**Key Methods:**
+
+| Location | Method | Purpose |
+|----------|--------|---------|
+| `database_metadata.py` | `update_source_album()` | Set/clear album association |
+| `database_metadata.py` | `update_source_sub_albums_enabled()` | Toggle sub-albums |
+| `database_metadata.py` | `get_or_create_sub_album()` | Track sub-album mappings |
+| `import_settings_tab.py` | `get_source_album_mapping()` | Build mapping for worker |
+| `import_settings_tab.py` | `_create_new_album()` | Dialog-based album creation |
+| `main.py` | `organize_files()` | Album addition after copy |
+| `album_manager.py` | `add_photo_to_album()` | Copy file to album storage |
+
+**Error Handling:**
+
+- Album failures are non-fatal (logged, import continues)
+- If album storage unavailable, skip album addition
+- If sub-album creation fails, fall back to parent album
+- Results include `total_album_additions` count
 
 ### Theme System
 
