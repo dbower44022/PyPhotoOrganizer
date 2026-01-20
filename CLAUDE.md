@@ -74,11 +74,10 @@ All tables in SQLite database (default: `PhotoDB.db`):
 | Table | Purpose |
 |-------|---------|
 | `DatabaseMetadata` | Archive location, settings, schema version |
-| `UniquePhotos` | File hashes, paths, creation dates |
+| `UniquePhotos` | File hashes, paths, creation dates, revision tracking (Schema v5) |
 | `SourceDirectories` | Persistent source folder configs with album associations |
 | `SourceDirectorySubAlbums` | Tracks auto-created sub-albums for source subdirectories |
 | `UnreliableDates` | Files with questionable dates |
-| `FileHashHistory` | Hash history for duplicate detection after EXIF edits |
 | `FileRenameHistory` | Original→renamed filename mappings |
 | `DeletedFiles` | Soft-delete tracking with restore capability |
 | `FileVersions` | Revision history for rotations/edits |
@@ -87,6 +86,8 @@ All tables in SQLite database (default: `PhotoDB.db`):
 | `ImportSession` | Audit session tracking |
 | `FileProcessingLog` | Per-file operation audit log |
 | `DuplicateMapping` | Original-to-duplicate relationships |
+
+**Note (Schema v5):** The `FileHashHistory` table is no longer used. All hashes (including revision hashes) are stored directly in `UniquePhotos` with `file_hash` as the primary key. The `revised_photo` column links revisions to their parent file.
 
 ### Database Connection Pattern
 
@@ -145,14 +146,20 @@ For files ≥1MB:
 
 Small files (<1MB): Direct full hash.
 
-### Hash History System
+### Hash History System (Schema v5)
 
-When EXIF is modified, file hash changes. `FileHashHistory` table preserves original hashes so the file is still detected as duplicate if re-imported.
+When EXIF is modified, file hash changes. In Schema v5, all hashes (including revision hashes) are stored directly in `UniquePhotos` with `file_hash` as the primary key:
 
+- Original file: `file_hash` = original hash, `revised_photo` = NULL
+- Revision: `file_hash` = new hash, `revised_photo` = original hash, `revision_reason` = 'date_correction'
+
+Duplicate detection uses a simple primary key lookup:
 ```python
-# After EXIF write:
-db.add_hash_to_history(old_hash, new_hash, reason='date_correction')
+# Check if hash exists (O(1) via indexed primary key)
+is_duplicate = db.has_hash(file_hash)
 ```
+
+The `get_all_historical_hashes()` method returns an empty set for backward compatibility, since all hashes are already in `get_all_hashes()`.
 
 ### Date Extraction Priority
 
@@ -179,17 +186,56 @@ The Import History tab includes an "Override Skip" button that allows users to i
 **How it works:**
 
 1. User selects files with `operation='skip_filtered'` in Import History
-2. Clicking "Override Skip" validates selection and shows confirmation dialog
-3. Uses `ReprocessWorker` to import files directly (bypasses PhotoFilter)
-4. Files are also added to albums if source directory has album association
+2. Clicking "Override Skip" validates selection and shows confirmation dialog (with total file size)
+3. Selected rows are highlighted (yellow background) as visual feedback
+4. Uses `ReprocessWorker` to import files directly (bypasses PhotoFilter)
+5. Rows are removed in real-time as each file completes (success or duplicate)
+6. Session view and scroll position are preserved after completion
+7. Files are also added to albums if source directory has album association
+
+**UI Features:**
+
+| Feature | Description |
+|---------|-------------|
+| **Select All Visible** button | Quickly select all rows in current filtered view |
+| **Override Skip** button | Import selected filtered files |
+| **Undo Override** button | Undo last override skip (deletes files, removes DB entries, restores rows) |
+| **"Recently Overridden" filter** | Show dropdown option to view files imported via Override Skip |
+| **Visual feedback** | Yellow highlight on rows being processed, dimmed text |
+| **Real-time removal** | Rows removed immediately as each file completes |
+| **State preservation** | Session selection and scroll position preserved after operation |
 
 **Key implementation:**
 
 | Location | Component | Purpose |
 |----------|-----------|---------|
-| `ui/import_history_tab.py` | `override_skip_files()` | Main handler - validates selection, builds album mapping, creates worker |
-| `ui/import_history_tab.py` | `_on_override_skip_*` | Signal handlers for progress, completion, errors, cancellation |
-| `ui/reprocess_worker.py` | `ReprocessWorker` | Extended to accept `album_manager` and `source_album_mapping` parameters |
+| `ui/import_history_tab.py` | `override_skip_files()` | Main handler - validates selection, builds album mapping, preserves state, creates worker |
+| `ui/import_history_tab.py` | `_on_override_skip_file_processed()` | Real-time row removal as files complete |
+| `ui/import_history_tab.py` | `_on_override_skip_completed()` | Final cleanup, undo state storage, result message |
+| `ui/import_history_tab.py` | `undo_last_override_skip()` | Undo capability - deletes files, removes DB entries, restores rows |
+| `ui/import_history_tab.py` | `_select_all_visible()` | Select all rows in current view |
+| `ui/reprocess_worker.py` | `ReprocessWorker` | Extended with `file_processed` signal for per-file notifications |
+
+**FileLogTableModel enhancements:**
+
+| Method | Purpose |
+|--------|---------|
+| `removeRowsBySourcePath(paths)` | Remove rows matching source paths |
+| `markRowsAsProcessing(paths)` | Mark rows with yellow background during processing |
+| `clearProcessingFlags()` | Clear all processing visual state |
+
+**ReprocessWorker signals:**
+
+```python
+# Existing signals
+progress_update = Signal(int, int, str)  # current, total, filename
+status_update = Signal(str)              # status message
+completed = Signal(dict)                 # results dictionary
+error_occurred = Signal(str)             # error message
+
+# New signal for real-time UI updates
+file_processed = Signal(str, str)        # source_path, result ('success', 'skipped', 'failed')
+```
 
 **Album support in ReprocessWorker:**
 
@@ -212,13 +258,37 @@ After successful database insert, ReprocessWorker:
 2. Handles sub-albums if enabled (creates if needed)
 3. Adds file to album via `AlbumManager.add_photo_to_album()`
 4. Logs album info to audit trail (album_name, album_path, sub_album_name)
+5. Emits `file_processed` signal for real-time UI updates
+
+**Undo Capability:**
+
+The `undo_last_override_skip()` method allows reversing the last override skip operation:
+1. Deletes imported files from the archive
+2. Removes entries from UniquePhotos database table
+3. Restores rows to the filtered view
+4. Clears the recently overridden list for undone files
+5. Source files are never affected (read-only policy)
+
+**State preservation tracking:**
+
+```python
+# Stored before operation starts
+self._preserved_session_id = current_session_id
+self._preserved_scroll_position = view.verticalScrollBar().value()
+self._preserved_selection_paths = {source_paths...}
+
+# Restored after completion
+self._last_override_skip_results = results  # For undo capability
+self._recently_overridden_logs.append(...)  # For filter
+```
 
 **UI Guidelines (per project rules):**
 
-- Button is always enabled (never grayed out)
+- All buttons always enabled (never grayed out)
 - If no selection: shows `QMessageBox.information()` with guidance
 - If selection contains non-filtered files: shows informative message with tip
 - If source files missing: warns user but continues with valid files
+- Confirmation dialog shows file count and total size
 
 ### Organization Templates
 

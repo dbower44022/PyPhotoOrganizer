@@ -1363,6 +1363,8 @@ When a file is selected:
 - **Copy Source Path**: Copy file path to clipboard
 - **Process File(s)**: Reprocess selected files with current settings
 - **Override Skip**: Import filtered files bypassing size/dimension filters
+- **Undo Override**: Undo the last override skip operation
+- **Select All Visible**: Select all visible rows in the current view
 
 ### Override Skip Feature
 
@@ -1376,27 +1378,56 @@ The **Override Skip** button allows you to import files that were previously fil
 
 1. Go to the **Import History** tab
 2. Use the **Show** dropdown and select **"Filtered (Icons/Thumbnails)"**
-3. Select one or more filtered files in the list
+3. Select one or more filtered files (or use **Select All Visible** button)
 4. Click the **Override Skip** button
 5. Review the confirmation dialog showing:
    - Number of files to import
+   - Total file size
    - Destination archive location
    - Organization template
 6. Click **Yes** to proceed
 
-**What happens:**
+**What happens during processing:**
+
+- Selected rows are highlighted yellow to show they're being processed
+- As each file completes, its row is immediately removed from the view
+- You can see real-time progress in the progress dialog
+- The current session and scroll position are preserved
+
+**After completion:**
 
 - Files are imported directly to your archive, bypassing all PhotoFilter criteria
 - Duplicate detection still applies (files already in archive are skipped)
 - If the source folder has an album association, files are also added to that album
-- A new import session is created and appears in the session list
-- Progress dialog shows real-time status
+- Successfully imported files appear in the **"Recently Overridden"** filter
+- A completion message shows the results (successful, duplicates skipped, failed)
+
+**Viewing imported files:**
+
+After Override Skip completes, you can view the imported files by:
+1. Using the **Show** dropdown and selecting **"Recently Overridden"**
+2. Or switching to **"New Files (Added to Archive)"** to see all imported files
+
+**Undo Override Skip:**
+
+If you made a mistake, you can undo the last override skip operation:
+
+1. Click the **Undo Override** button
+2. Review the confirmation dialog
+3. Click **Yes** to proceed
+
+This will:
+- Delete the imported files from your archive
+- Remove entries from the database
+- Restore the rows to the Filtered view
+- Your source files are never affected
 
 **Important notes:**
 
 - Only files with "skip_filtered" status can be processed with Override Skip
 - Source files must still exist on disk
 - If some selected files no longer exist, you'll see a warning but valid files will still be imported
+- Undo only works for the most recent override skip operation
 
 ### Exporting Reports
 
