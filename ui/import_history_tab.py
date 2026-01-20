@@ -911,6 +911,14 @@ class ImportHistoryTab(QWidget):
         self.reprocess_btn.setToolTip("Reprocess selected file(s) with current settings")
         export_layout.addWidget(self.reprocess_btn)
 
+        # Override Skip button (for filtered files)
+        self.override_skip_btn = QPushButton("Override Skip")
+        self.override_skip_btn.clicked.connect(self.override_skip_files)
+        self.override_skip_btn.setToolTip(
+            "Import selected filtered files, bypassing size/dimension filters"
+        )
+        export_layout.addWidget(self.override_skip_btn)
+
         # Delete session button
         self.delete_btn = QPushButton("Delete Session")
         self.delete_btn.clicked.connect(self.delete_session)
@@ -1757,6 +1765,190 @@ class ImportHistoryTab(QWidget):
         if hasattr(self, 'reprocess_worker'):
             self.reprocess_worker.stop()
             logger.info("Reprocess cancelled by user")
+
+    def override_skip_files(self):
+        """Import selected filtered files, bypassing PhotoFilter criteria."""
+        # 1. Check database connection
+        if not self.database_path:
+            QMessageBox.information(self, "No Database",
+                "Please open a database first.")
+            return
+
+        # 2. Get selected rows
+        indexes = self._view.selectionModel().selectedRows()
+        if not indexes:
+            QMessageBox.information(self, "No Selection",
+                "Please select one or more files to import.")
+            return
+
+        # 3. Filter to only skip_filtered records
+        filtered_records = []
+        for proxy_index in indexes:
+            source_index = self._proxy.mapToSource(proxy_index)
+            log = self._model.getLog(source_index.row())
+            if log and log.get('operation') == 'skip_filtered':
+                filtered_records.append(log)
+
+        if not filtered_records:
+            QMessageBox.information(self, "No Filtered Files",
+                "Please select files that were filtered.\n\n"
+                "Tip: Use the 'Show' dropdown and select "
+                "'Filtered (Icons/Thumbnails)' to see filtered files.")
+            return
+
+        # 4. Verify source files exist
+        missing_files = []
+        valid_records = []
+        for record in filtered_records:
+            source_path = record.get('source_path', '')
+            if os.path.exists(source_path):
+                valid_records.append(record)
+            else:
+                missing_files.append(os.path.basename(source_path))
+
+        if missing_files:
+            msg = f"{len(missing_files)} file(s) no longer exist:\n"
+            msg += "\n".join(missing_files[:5])
+            if len(missing_files) > 5:
+                msg += f"\n... and {len(missing_files) - 5} more"
+            if not valid_records:
+                QMessageBox.information(self, "Files Not Found", msg)
+                return
+            QMessageBox.warning(self, "Some Files Missing", msg)
+
+        if not valid_records:
+            return
+
+        # 5. Get archive settings
+        from database_metadata import DatabaseMetadata
+        db_metadata = DatabaseMetadata(self.database_path)
+        metadata = db_metadata.get_metadata()
+        archive_location = metadata.get('archive_location')
+        organization_template = metadata.get('organization_template', '{year}/{month}/{day}')
+
+        if not archive_location:
+            QMessageBox.critical(self, "Configuration Error",
+                "Archive location not configured.")
+            return
+
+        # 6. Show confirmation
+        count = len(valid_records)
+        reply = QMessageBox.question(
+            self, "Confirm Override Skip",
+            f"Import {count} filtered file(s)?\n\n"
+            f"These files were previously skipped by the photo filter "
+            f"(size/dimension criteria).\n\n"
+            f"Destination: {archive_location}\n"
+            f"Organization: {organization_template}\n\n"
+            "Duplicate files will be skipped automatically.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # 7. Build source album mapping from database
+        source_album_mapping = {}
+        try:
+            source_dirs = db_metadata.get_source_directories()
+            for sd in source_dirs:
+                if sd.get('album_id'):
+                    source_album_mapping[sd['path']] = {
+                        'album_id': sd['album_id'],
+                        'enable_sub_albums': bool(sd.get('enable_sub_albums', 0))
+                    }
+        except Exception as e:
+            logger.warning(f"Failed to load source album mappings: {e}")
+
+        # 8. Get album manager if albums configured
+        album_manager = None
+        if source_album_mapping:
+            from album_manager import AlbumManager
+            album_manager = AlbumManager(self.database_path)
+
+        # 9. Create and start worker (reuse ReprocessWorker)
+        from ui.reprocess_worker import ReprocessWorker
+
+        self.override_skip_worker = ReprocessWorker(
+            database_path=self.database_path,
+            file_records=valid_records,
+            archive_location=archive_location,
+            organization_template=organization_template,
+            copy_mode=True,
+            audit_manager=self.audit_manager,
+            album_manager=album_manager,
+            source_album_mapping=source_album_mapping
+        )
+
+        # Connect signals
+        self.override_skip_worker.progress_update.connect(self._on_override_skip_progress)
+        self.override_skip_worker.status_update.connect(self._on_override_skip_status)
+        self.override_skip_worker.completed.connect(self._on_override_skip_completed)
+        self.override_skip_worker.error_occurred.connect(self._on_override_skip_error)
+
+        # Create progress dialog
+        self.override_skip_progress_dialog = QProgressDialog(
+            "Initializing...", "Cancel", 0, count, self
+        )
+        self.override_skip_progress_dialog.setWindowTitle("Importing Filtered Files")
+        self.override_skip_progress_dialog.setWindowModality(Qt.WindowModal)
+        self.override_skip_progress_dialog.setMinimumDuration(0)
+        self.override_skip_progress_dialog.canceled.connect(self._on_override_skip_cancel)
+
+        # Start worker
+        self.override_skip_worker.start()
+        logger.info(f"Started override skip import for {count} file(s)")
+
+    def _on_override_skip_progress(self, current, total, filename):
+        """Update progress dialog for override skip operation."""
+        if hasattr(self, 'override_skip_progress_dialog'):
+            self.override_skip_progress_dialog.setValue(current)
+            self.override_skip_progress_dialog.setLabelText(f"Importing: {filename}")
+
+    def _on_override_skip_status(self, message):
+        """Update status for override skip operation."""
+        logger.info(f"Override skip status: {message}")
+
+    def _on_override_skip_completed(self, results):
+        """Handle override skip completion."""
+        if hasattr(self, 'override_skip_progress_dialog'):
+            self.override_skip_progress_dialog.close()
+
+        successful = results.get('successful', 0)
+        failed = results.get('failed', 0)
+        skipped = results.get('skipped', 0)
+
+        msg = f"Override Skip Complete\n\n"
+        msg += f"Successfully imported: {successful}\n"
+        msg += f"Duplicates skipped: {skipped}\n"
+        msg += f"Failed: {failed}"
+
+        # Add destination info for successful files
+        if successful > 0:
+            successful_files = results.get('successful_files', [])
+            if successful_files:
+                first_file = successful_files[0]
+                dest_path = first_file.get('destination_path', '')
+                if dest_path:
+                    msg += f"\n\nFiles copied to: {os.path.dirname(dest_path)}"
+
+        QMessageBox.information(self, "Override Skip Complete", msg)
+        self.refresh_sessions()
+        logger.info(f"Override skip completed: {successful} successful, {skipped} skipped, {failed} failed")
+
+    def _on_override_skip_error(self, error_message):
+        """Handle override skip error."""
+        if hasattr(self, 'override_skip_progress_dialog'):
+            self.override_skip_progress_dialog.close()
+        QMessageBox.critical(self, "Error", f"Override skip failed:\n{error_message}")
+        logger.error(f"Override skip error: {error_message}")
+
+    def _on_override_skip_cancel(self):
+        """Handle override skip cancellation."""
+        if hasattr(self, 'override_skip_worker'):
+            self.override_skip_worker.stop()
+            logger.info("Override skip cancelled by user")
 
     def open_selected_file(self):
         """Open the selected file with default application."""

@@ -34,7 +34,8 @@ class ReprocessWorker(QThread):
 
     def __init__(self, database_path: str, file_records: List[Dict[str, Any]],
                  archive_location: str, organization_template: str,
-                 copy_mode: bool = True, audit_manager: Optional[AuditManager] = None):
+                 copy_mode: bool = True, audit_manager: Optional[AuditManager] = None,
+                 album_manager=None, source_album_mapping: Optional[Dict] = None):
         """
         Initialize reprocess worker.
 
@@ -45,6 +46,9 @@ class ReprocessWorker(QThread):
             organization_template: Organization template string
             copy_mode: True for copy, False for move
             audit_manager: Optional AuditManager for logging operations
+            album_manager: Optional AlbumManager for adding files to albums
+            source_album_mapping: Dict mapping source paths to album config
+                                  {source_path: {'album_id': int, 'enable_sub_albums': bool}}
         """
         super().__init__()
         self.database_path = database_path
@@ -53,6 +57,8 @@ class ReprocessWorker(QThread):
         self.organization_template = organization_template
         self.copy_mode = copy_mode
         self.audit_manager = audit_manager
+        self.album_manager = album_manager
+        self.source_album_mapping = source_album_mapping or {}
         self._should_stop = False
 
         # Session tracking
@@ -261,6 +267,72 @@ class ReprocessWorker(QThread):
 
                         # Note: In v5 schema, duplicate detection is via primary key lookup (no hash history table)
 
+                    # Add to album if source has album association
+                    audit_album_name = None
+                    audit_album_path = None
+                    audit_sub_album_name = None
+
+                    if self.album_manager and self.source_album_mapping and file_hash:
+                        try:
+                            # Find matching source directory
+                            matching_source = None
+                            relative_subdir = ""
+                            for source_path_key in self.source_album_mapping:
+                                if source_path.startswith(source_path_key):
+                                    matching_source = source_path_key
+                                    rel_path = os.path.relpath(source_path, source_path_key)
+                                    rel_dir = os.path.dirname(rel_path)
+                                    if rel_dir and rel_dir != '.':
+                                        relative_subdir = rel_dir
+                                    break
+
+                            if matching_source:
+                                album_config = self.source_album_mapping[matching_source]
+                                album_id = album_config['album_id']
+                                enable_sub_albums = album_config.get('enable_sub_albums', False)
+                                target_album_id = album_id
+
+                                # Handle sub-albums if enabled
+                                if enable_sub_albums and relative_subdir:
+                                    parent_album = self.album_manager.get_album(album_id)
+                                    if parent_album:
+                                        subdir_parts = relative_subdir.replace(os.sep, ' - ')
+                                        sub_album_name = f"{parent_album['album_name']} - {subdir_parts}"
+                                        audit_sub_album_name = sub_album_name
+
+                                        existing = self.album_manager.get_album_by_name(sub_album_name)
+                                        if existing:
+                                            target_album_id = existing['id']
+                                        else:
+                                            # Create sub-album
+                                            parent_storage = parent_album['storage_location']
+                                            sub_storage = os.path.join(parent_storage, relative_subdir)
+                                            new_id = self.album_manager.create_album(
+                                                name=sub_album_name,
+                                                storage_location=sub_storage,
+                                                description=f"Auto-created for {relative_subdir}",
+                                                sync_deletions=parent_album.get('sync_deletions', True)
+                                            )
+                                            if new_id:
+                                                target_album_id = new_id
+                                                logger.info(f"Created sub-album: {sub_album_name}")
+
+                                # Add file to album
+                                album_file_path = self.album_manager.add_photo_to_album(
+                                    album_id=target_album_id,
+                                    file_hash=file_hash,
+                                    archive_path=target_path
+                                )
+                                if album_file_path:
+                                    target_album = self.album_manager.get_album(target_album_id)
+                                    if target_album:
+                                        audit_album_name = target_album['album_name']
+                                        audit_album_path = album_file_path
+                                        logger.info(f"Added to album '{audit_album_name}': {os.path.basename(album_file_path)}")
+
+                        except Exception as album_err:
+                            logger.warning(f"Failed to add file to album: {album_err}")
+
                     # Log to audit
                     if self.audit_manager and self.session_id:
                         self.audit_manager.log_file_operation(
@@ -275,7 +347,10 @@ class ReprocessWorker(QThread):
                             creation_date=create_datetime,
                             date_source=date_source,
                             date_reliable=is_reliable,
-                            duration_ms=int((time.time() - file_start_time) * 1000)
+                            duration_ms=int((time.time() - file_start_time) * 1000),
+                            album_name=audit_album_name,
+                            album_path=audit_album_path,
+                            sub_album_name=audit_sub_album_name
                         )
 
                     logger.info(f"✓ Successfully reprocessed: {filename}")
