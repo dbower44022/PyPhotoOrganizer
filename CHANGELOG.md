@@ -5,6 +5,41 @@ All notable changes to PyPhotoOrganizer will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-01-20
+
+### Added
+
+**Override Skip Feature Improvements**
+
+The Override Skip workflow in Import History has been significantly enhanced with better UX and new capabilities:
+
+- **Select All Visible Button**: Quickly select all visible rows in the current filtered view
+- **Undo Override Button**: Undo the last override skip operation (deletes imported files from archive, removes database entries, restores rows to filtered view)
+- **"Recently Overridden" Filter**: New Show dropdown option to view files imported via Override Skip
+- **File Size in Confirmation**: Confirmation dialog now shows total file size of selected files
+- **Visual Feedback During Processing**: Selected rows highlighted with yellow background and dimmed text while being processed
+- **Real-Time Row Removal**: Rows are removed immediately as each file completes (success or duplicate) rather than waiting for batch completion
+- **State Preservation**: Session selection and scroll position preserved after override skip completes (no longer jumps to most recent session)
+
+**ReprocessWorker Enhancements**
+
+- New `file_processed` signal emitted after each file completes for real-time UI updates
+- Successful files now include `file_hash` in results for undo capability
+
+**FileLogTableModel Enhancements**
+
+- `removeRowsBySourcePath(paths)`: Remove rows matching source paths
+- `markRowsAsProcessing(paths)`: Mark rows with visual processing state
+- `clearProcessingFlags()`: Clear processing visual state
+- BackgroundRole support for yellow highlight on processing rows
+- ForegroundRole support for dimmed text on processing rows
+
+### Fixed
+
+- **Schema v5 Compatibility**: Added `get_all_historical_hashes()` method to PhotoDatabase (returns empty set since v5 stores all hashes in UniquePhotos)
+
+---
+
 ## [3.1.0] - 2026-01-17
 
 ### Changed
