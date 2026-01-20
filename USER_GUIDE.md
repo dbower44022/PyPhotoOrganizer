@@ -1362,6 +1362,41 @@ When a file is selected:
 - **Open Source Folder**: Open folder containing the source file
 - **Copy Source Path**: Copy file path to clipboard
 - **Process File(s)**: Reprocess selected files with current settings
+- **Override Skip**: Import filtered files bypassing size/dimension filters
+
+### Override Skip Feature
+
+The **Override Skip** button allows you to import files that were previously filtered out (skipped due to file size, dimensions, or other filter criteria). This is useful when:
+
+- A legitimate photo was incorrectly filtered as an icon/thumbnail
+- You want to import small images that were excluded by size filters
+- You need to import files that don't meet the default dimension requirements
+
+**How to use Override Skip:**
+
+1. Go to the **Import History** tab
+2. Use the **Show** dropdown and select **"Filtered (Icons/Thumbnails)"**
+3. Select one or more filtered files in the list
+4. Click the **Override Skip** button
+5. Review the confirmation dialog showing:
+   - Number of files to import
+   - Destination archive location
+   - Organization template
+6. Click **Yes** to proceed
+
+**What happens:**
+
+- Files are imported directly to your archive, bypassing all PhotoFilter criteria
+- Duplicate detection still applies (files already in archive are skipped)
+- If the source folder has an album association, files are also added to that album
+- A new import session is created and appears in the session list
+- Progress dialog shows real-time status
+
+**Important notes:**
+
+- Only files with "skip_filtered" status can be processed with Override Skip
+- Source files must still exist on disk
+- If some selected files no longer exist, you'll see a warning but valid files will still be imported
 
 ### Exporting Reports
 
