@@ -1317,7 +1317,7 @@ def hash_file_partial(filename, num_bytes=constants.PARTIAL_HASH_BYTES):
 def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME, batch_size=constants.DEFAULT_BATCH_SIZE,
                    partial_hash_enabled=True, partial_hash_bytes=constants.PARTIAL_HASH_BYTES,
                    partial_hash_min_file_size=constants.PARTIAL_HASH_MIN_FILE_SIZE,
-                   config=None, progress_callback=None, audit_manager=None, session_id=None):
+                   config=None, progress_callback=None, audit_manager=None, session_id=None, should_stop=None):
     """ Looks through a list of files and returns a list of duplicate and original files using two-stage hashing.
 
         Two-Stage Hashing Strategy:
@@ -1343,13 +1343,15 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
         partial_hash_bytes - number of bytes to hash for partial check (default: constants.PARTIAL_HASH_BYTES = 16KB)
         partial_hash_min_file_size - minimum file size to use partial hashing (default: constants.PARTIAL_HASH_MIN_FILE_SIZE = 1MB)
         config - Config object with photo filter settings (optional, if None filtering is disabled)
+        should_stop - callable that returns True if processing should be cancelled (optional)
+            Used for graceful shutdown - when True is returned, commits partial progress and exits cleanly.
 
         Returns:
             results - a dictionary containing:
                 duplicate_files - list of files that already exist in the database
                 original_files - list of new unique files that were added to database
                 filtered_files - list of files that were filtered out (not real photos)
-                status - "completed" if successful
+                status - "completed" if successful, "cancelled" if stopped early
                 files_processed - total number of files processed
                 files_skipped - number of files skipped (already in DB from previous run)
                 filter_statistics - statistics about filtering (if enabled)
@@ -1409,24 +1411,46 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
 
         logger.info(f"Starting to process {len(files)} files with batch_size={batch_size}")
 
+        # Initialize cancellation flag (must be outside context for visibility in return)
+        was_cancelled = False
+
         # Use the PhotoDatabase context manager
         with PhotoDatabase(database_path) as db:
             # Create progress bar for file processing
             with tqdm(total=len(files), desc="Processing files", unit="file",
                      bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
                 for file_index, filename in enumerate(files, 1):
+                    # Check for cancellation at the start of each file
+                    if should_stop and should_stop():
+                        logger.info(f"Processing cancelled by user after {files_processed} files")
+                        was_cancelled = True
+                        # Commit any uncommitted work before exiting
+                        if files_since_last_commit > 0:
+                            db.commit()
+                            logger.info(f"*** CANCELLATION COMMIT: Saved {files_since_last_commit} files before stopping ***")
+                        break
+
                     try:
                         # Update progress bar description with current file
                         pbar.set_postfix_str(os.path.basename(filename)[:constants.MAX_FILENAME_DISPLAY_LENGTH])
 
-                        # Progress callback for GUI
+                        # Progress callback for GUI - also checks for stop signal
                         if progress_callback:
                             stats = {
                                 'unique': len(original_files),
                                 'duplicates': len(duplicate_files),
                                 'filtered': len(filtered_files)
                             }
-                            progress_callback(file_index, len(files), filename, stats)
+                            callback_result = progress_callback(file_index, len(files), filename, stats)
+                            # If callback returns True, it means stop was requested
+                            if callback_result:
+                                logger.info(f"Processing cancelled via callback after {files_processed} files")
+                                was_cancelled = True
+                                # Commit any uncommitted work before exiting
+                                if files_since_last_commit > 0:
+                                    db.commit()
+                                    logger.info(f"*** CANCELLATION COMMIT: Saved {files_since_last_commit} files before stopping ***")
+                                break
 
                         if not os.path.isfile(filename):
                             logger.warning(f"Skipping non-file entry: {filename}")
@@ -1825,10 +1849,14 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
         results["duplicate_files"] = duplicate_files
         results["original_files"] = original_files
         results["filtered_files"] = filtered_files
-        results["status"] = "completed"
+        results["status"] = "cancelled" if was_cancelled else "completed"
         results["files_processed"] = files_processed
         results["files_skipped"] = files_skipped
         results["unreliable_dates_count"] = unreliable_dates_count
+
+        if was_cancelled:
+            logger.info(f"=== PROCESSING CANCELLED ===")
+            logger.info(f"Partial progress saved: {files_processed} files processed, {len(original_files)} unique files added")
 
         # Add filter statistics if filtering was enabled
         if photo_filter and photo_filter.enabled:

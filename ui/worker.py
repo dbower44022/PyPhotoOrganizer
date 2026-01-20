@@ -40,11 +40,21 @@ class ProcessingWorker(QThread):
         self.start_time = None
         self.audit_manager = None
         self.session_id = None
+        # Track partial progress for graceful shutdown
+        self._partial_results = {
+            'total_files_examined': 0,
+            'total_new_original_files': 0,
+            'total_duplicates': 0,
+            'total_filtered': 0,
+            'total_unreliable_dates': 0,
+            'total_errors': 0
+        }
 
     def run(self):
         """Main processing loop (runs in background thread)."""
         error_summary = None
         final_status = 'completed'
+        was_cancelled = False
 
         try:
             self.start_time = time.time()
@@ -75,12 +85,21 @@ class ProcessingWorker(QThread):
             # Stage 1: Scanning
             if self._should_stop:
                 final_status = 'cancelled'
+                was_cancelled = True
+                self.status_update.emit("warning", "Cancelled during startup")
                 return
 
             self.stage_changed.emit("Scanning Directories")
             self.status_update.emit("info", "Starting directory scan...")
 
             files = self._scan_directories()
+
+            # Check for cancellation after scanning
+            if self._should_stop:
+                final_status = 'cancelled'
+                was_cancelled = True
+                self.status_update.emit("warning", "Cancelled after directory scan")
+                return
 
             if not files:
                 self.status_update.emit("warning", "No files found to process")
@@ -115,12 +134,21 @@ class ProcessingWorker(QThread):
             # Note: organize_files handles both duplicate detection AND organization
             if self._should_stop:
                 final_status = 'cancelled'
+                was_cancelled = True
+                self.status_update.emit("warning", "Cancelled before processing")
                 return
 
             self.stage_changed.emit("Processing and Organizing Files")
             self.status_update.emit("info", "Processing files and organizing...")
 
+            # Pass the should_stop callable to enable graceful cancellation
             final_results = self._organize_files(files)
+
+            # Check if processing was cancelled mid-way
+            if final_results.get('was_cancelled', False):
+                final_status = 'cancelled'
+                was_cancelled = True
+                self.status_update.emit("warning", "Processing cancelled by user")
 
             # Compile final results
             processing_time = time.time() - self.start_time
@@ -135,14 +163,18 @@ class ProcessingWorker(QThread):
                 'processing_time': processing_time,
                 'filter_statistics': final_results.get('filter_statistics', {}),
                 'filtered_files': final_results.get('filtered_files', []),
-                'session_id': self.session_id
+                'session_id': self.session_id,
+                'was_cancelled': was_cancelled
             }
+
+            # Store partial results for potential later use
+            self._partial_results = complete_results.copy()
 
             # End audit session with final results
             if self.audit_manager and self.session_id:
                 self.audit_manager.end_session(
                     self.session_id,
-                    status='completed',
+                    status=final_status,
                     stats={
                         'total_files_processed': complete_results['total_files_examined'],
                         'total_unique_files': complete_results['total_new_original_files'],
@@ -152,7 +184,11 @@ class ProcessingWorker(QThread):
                     }
                 )
 
-            self.status_update.emit("info", "Processing complete!")
+            if was_cancelled:
+                self.status_update.emit("warning", "Processing stopped - partial progress saved")
+            else:
+                self.status_update.emit("info", "Processing complete!")
+
             self.completed.emit(complete_results)
 
         except Exception as e:
@@ -165,12 +201,20 @@ class ProcessingWorker(QThread):
 
         finally:
             # Ensure audit session is ended even on error/cancellation
-            if self.audit_manager and self.session_id and final_status != 'completed':
+            if self.audit_manager and self.session_id and final_status not in ('completed', 'cancelled'):
                 try:
+                    # Use partial results if available
+                    stats = {
+                        'total_files_processed': self._partial_results.get('total_files_examined', 0),
+                        'total_unique_files': self._partial_results.get('total_new_original_files', 0),
+                        'total_duplicates': self._partial_results.get('total_duplicates', 0),
+                        'total_filtered': self._partial_results.get('total_filtered', 0),
+                        'total_errors': self._partial_results.get('total_errors', 0)
+                    }
                     self.audit_manager.end_session(
                         self.session_id,
                         status=final_status,
-                        stats={},
+                        stats=stats,
                         error_summary=error_summary
                     )
                 except Exception as cleanup_error:
@@ -198,12 +242,12 @@ class ProcessingWorker(QThread):
             raise
 
     def _scanning_callback(self, dirs_scanned, total_dirs, current_dir):
-        """Callback for scanning progress."""
-        if self._should_stop:
-            return
-
+        """Callback for scanning progress. Returns True if should stop."""
         # Emit signal to UI (thread-safe)
         self.scanning_progress.emit(dirs_scanned, total_dirs, current_dir)
+
+        # Return True to signal stop, False to continue
+        return self._should_stop
 
     def _process_files(self, files):
         """Process files for duplicates."""
@@ -232,12 +276,17 @@ class ProcessingWorker(QThread):
             raise
 
     def _processing_callback(self, processed, total, current_file, stats):
-        """Callback for processing progress."""
-        if self._should_stop:
-            return
+        """Callback for processing progress. Returns True if should stop."""
+        # Update partial results for graceful shutdown tracking
+        self._partial_results['total_duplicates'] = stats.get('duplicates', 0)
+        self._partial_results['total_filtered'] = stats.get('filtered', 0)
+        self._partial_results['total_new_original_files'] = stats.get('unique', 0)
 
         # Emit signal to UI (thread-safe)
         self.processing_progress.emit(processed, total, current_file, stats)
+
+        # Return True to signal stop, False to continue
+        return self._should_stop
 
     def _organize_files(self, files):
         """Organize files into destination."""
@@ -249,7 +298,8 @@ class ProcessingWorker(QThread):
                 batch_size=self.config.batch_size,
                 progress_callback=self._organizing_callback,
                 audit_manager=self.audit_manager,
-                session_id=self.session_id
+                session_id=self.session_id,
+                should_stop=self._check_should_stop  # Pass stop check callable
             )
 
             return results
@@ -259,19 +309,26 @@ class ProcessingWorker(QThread):
             self.status_update.emit("error", f"Organization error: {str(e)}")
             raise
 
+    def _check_should_stop(self):
+        """Check if processing should stop. Returns True if stop was requested."""
+        return self._should_stop
+
     def _organizing_callback(self, organized, total, current_file, bytes_copied, total_bytes):
-        """Callback for organizing progress."""
-        if self._should_stop:
-            return
+        """Callback for organizing progress. Returns True if should stop."""
+        # Update partial results for graceful shutdown tracking
+        self._partial_results['total_files_examined'] = organized
 
         # Emit signal to UI (thread-safe)
         self.organizing_progress.emit(organized, total, current_file,
                                       bytes_copied, total_bytes)
 
+        # Return True to signal stop, False to continue
+        return self._should_stop
+
     def stop(self):
         """Request worker to stop gracefully."""
         self._should_stop = True
-        self.status_update.emit("warning", "Stop requested - finishing current batch...")
+        self.status_update.emit("warning", "Stop requested - saving progress and stopping...")
 
     def pause(self):
         """Pause processing."""
