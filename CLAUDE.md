@@ -62,8 +62,9 @@ python main.py              # CLI mode
 | `archive_settings_tab.py` | Organization template, file renaming |
 | `system_settings_tab.py` | Database info, copy/move mode, performance |
 | `progress_tab.py` | Real-time progress display |
-| `import_history_tab.py` | Session history, file preview, export |
+| `import_history_tab.py` | Session history, file preview, export, override skip |
 | `worker.py` | `ProcessingWorker` background thread |
+| `reprocess_worker.py` | `ReprocessWorker` for reprocessing/override skip with album support |
 | `theme.py` | `ThemeManager`, light/dark mode support |
 
 ### Database Tables
@@ -170,6 +171,54 @@ db.add_hash_to_history(old_hash, new_hash, reason='date_correction')
 - Filename patterns (favicon, icon, thumb, etc.)
 
 **Videos bypass filtering entirely.**
+
+### Override Skip Feature
+
+The Import History tab includes an "Override Skip" button that allows users to import files that were previously filtered out (skipped due to file size, dimensions, etc.) by bypassing the PhotoFilter criteria.
+
+**How it works:**
+
+1. User selects files with `operation='skip_filtered'` in Import History
+2. Clicking "Override Skip" validates selection and shows confirmation dialog
+3. Uses `ReprocessWorker` to import files directly (bypasses PhotoFilter)
+4. Files are also added to albums if source directory has album association
+
+**Key implementation:**
+
+| Location | Component | Purpose |
+|----------|-----------|---------|
+| `ui/import_history_tab.py` | `override_skip_files()` | Main handler - validates selection, builds album mapping, creates worker |
+| `ui/import_history_tab.py` | `_on_override_skip_*` | Signal handlers for progress, completion, errors, cancellation |
+| `ui/reprocess_worker.py` | `ReprocessWorker` | Extended to accept `album_manager` and `source_album_mapping` parameters |
+
+**Album support in ReprocessWorker:**
+
+The `ReprocessWorker` constructor accepts optional album parameters:
+```python
+ReprocessWorker(
+    database_path=...,
+    file_records=...,
+    archive_location=...,
+    organization_template=...,
+    copy_mode=True,
+    audit_manager=...,
+    album_manager=album_manager,           # Optional: AlbumManager instance
+    source_album_mapping=source_album_mapping  # Optional: {source_path: {'album_id': int, 'enable_sub_albums': bool}}
+)
+```
+
+After successful database insert, ReprocessWorker:
+1. Finds matching source directory from `source_album_mapping`
+2. Handles sub-albums if enabled (creates if needed)
+3. Adds file to album via `AlbumManager.add_photo_to_album()`
+4. Logs album info to audit trail (album_name, album_path, sub_album_name)
+
+**UI Guidelines (per project rules):**
+
+- Button is always enabled (never grayed out)
+- If no selection: shows `QMessageBox.information()` with guidance
+- If selection contains non-filtered files: shows informative message with tip
+- If source files missing: warns user but continues with valid files
 
 ### Organization Templates
 
