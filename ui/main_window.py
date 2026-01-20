@@ -20,6 +20,7 @@ from ui.import_history_tab import ImportHistoryTab
 from ui.database_selector_dialog import DatabaseSelectorDialog
 from ui.worker import ProcessingWorker
 from database_metadata import DatabaseMetadata
+from album_manager import AlbumManager
 
 
 class MainWindow(QMainWindow):
@@ -30,6 +31,7 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.current_database_path = None
         self.database_metadata = None
+        self.album_manager = None
         self.settings = QSettings("PyPhotoOrganizer", "MainWindow")
         self.splash_callback = splash_callback
 
@@ -198,6 +200,12 @@ class MainWindow(QMainWindow):
             config['organization_template'] = self.database_metadata.get_organization_template()
             logger.info(f"Organization template from database: {config['organization_template']}")
 
+            # Add source-album mapping for automatic album addition during import
+            source_album_mapping = self.import_settings_tab.get_source_album_mapping()
+            config['source_album_mapping'] = source_album_mapping
+            if source_album_mapping:
+                logger.info(f"Source-album mapping: {len(source_album_mapping)} sources have album associations")
+
             # Validate operation mode
             if not config['copy_files'] and not config['move_files']:
                 QMessageBox.warning(self, "Error", "Please select Copy or Move mode in System Settings tab")
@@ -361,8 +369,11 @@ class MainWindow(QMainWindow):
         # Ensure all required tables exist (handles old databases)
         self.database_metadata.ensure_all_tables()
 
-        # Update import settings tab with database (loads source directories)
-        self.import_settings_tab.set_database(self.database_metadata)
+        # Create album manager for this database
+        self.album_manager = AlbumManager(database_path)
+
+        # Update import settings tab with database and album manager (loads source directories)
+        self.import_settings_tab.set_database(self.database_metadata, self.album_manager)
 
         # Update archive settings tab with database (loads organization template, file renaming)
         self.archive_settings_tab.set_database(self.database_metadata)

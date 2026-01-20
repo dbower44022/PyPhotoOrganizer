@@ -52,7 +52,25 @@ class DatabaseMetadata:
             order_index INTEGER NOT NULL,
             added_date TEXT NOT NULL,
             last_scanned TEXT,
-            enabled INTEGER DEFAULT 1
+            enabled INTEGER DEFAULT 1,
+            album_id INTEGER,
+            enable_sub_albums INTEGER DEFAULT 0,
+            FOREIGN KEY (album_id) REFERENCES Albums(id) ON DELETE SET NULL
+        );
+    """
+
+    SOURCE_DIRECTORY_SUB_ALBUMS_TABLE_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS SourceDirectorySubAlbums (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_directory_id INTEGER NOT NULL,
+            parent_album_id INTEGER NOT NULL,
+            sub_album_id INTEGER NOT NULL,
+            relative_subdir_path TEXT NOT NULL,
+            created_timestamp TEXT NOT NULL,
+            FOREIGN KEY (source_directory_id) REFERENCES SourceDirectories(id) ON DELETE CASCADE,
+            FOREIGN KEY (parent_album_id) REFERENCES Albums(id) ON DELETE CASCADE,
+            FOREIGN KEY (sub_album_id) REFERENCES Albums(id) ON DELETE CASCADE,
+            UNIQUE(source_directory_id, relative_subdir_path)
         );
     """
 
@@ -174,6 +192,7 @@ class DatabaseMetadata:
         self._ensure_deleted_files_table()
         self._ensure_saved_queries_table()
         self._ensure_albums_table()
+        self._ensure_source_directory_sub_albums_table()
 
     def _get_connection(self) -> sqlite3.Connection:
         """
@@ -307,11 +326,51 @@ class DatabaseMetadata:
                 # Create table if it doesn't exist
                 cursor.execute(self.SOURCE_DIRECTORIES_TABLE_SCHEMA)
 
+                # Check if new columns exist (for upgrading old databases)
+                cursor.execute("PRAGMA table_info(SourceDirectories)")
+                columns = [row[1] for row in cursor.fetchall()]
+
+                # Add album_id column if missing (for album association)
+                if 'album_id' not in columns:
+                    logger.info("Upgrading database: adding album_id column to SourceDirectories")
+                    cursor.execute("ALTER TABLE SourceDirectories ADD COLUMN album_id INTEGER")
+
+                # Add enable_sub_albums column if missing
+                if 'enable_sub_albums' not in columns:
+                    logger.info("Upgrading database: adding enable_sub_albums column to SourceDirectories")
+                    cursor.execute("ALTER TABLE SourceDirectories ADD COLUMN enable_sub_albums INTEGER DEFAULT 0")
+
                 conn.commit()
                 logger.debug(f"SourceDirectories table ensured in {self.database_path}")
 
         except Exception as e:
             logger.error(f"Failed to create SourceDirectories table: {e}")
+            raise
+
+    def _ensure_source_directory_sub_albums_table(self):
+        """Ensure the SourceDirectorySubAlbums table exists in the database."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Create table if it doesn't exist
+                cursor.execute(self.SOURCE_DIRECTORY_SUB_ALBUMS_TABLE_SCHEMA)
+
+                # Create indexes for performance
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_subalbums_source_dir
+                    ON SourceDirectorySubAlbums(source_directory_id)
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_subalbums_parent_album
+                    ON SourceDirectorySubAlbums(parent_album_id)
+                """)
+
+                conn.commit()
+                logger.debug(f"SourceDirectorySubAlbums table ensured in {self.database_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to create SourceDirectorySubAlbums table: {e}")
             raise
 
     def _ensure_unreliable_dates_table(self):
@@ -987,7 +1046,8 @@ class DatabaseMetadata:
                 cursor = conn.cursor()
 
                 cursor.execute("""
-                    SELECT id, path, order_index, added_date, last_scanned, enabled
+                    SELECT id, path, order_index, added_date, last_scanned, enabled,
+                           album_id, enable_sub_albums
                     FROM SourceDirectories
                     ORDER BY order_index
                 """)
@@ -1002,7 +1062,9 @@ class DatabaseMetadata:
                         'order_index': row[2],
                         'added_date': row[3],
                         'last_scanned': row[4],
-                        'enabled': bool(row[5])
+                        'enabled': bool(row[5]),
+                        'album_id': row[6],
+                        'enable_sub_albums': bool(row[7]) if row[7] is not None else False
                     })
 
                 return sources
@@ -1126,6 +1188,310 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to reorder source directories: {e}")
+            return False
+
+    def update_source_album(self, path: str, album_id: Optional[int]) -> bool:
+        """
+        Update the album association for a source directory.
+
+        Args:
+            path: Path to the source directory
+            album_id: Album ID to associate (None to remove association)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    UPDATE SourceDirectories
+                    SET album_id = ?
+                    WHERE path = ?
+                """, (album_id, path))
+
+                if cursor.rowcount == 0:
+                    logger.warning(f"Source directory not found: {path}")
+                    return False
+
+                conn.commit()
+                logger.debug(f"Updated album association for {path}: album_id={album_id}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to update album association: {e}")
+            return False
+
+    def update_source_sub_albums_enabled(self, path: str, enabled: bool) -> bool:
+        """
+        Update the sub-albums enabled setting for a source directory.
+
+        Args:
+            path: Path to the source directory
+            enabled: Whether sub-albums are enabled
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    UPDATE SourceDirectories
+                    SET enable_sub_albums = ?
+                    WHERE path = ?
+                """, (1 if enabled else 0, path))
+
+                if cursor.rowcount == 0:
+                    logger.warning(f"Source directory not found: {path}")
+                    return False
+
+                conn.commit()
+                logger.debug(f"Updated sub-albums enabled for {path}: {enabled}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to update sub-albums setting: {e}")
+            return False
+
+    def get_source_directory_by_path(self, path: str) -> Optional[Dict[str, Any]]:
+        """
+        Get a source directory record by its path.
+
+        Args:
+            path: Path to the source directory
+
+        Returns:
+            Dictionary with source directory information, or None if not found
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    SELECT id, path, order_index, added_date, last_scanned, enabled,
+                           album_id, enable_sub_albums
+                    FROM SourceDirectories
+                    WHERE path = ?
+                """, (path,))
+
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'id': row[0],
+                        'path': row[1],
+                        'order_index': row[2],
+                        'added_date': row[3],
+                        'last_scanned': row[4],
+                        'enabled': bool(row[5]),
+                        'album_id': row[6],
+                        'enable_sub_albums': bool(row[7]) if row[7] is not None else False
+                    }
+                return None
+
+        except Exception as e:
+            logger.error(f"Failed to get source directory: {e}")
+            return None
+
+    def get_source_directory_by_id(self, source_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get a source directory record by its ID.
+
+        Args:
+            source_id: ID of the source directory
+
+        Returns:
+            Dictionary with source directory information, or None if not found
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    SELECT id, path, order_index, added_date, last_scanned, enabled,
+                           album_id, enable_sub_albums
+                    FROM SourceDirectories
+                    WHERE id = ?
+                """, (source_id,))
+
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'id': row[0],
+                        'path': row[1],
+                        'order_index': row[2],
+                        'added_date': row[3],
+                        'last_scanned': row[4],
+                        'enabled': bool(row[5]),
+                        'album_id': row[6],
+                        'enable_sub_albums': bool(row[7]) if row[7] is not None else False
+                    }
+                return None
+
+        except Exception as e:
+            logger.error(f"Failed to get source directory by ID: {e}")
+            return None
+
+    # ========== Source Directory Sub-Albums Management ==========
+
+    def get_or_create_sub_album(self, source_directory_id: int, parent_album_id: int,
+                                sub_album_id: int, relative_subdir_path: str) -> Optional[int]:
+        """
+        Get or create a sub-album mapping for a source directory.
+
+        Args:
+            source_directory_id: ID of the source directory
+            parent_album_id: ID of the parent album
+            sub_album_id: ID of the sub-album
+            relative_subdir_path: Relative path of the subdirectory from source
+
+        Returns:
+            ID of the mapping record, or None if failed
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Check if mapping exists
+                cursor.execute("""
+                    SELECT id, sub_album_id FROM SourceDirectorySubAlbums
+                    WHERE source_directory_id = ? AND relative_subdir_path = ?
+                """, (source_directory_id, relative_subdir_path))
+
+                row = cursor.fetchone()
+                if row:
+                    return row[0]  # Return existing mapping ID
+
+                # Create new mapping
+                cursor.execute("""
+                    INSERT INTO SourceDirectorySubAlbums (
+                        source_directory_id, parent_album_id, sub_album_id,
+                        relative_subdir_path, created_timestamp
+                    ) VALUES (?, ?, ?, ?, ?)
+                """, (
+                    source_directory_id, parent_album_id, sub_album_id,
+                    relative_subdir_path, datetime.now().isoformat()
+                ))
+
+                conn.commit()
+                return cursor.lastrowid
+
+        except Exception as e:
+            logger.error(f"Failed to get/create sub-album mapping: {e}")
+            return None
+
+    def get_sub_album_for_path(self, source_directory_id: int,
+                               relative_subdir_path: str) -> Optional[int]:
+        """
+        Get the sub-album ID for a given source directory and relative path.
+
+        Args:
+            source_directory_id: ID of the source directory
+            relative_subdir_path: Relative path of the subdirectory
+
+        Returns:
+            Sub-album ID, or None if not found
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    SELECT sub_album_id FROM SourceDirectorySubAlbums
+                    WHERE source_directory_id = ? AND relative_subdir_path = ?
+                """, (source_directory_id, relative_subdir_path))
+
+                row = cursor.fetchone()
+                return row[0] if row else None
+
+        except Exception as e:
+            logger.error(f"Failed to get sub-album for path: {e}")
+            return None
+
+    def get_all_sub_albums_for_source(self, source_directory_id: int) -> List[Dict[str, Any]]:
+        """
+        Get all sub-album mappings for a source directory.
+
+        Args:
+            source_directory_id: ID of the source directory
+
+        Returns:
+            List of sub-album mapping dictionaries
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    SELECT id, source_directory_id, parent_album_id, sub_album_id,
+                           relative_subdir_path, created_timestamp
+                    FROM SourceDirectorySubAlbums
+                    WHERE source_directory_id = ?
+                    ORDER BY relative_subdir_path
+                """, (source_directory_id,))
+
+                return [
+                    {
+                        'id': row[0],
+                        'source_directory_id': row[1],
+                        'parent_album_id': row[2],
+                        'sub_album_id': row[3],
+                        'relative_subdir_path': row[4],
+                        'created_timestamp': row[5]
+                    }
+                    for row in cursor.fetchall()
+                ]
+
+        except Exception as e:
+            logger.error(f"Failed to get sub-albums for source: {e}")
+            return []
+
+    def delete_sub_album_mapping(self, mapping_id: int) -> bool:
+        """
+        Delete a sub-album mapping.
+
+        Args:
+            mapping_id: ID of the mapping to delete
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM SourceDirectorySubAlbums WHERE id = ?", (mapping_id,))
+                conn.commit()
+                return cursor.rowcount > 0
+
+        except Exception as e:
+            logger.error(f"Failed to delete sub-album mapping: {e}")
+            return False
+
+    def clear_sub_albums_for_source(self, source_directory_id: int) -> bool:
+        """
+        Clear all sub-album mappings for a source directory.
+
+        Args:
+            source_directory_id: ID of the source directory
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    DELETE FROM SourceDirectorySubAlbums
+                    WHERE source_directory_id = ?
+                """, (source_directory_id,))
+                conn.commit()
+                logger.info(f"Cleared sub-album mappings for source {source_directory_id}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to clear sub-album mappings: {e}")
             return False
 
     # ========== Unreliable Dates Management ==========
