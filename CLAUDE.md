@@ -997,6 +997,325 @@ The `settings.json` file controls application behavior:
 - If crash occurs at file 5,432, database contains files 1-5,400
 - Re-running will skip files 1-5,400 and resume from 5,401
 
+### Graceful Shutdown System (Stop Processing)
+
+**Purpose**: Allow users to stop long-running import operations while preserving all progress made up to that point. The system ensures database consistency and provides clear feedback about what happened.
+
+**Architecture Overview:**
+
+The graceful shutdown system uses a **cooperative cancellation pattern** where:
+1. User clicks "Stop Processing" button
+2. Stop signal propagates through callback chain
+3. Each processing loop checks for stop at safe points
+4. Partial progress is committed before exiting
+5. Results accurately reflect what was accomplished
+
+**Signal Propagation Flow:**
+
+```
+User clicks "Stop" → main_window.stop_processing()
+                              ↓
+                     worker.stop() sets _should_stop = True
+                              ↓
+         ┌────────────────────┴────────────────────┐
+         ↓                                         ↓
+  should_stop() callable              progress_callback() returns True
+  passed to processing functions       when _should_stop is True
+         ↓                                         ↓
+         └────────────────────┬────────────────────┘
+                              ↓
+              Processing loop detects stop signal
+                              ↓
+              Commits uncommitted work to database
+                              ↓
+              Returns with was_cancelled=True flag
+                              ↓
+              UI displays accurate partial results
+```
+
+**Key Components:**
+
+**1. ProcessingWorker (`ui/worker.py`)**
+
+```python
+class ProcessingWorker(QThread):
+    def __init__(self, config_dict):
+        self._should_stop = False
+        self._partial_results = {
+            'total_files_examined': 0,
+            'total_new_original_files': 0,
+            'total_duplicates': 0,
+            'total_filtered': 0,
+            'total_errors': 0
+        }
+
+    def stop(self):
+        """Request worker to stop gracefully."""
+        self._should_stop = True
+        self.status_update.emit("warning", "Stop requested - saving progress...")
+
+    def _check_should_stop(self):
+        """Callable passed to processing functions."""
+        return self._should_stop
+
+    def _organizing_callback(self, organized, total, current_file, bytes_copied, total_bytes):
+        """Progress callback that also signals stop. Returns True if should stop."""
+        self._partial_results['total_files_examined'] = organized
+        self.organizing_progress.emit(organized, total, current_file, bytes_copied, total_bytes)
+        return self._should_stop  # Return True to signal stop
+```
+
+**2. organize_files() (`main.py`)**
+
+```python
+def organize_files(config, files, database_path, batch_size, progress_callback=None,
+                   audit_manager=None, session_id=None, should_stop=None):
+    """
+    Parameters:
+        should_stop (callable): Returns True if processing should be cancelled.
+            Used for graceful shutdown - commits partial progress and exits cleanly.
+    """
+    was_cancelled = False
+
+    # Check before starting
+    if should_stop and should_stop():
+        return {"was_cancelled": True, ...}
+
+    for original_file in original_files:
+        # Check at start of each file iteration
+        if should_stop and should_stop():
+            was_cancelled = True
+            break
+
+        # Check via callback return value
+        if progress_callback:
+            if progress_callback(...):  # Returns True if should stop
+                was_cancelled = True
+                break
+
+        # ... process file ...
+
+    return {"was_cancelled": was_cancelled, ...}
+```
+
+**3. find_duplicates() (`DuplicateFileDetection.py`)**
+
+```python
+def find_duplicates(files, hashes, database_path, batch_size, ..., should_stop=None):
+    """
+    Parameters:
+        should_stop (callable): Returns True if processing should be cancelled.
+    """
+    was_cancelled = False
+
+    with PhotoDatabase(database_path) as db:
+        for file_index, filename in enumerate(files, 1):
+            # Check for cancellation at start of each file
+            if should_stop and should_stop():
+                was_cancelled = True
+                # Commit uncommitted work before exiting
+                if files_since_last_commit > 0:
+                    db.commit()
+                    logger.info(f"*** CANCELLATION COMMIT: Saved {files_since_last_commit} files ***")
+                break
+
+            # Check via progress callback
+            if progress_callback:
+                if progress_callback(...):  # Returns True if should stop
+                    was_cancelled = True
+                    if files_since_last_commit > 0:
+                        db.commit()
+                    break
+
+            # ... process file ...
+
+    return {"status": "cancelled" if was_cancelled else "completed", ...}
+```
+
+**Stop Signal Check Points:**
+
+The stop signal is checked at these specific locations to ensure responsive cancellation:
+
+| Location | File | When Checked |
+|----------|------|--------------|
+| Before duplicate detection | `main.py` | Before calling `find_duplicates()` |
+| Start of each file in hash loop | `DuplicateFileDetection.py` | Start of `for filename in files` loop |
+| After progress callback | `DuplicateFileDetection.py` | After emitting progress signal |
+| Start of each file in organize loop | `main.py` | Start of `for original_file in original_files` loop |
+| After progress callback | `main.py` | After emitting organize progress signal |
+
+**Database Commit on Cancellation:**
+
+When cancellation is detected, the system commits any uncommitted work:
+
+```python
+# In find_duplicates() when cancellation detected:
+if files_since_last_commit > 0:
+    db.commit()
+    logger.info(f"*** CANCELLATION COMMIT: Saved {files_since_last_commit} files before stopping ***")
+```
+
+This ensures that files processed since the last batch commit are saved, not lost.
+
+**Result Structure with Cancellation Flag:**
+
+```python
+# Results returned when cancelled
+{
+    "total_files_processed": 500,        # Actual count, not zero
+    "total_new_original_files": 150,     # Files actually imported
+    "total_duplicates": 300,             # Duplicates found before stop
+    "total_filtered": 50,                # Filtered before stop
+    "total_errors": 0,
+    "was_cancelled": True,               # Indicates early termination
+    "status": "cancelled"                # From find_duplicates
+}
+```
+
+**User Interface Feedback:**
+
+**Stop Confirmation Dialog (`main_window.py`):**
+```
+"Are you sure you want to stop processing?
+
+What will happen:
+• Current file processing will complete
+• All progress will be saved to the database
+• You can resume later (already-processed files will be skipped)
+
+Stop now?"
+```
+
+**Completion Dialog for Cancelled Processing:**
+```
+"Processing was stopped by user.
+
+Partial progress has been saved:
+
+Files processed before stop: 500
+New original photos saved: 150
+Duplicates found: 300
+Filtered files: 50
+
+You can resume processing at any time.
+Files already in the database will be skipped.
+
+View the Import History tab for details."
+```
+
+**Status Bar Messages:**
+- "Stop requested - saving progress (please wait)" - Immediately after stop clicked
+- "Stopping... saving progress" - During shutdown
+- "Processing stopped - partial progress saved" - After completion
+
+**Audit Session Handling:**
+
+When processing is cancelled, the audit session is properly closed:
+
+```python
+# In worker.py run() method
+if self.audit_manager and self.session_id:
+    self.audit_manager.end_session(
+        self.session_id,
+        status='cancelled',  # Not 'completed'
+        stats={
+            'total_files_processed': complete_results['total_files_examined'],
+            'total_unique_files': complete_results['total_new_original_files'],
+            'total_duplicates': complete_results['total_duplicates'],
+            'total_filtered': complete_results['total_filtered'],
+            'total_errors': complete_results['total_errors']
+        }
+    )
+```
+
+The Import History tab will show the session with status "cancelled" and accurate statistics.
+
+**Resume Capability:**
+
+After stopping, users can resume processing by clicking "Start Processing" again:
+
+1. System loads existing hashes from database
+2. For each file, checks if hash already exists
+3. If hash exists → File marked as duplicate, skipped
+4. If hash doesn't exist → File processed normally
+5. Result: Only unprocessed files are handled
+
+**Example Resume Scenario:**
+```
+First run (stopped at file 500 of 1000):
+  - Files 1-500: Processed and committed
+  - Files 501-1000: Not yet processed
+  - Database has 200 unique files
+
+Second run (resume):
+  - Files 1-500: All detected as duplicates (already in DB), skipped instantly
+  - Files 501-1000: Processed normally
+  - Database now has 400 unique files (200 + 200 new)
+
+Total time: Similar to if first run completed
+No duplicate imports, no data loss
+```
+
+**Logging During Cancellation:**
+
+```
+2026-01-20 10:23:15 INFO Processing file 500/1000: vacation_001.jpg
+2026-01-20 10:23:16 WARNING Stop requested - saving progress and stopping...
+2026-01-20 10:23:16 INFO Processing cancelled by user after 500 files
+2026-01-20 10:23:16 INFO *** CANCELLATION COMMIT: Saved 45 files before stopping ***
+2026-01-20 10:23:16 INFO === PROCESSING CANCELLED ===
+2026-01-20 10:23:16 INFO Partial progress saved: 500 files processed, 200 unique files added
+2026-01-20 10:23:16 WARNING Processing stopped - partial progress saved
+```
+
+**Thread Safety Considerations:**
+
+1. **`_should_stop` flag**: Simple boolean, atomic read in Python
+2. **Signal emission**: Qt signals are thread-safe
+3. **Database commits**: Use PhotoDatabase context manager with WAL mode
+4. **Progress tracking**: `_partial_results` dict updated only in worker thread
+
+**Window Close During Processing:**
+
+If user closes the application window during processing:
+
+```python
+def closeEvent(self, event):
+    if self.worker and self.worker.isRunning():
+        response = QMessageBox.question(self, "Quit",
+            "Processing is still running. Quit anyway?\n\n"
+            "What will happen:\n"
+            "• Current file processing will complete\n"
+            "• All progress will be saved to the database\n"
+            "• You can resume later from where you left off\n\n"
+            "Quit now?", ...)
+        if response == QMessageBox.Yes:
+            self.worker.stop()
+            self.worker.wait()  # Wait for graceful shutdown
+            event.accept()
+```
+
+**Key Design Principles:**
+
+1. **Never lose work**: Any file successfully processed is committed
+2. **Responsive cancellation**: Check at start of each file, not end
+3. **Accurate reporting**: Stats reflect actual work done, not zero
+4. **User confidence**: Clear messaging about what happened and next steps
+5. **Automatic recovery**: Resume capability requires no user tracking
+6. **Database consistency**: Commits happen at safe points only
+
+**Testing Checklist:**
+
+- [ ] Click Stop during directory scanning
+- [ ] Click Stop during duplicate detection phase
+- [ ] Click Stop during file organization phase
+- [ ] Verify database has correct count after stop
+- [ ] Verify Import History shows cancelled session with accurate stats
+- [ ] Resume processing and verify no duplicate imports
+- [ ] Close window during processing (tests closeEvent handler)
+- [ ] Verify status bar shows appropriate messages during stop sequence
+- [ ] Check logs for proper cancellation commit messages
+
 ### Date Extraction Priority
 
 **For IMAGE files:**

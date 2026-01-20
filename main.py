@@ -141,7 +141,7 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME, batch_size=constants.DEFAULT_BATCH_SIZE, progress_callback=None, audit_manager=None, session_id=None):
+def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME, batch_size=constants.DEFAULT_BATCH_SIZE, progress_callback=None, audit_manager=None, session_id=None, should_stop=None):
     """
     Organize files by moving or copying them to the Destination directory.
 
@@ -151,13 +151,17 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
     database_path (str): Path to the SQLite database file
     batch_size (int): Number of files to process before committing to database
     progress_callback (callable): Optional callback function(organized, total, current_file, bytes_copied, total_bytes) for progress updates
+        Returns True if processing should stop, False to continue.
     audit_manager (AuditManager): Optional audit manager for logging file operations
     session_id (str): Optional session ID for audit logging
+    should_stop (callable): Optional callable that returns True if processing should be cancelled.
+        Used for graceful shutdown - when True is returned, commits partial progress and exits cleanly.
 
     Returns:
     dict: Dictionary containing:
         total_files_processed - Integer containing the total number of files in all the provided directories.
         total_new_original_files - Integer containing the total number of NEW photos detected.
+        was_cancelled - Boolean indicating if processing was stopped before completion.
 
     """
     try:
@@ -169,6 +173,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
         total_errors = 0  # Track errors for audit
         current_file_being_processed = 0
         file_counter = 0  # Sequential counter for filename templates
+        was_cancelled = False  # Track if processing was cancelled by user
 
         # Extract settings from config
         source_directory = config.source_directory
@@ -184,6 +189,21 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
         db_metadata = DatabaseMetadata(database_path)
 
         try:
+            # Check for cancellation before starting duplicate detection
+            if should_stop and should_stop():
+                logger.info("Processing cancelled before duplicate detection")
+                return {
+                    "total_files_processed": 0,
+                    "total_new_original_files": 0,
+                    "total_duplicates": 0,
+                    "total_filtered": 0,
+                    "total_unreliable_dates": 0,
+                    "total_errors": 0,
+                    "filter_statistics": {},
+                    "filtered_files": [],
+                    "was_cancelled": True
+                }
+
             hashes = DuplicateFileDetection.load_photo_hashes(database_path)
             logger.info("The load_photo_hashes completed and returned 'hashes' ")
             results = DuplicateFileDetection.find_duplicates(
@@ -196,13 +216,28 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                 partial_hash_min_file_size=config.partial_hash_min_file_size,
                 config=config,  # Pass config for photo filtering
                 audit_manager=audit_manager,
-                session_id=session_id
+                session_id=session_id,
+                should_stop=should_stop  # Pass stop check callable
             )
             logger.info(f"The DuplicateFileDetection.find_duplicates returned = {results}")
 
             # verify status of return
             if results.get("status") == "completed":
                 logger.info("The DuplicateFileDetection routine completed.")
+            elif results.get("status") == "cancelled":
+                logger.info("The DuplicateFileDetection routine was cancelled by user.")
+                # Return partial results with cancellation flag
+                return {
+                    "total_files_processed": results.get('files_processed', 0),
+                    "total_new_original_files": len(results.get('original_files', [])),
+                    "total_duplicates": len(results.get('duplicate_files', [])),
+                    "total_filtered": len(results.get('filtered_files', [])),
+                    "total_unreliable_dates": results.get('unreliable_dates_count', 0),
+                    "total_errors": 0,
+                    "filter_statistics": results.get('filter_statistics', {}),
+                    "filtered_files": results.get('filtered_files', []),
+                    "was_cancelled": True
+                }
             else:
                 logger.info(f"The DuplicateFileDetection routine failed with a status returned = {results.get('status')}.")
 
@@ -252,17 +287,29 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
 
             # Progress bar for copying/moving files
             bytes_copied = 0
+            was_cancelled = False
             with tqdm(total=len(original_files), desc="Organizing files", unit="file",
                      bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
                 for original_file in original_files:
+                    # Check for cancellation at the start of each file
+                    if should_stop and should_stop():
+                        logger.info(f"Processing cancelled after {current_file_being_processed} files")
+                        was_cancelled = True
+                        break
+
                     current_file_being_processed = current_file_being_processed + 1
                     file_path = original_file["file_path"]
                     pbar.set_postfix_str(os.path.basename(file_path)[:constants.MAX_FILENAME_DISPLAY_LENGTH])
 
-                    # Progress callback for GUI
+                    # Progress callback for GUI - also checks for stop signal
                     if progress_callback:
-                        progress_callback(current_file_being_processed, len(original_files),
+                        callback_result = progress_callback(current_file_being_processed, len(original_files),
                                         file_path, bytes_copied, total_bytes)
+                        # If callback returns True, it means stop was requested
+                        if callback_result:
+                            logger.info(f"Processing cancelled via callback after {current_file_being_processed} files")
+                            was_cancelled = True
+                            break
 
                     # Track bytes for next iteration
                     if progress_callback and os.path.exists(file_path):
@@ -522,15 +569,20 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                 logger.info(f"  - {len(filtered_files)} files were filtered out as non-photos")
             logger.info("****************************************************************")
 
+        # Check if processing was cancelled mid-way through file organization
+        # The was_cancelled variable is set in the file processing loop above
+        files_actually_organized = current_file_being_processed - 1 if was_cancelled else total_new_original_files
+
         organize_files_return = {
             "total_files_processed": total_files_processed,
-            "total_new_original_files": total_new_original_files,
+            "total_new_original_files": files_actually_organized,
             "total_duplicates": len(duplicate_files),
             "total_filtered": len(filtered_files),
             "total_unreliable_dates": unreliable_dates_count,
             "total_errors": total_errors,
             "filter_statistics": filter_stats or {},
-            "filtered_files": filtered_files
+            "filtered_files": filtered_files,
+            "was_cancelled": was_cancelled if 'was_cancelled' in dir() else False
         }
         return organize_files_return
 
@@ -544,7 +596,8 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             "total_unreliable_dates": unreliable_dates_count if 'unreliable_dates_count' in dir() else 0,
             "total_errors": total_errors,
             "filter_statistics": filter_stats if 'filter_stats' in dir() else {},
-            "filtered_files": filtered_files if 'filtered_files' in dir() else []
+            "filtered_files": filtered_files if 'filtered_files' in dir() else [],
+            "was_cancelled": was_cancelled if 'was_cancelled' in dir() else False
         }
         return organize_files_return
 

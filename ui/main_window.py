@@ -242,18 +242,29 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             response = QMessageBox.question(self, "Stop Processing",
                                            "Are you sure you want to stop processing?\n\n"
-                                           "Progress will be saved to the database.",
+                                           "What will happen:\n"
+                                           "• Current file processing will complete\n"
+                                           "• All progress will be saved to the database\n"
+                                           "• You can resume later (already-processed files will be skipped)\n\n"
+                                           "Stop now?",
                                            QMessageBox.Yes | QMessageBox.No,
                                            QMessageBox.No)
             if response == QMessageBox.Yes:
                 self.worker.stop()
-                self.status_bar.showMessage("Stopping...")
+                self.status_bar.showMessage("Stopping... saving progress (please wait)")
 
     def processing_completed(self, results):
         """Handle processing completion."""
         # Re-enable controls
         self.import_settings_tab.set_controls_enabled(True)
-        self.status_bar.showMessage("Processing complete")
+
+        # Check if processing was cancelled
+        was_cancelled = results.get('was_cancelled', False)
+
+        if was_cancelled:
+            self.status_bar.showMessage("Processing stopped - partial progress saved")
+        else:
+            self.status_bar.showMessage("Processing complete")
 
         # Refresh database photo count from UniquePhotos table
         if self.database_metadata:
@@ -262,6 +273,7 @@ class MainWindow(QMainWindow):
             self.system_settings_tab.set_database(self.database_metadata)
 
             # Update last_scanned timestamp for all processed source directories
+            # (even if cancelled, we've partially processed them)
             source_folders = self.import_settings_tab.get_enabled_source_folders()
             current_time = datetime.now().isoformat()
             for folder in source_folders:
@@ -280,14 +292,28 @@ class MainWindow(QMainWindow):
         filtered = results.get('total_filtered', 0)
         unreliable_dates = results.get('total_unreliable_dates', 0)
 
-        QMessageBox.information(self, "Processing Complete",
-                              f"Processing complete!\n\n"
-                              f"Total files examined: {total_examined}\n"
-                              f"New original photos: {originals}\n"
-                              f"Duplicates found: {duplicates}\n"
-                              f"Filtered files: {filtered}\n"
-                              f"Files with suspicious dates: {unreliable_dates}\n\n"
-                              f"View the Import History tab for full details.")
+        if was_cancelled:
+            # Show cancelled message with partial progress
+            QMessageBox.information(self, "Processing Stopped",
+                                  f"Processing was stopped by user.\n\n"
+                                  f"Partial progress has been saved:\n\n"
+                                  f"Files processed before stop: {total_examined}\n"
+                                  f"New original photos saved: {originals}\n"
+                                  f"Duplicates found: {duplicates}\n"
+                                  f"Filtered files: {filtered}\n\n"
+                                  f"You can resume processing at any time.\n"
+                                  f"Files already in the database will be skipped.\n\n"
+                                  f"View the Import History tab for details.")
+        else:
+            # Show normal completion message
+            QMessageBox.information(self, "Processing Complete",
+                                  f"Processing complete!\n\n"
+                                  f"Total files examined: {total_examined}\n"
+                                  f"New original photos: {originals}\n"
+                                  f"Duplicates found: {duplicates}\n"
+                                  f"Filtered files: {filtered}\n"
+                                  f"Files with suspicious dates: {unreliable_dates}\n\n"
+                                  f"View the Import History tab for full details.")
 
     def processing_error(self, error_msg):
         """Handle processing error."""
@@ -431,10 +457,15 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             response = QMessageBox.question(self, "Quit",
                                            "Processing is still running. Quit anyway?\n\n"
-                                           "Progress will be saved to the database.",
+                                           "What will happen:\n"
+                                           "• Current file processing will complete\n"
+                                           "• All progress will be saved to the database\n"
+                                           "• You can resume later from where you left off\n\n"
+                                           "Quit now?",
                                            QMessageBox.Yes | QMessageBox.No,
                                            QMessageBox.No)
             if response == QMessageBox.Yes:
+                self.status_bar.showMessage("Stopping and saving progress...")
                 self.worker.stop()
                 self.worker.wait()  # Wait for thread to finish
                 self.save_window_geometry()  # Save position before closing
