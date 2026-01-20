@@ -13,6 +13,7 @@ from config import Config
 import DuplicateFileDetection
 import main as main_module
 from audit_manager import AuditManager
+from album_manager import AlbumManager
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +292,13 @@ class ProcessingWorker(QThread):
     def _organize_files(self, files):
         """Organize files into destination."""
         try:
+            # Create album manager if there's a source-album mapping
+            album_manager = None
+            source_album_mapping = self.config.get('source_album_mapping', {})
+            if source_album_mapping:
+                album_manager = AlbumManager(self.config.database_path)
+                self.status_update.emit("info", f"Album integration enabled for {len(source_album_mapping)} source(s)")
+
             results = main_module.organize_files(
                 config=self.config,
                 files=files,
@@ -299,7 +307,9 @@ class ProcessingWorker(QThread):
                 progress_callback=self._organizing_callback,
                 audit_manager=self.audit_manager,
                 session_id=self.session_id,
-                should_stop=self._check_should_stop  # Pass stop check callable
+                should_stop=self._check_should_stop,  # Pass stop check callable
+                album_manager=album_manager,
+                source_album_mapping=source_album_mapping
             )
 
             return results

@@ -9,7 +9,8 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QCheckBox, QSpinBox, QLineEdit, QPushButton,
                                QLabel, QListWidget, QMessageBox, QScrollArea,
                                QFormLayout, QTableWidget, QTableWidgetItem,
-                               QHeaderView, QAbstractItemView, QFileDialog)
+                               QHeaderView, QAbstractItemView, QFileDialog,
+                               QComboBox, QDialog, QDialogButtonBox)
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 import os
@@ -18,6 +19,124 @@ from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Constants for album selection dropdown
+ALBUM_NONE_TEXT = "(None)"
+ALBUM_NEW_TEXT = "+ New Album..."
+ALBUM_NEW_DATA = "__NEW_ALBUM__"  # Special data value for new album option
+
+
+class NewAlbumDialog(QDialog):
+    """Dialog for creating a new album."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Create New Album")
+        self.setMinimumWidth(450)
+        self.album_id = None  # Will be set after successful creation
+        self.init_ui()
+
+    def init_ui(self):
+        """Initialize the dialog UI."""
+        layout = QVBoxLayout()
+
+        # Album name
+        name_layout = QHBoxLayout()
+        name_label = QLabel("Album Name:")
+        name_label.setMinimumWidth(120)
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("e.g., Phone Photos, Family Album")
+        name_layout.addWidget(name_label)
+        name_layout.addWidget(self.name_edit)
+        layout.addLayout(name_layout)
+
+        # Storage location
+        storage_layout = QHBoxLayout()
+        storage_label = QLabel("Storage Location:")
+        storage_label.setMinimumWidth(120)
+        self.storage_edit = QLineEdit()
+        self.storage_edit.setPlaceholderText("Select folder for album files...")
+        self.browse_btn = QPushButton("Browse...")
+        self.browse_btn.clicked.connect(self.browse_storage)
+        storage_layout.addWidget(storage_label)
+        storage_layout.addWidget(self.storage_edit)
+        storage_layout.addWidget(self.browse_btn)
+        layout.addLayout(storage_layout)
+
+        # Description (optional)
+        desc_layout = QHBoxLayout()
+        desc_label = QLabel("Description:")
+        desc_label.setMinimumWidth(120)
+        self.desc_edit = QLineEdit()
+        self.desc_edit.setPlaceholderText("(Optional)")
+        desc_layout.addWidget(desc_label)
+        desc_layout.addWidget(self.desc_edit)
+        layout.addLayout(desc_layout)
+
+        # Sync deletions checkbox
+        self.sync_check = QCheckBox("Sync deletions (remove from album when deleted from archive)")
+        self.sync_check.setChecked(True)
+        layout.addWidget(self.sync_check)
+
+        # Help text
+        help_label = QLabel(
+            "The album storage location is where copies of photos will be stored.\n"
+            "This is separate from your main archive - ideal for photo frames or sharing."
+        )
+        help_label.setStyleSheet("color: gray; font-style: italic; padding: 10px 0;")
+        help_label.setWordWrap(True)
+        layout.addWidget(help_label)
+
+        # Dialog buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.validate_and_accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+        self.setLayout(layout)
+
+    def browse_storage(self):
+        """Open folder browser for storage location."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Album Storage Location",
+            os.path.expanduser("~")
+        )
+        if folder:
+            self.storage_edit.setText(folder)
+
+    def validate_and_accept(self):
+        """Validate inputs before accepting."""
+        name = self.name_edit.text().strip()
+        storage = self.storage_edit.text().strip()
+
+        if not name:
+            QMessageBox.warning(self, "Validation Error",
+                              "Please enter an album name.")
+            self.name_edit.setFocus()
+            return
+
+        if not storage:
+            QMessageBox.warning(self, "Validation Error",
+                              "Please select a storage location for the album.")
+            self.storage_edit.setFocus()
+            return
+
+        if not os.path.isabs(storage):
+            QMessageBox.warning(self, "Validation Error",
+                              "Storage location must be an absolute path.")
+            self.storage_edit.setFocus()
+            return
+
+        self.accept()
+
+    def get_album_data(self) -> dict:
+        """Get the entered album data."""
+        return {
+            'name': self.name_edit.text().strip(),
+            'storage_location': self.storage_edit.text().strip(),
+            'description': self.desc_edit.text().strip(),
+            'sync_deletions': self.sync_check.isChecked()
+        }
 
 
 class ImportSettingsTab(QWidget):
@@ -30,7 +149,9 @@ class ImportSettingsTab(QWidget):
     def __init__(self):
         super().__init__()
         self.db_metadata = None  # Will be set when database is loaded
+        self.album_manager = None  # Will be set when database is loaded
         self.last_clicked_source_row = -1  # For Shift/Ctrl selection in source table
+        self._albums_cache = []  # Cache of album list for dropdowns
         self.init_ui()
 
     def init_ui(self):
@@ -64,10 +185,12 @@ class ImportSettingsTab(QWidget):
         source_group.setStyleSheet(groupbox_style)
         source_layout = QVBoxLayout()
 
-        # Create table with columns: Enable, Status Icon, Path, Last Scanned, Status
+        # Create table with columns: Enable, Status Icon, Path, Last Scanned, Status, Album, Sub-Albums
         self.source_table = QTableWidget()
-        self.source_table.setColumnCount(5)
-        self.source_table.setHorizontalHeaderLabels(["Enable", "Icon", "Source Path", "Last Scanned", "Status"])
+        self.source_table.setColumnCount(7)
+        self.source_table.setHorizontalHeaderLabels([
+            "Enable", "Icon", "Source Path", "Last Scanned", "Status", "Album", "Sub-Albums"
+        ])
         self.source_table.setMinimumHeight(150)
         self.source_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.source_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -80,13 +203,16 @@ class ImportSettingsTab(QWidget):
 
         # Set column widths
         header = self.source_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Fixed)
-        header.setSectionResizeMode(1, QHeaderView.Fixed)
-        header.setSectionResizeMode(2, QHeaderView.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        self.source_table.setColumnWidth(0, 60)
-        self.source_table.setColumnWidth(1, 50)
+        header.setSectionResizeMode(0, QHeaderView.Fixed)      # Enable checkbox
+        header.setSectionResizeMode(1, QHeaderView.Fixed)      # Icon
+        header.setSectionResizeMode(2, QHeaderView.Stretch)    # Source Path
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Last Scanned
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # Status
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)  # Album dropdown
+        header.setSectionResizeMode(6, QHeaderView.Fixed)      # Sub-Albums checkbox
+        self.source_table.setColumnWidth(0, 60)   # Enable
+        self.source_table.setColumnWidth(1, 50)   # Icon
+        self.source_table.setColumnWidth(6, 80)   # Sub-Albums
         self.source_table.setMouseTracking(True)
 
         source_layout.addWidget(self.source_table)
@@ -451,7 +577,8 @@ class ImportSettingsTab(QWidget):
 
             self.source_table.setRowCount(0)
 
-    def _add_source_to_table(self, path: str, enabled: bool = True, last_scanned: str = None):
+    def _add_source_to_table(self, path: str, enabled: bool = True, last_scanned: str = None,
+                             album_id: int = None, enable_sub_albums: bool = False):
         """Add a source directory to the table."""
         row_position = self.source_table.rowCount()
         self.source_table.insertRow(row_position)
@@ -511,6 +638,34 @@ class ImportSettingsTab(QWidget):
             status_item.setForeground(QColor(200, 0, 0))
         status_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         self.source_table.setItem(row_position, 4, status_item)
+
+        # Column 5: Album dropdown
+        album_combo = QComboBox()
+        album_combo.setToolTip("Associate an album with this source directory.\n"
+                               "Files imported from this source will be added to the selected album.")
+        self._populate_album_dropdown(album_combo, album_id)
+        album_combo.currentIndexChanged.connect(
+            lambda idx, p=path, combo=album_combo: self._on_album_changed(p, combo)
+        )
+        self.source_table.setCellWidget(row_position, 5, album_combo)
+
+        # Column 6: Sub-Albums checkbox
+        sub_albums_checkbox = QCheckBox()
+        sub_albums_checkbox.setChecked(enable_sub_albums)
+        sub_albums_checkbox.setToolTip("Create sub-albums for each subdirectory.\n"
+                                       "Only available when an album is selected.")
+        # Enable/disable based on album selection
+        sub_albums_checkbox.setEnabled(album_id is not None)
+        sub_albums_checkbox.stateChanged.connect(
+            lambda state, p=path: self._on_sub_albums_changed(p, state)
+        )
+
+        sub_albums_widget = QWidget()
+        sub_albums_layout = QHBoxLayout(sub_albums_widget)
+        sub_albums_layout.addWidget(sub_albums_checkbox)
+        sub_albums_layout.setAlignment(Qt.AlignCenter)
+        sub_albums_layout.setContentsMargins(0, 0, 0, 0)
+        self.source_table.setCellWidget(row_position, 6, sub_albums_widget)
 
     def _validate_path(self, path: str) -> tuple:
         """Validate if a path exists and is accessible."""
@@ -646,6 +801,9 @@ class ImportSettingsTab(QWidget):
         if not self.db_metadata:
             return
 
+        # Refresh album cache before loading sources
+        self._refresh_albums_cache()
+
         self.source_table.setRowCount(0)
 
         sources = self.db_metadata.get_all_source_directories()
@@ -654,7 +812,9 @@ class ImportSettingsTab(QWidget):
             self._add_source_to_table(
                 path=source['path'],
                 enabled=source['enabled'],
-                last_scanned=source['last_scanned']
+                last_scanned=source['last_scanned'],
+                album_id=source.get('album_id'),
+                enable_sub_albums=source.get('enable_sub_albums', False)
             )
 
     def get_source_folders(self):
@@ -678,6 +838,218 @@ class ImportSettingsTab(QWidget):
                     if path_item:
                         enabled_folders.append(path_item.text())
         return enabled_folders
+
+    # ========== Album Association Methods ==========
+
+    def _refresh_albums_cache(self):
+        """Refresh the cached list of albums from the database."""
+        self._albums_cache = []
+        if self.album_manager:
+            try:
+                self._albums_cache = self.album_manager.get_all_albums()
+            except Exception as e:
+                logger.error(f"Failed to get albums: {e}")
+
+    def _populate_album_dropdown(self, combo: QComboBox, selected_album_id: int = None):
+        """
+        Populate an album dropdown with the cached album list.
+
+        Args:
+            combo: The QComboBox to populate
+            selected_album_id: ID of the album to select (None for "(None)")
+        """
+        combo.blockSignals(True)
+        combo.clear()
+
+        # Add "(None)" option first
+        combo.addItem(ALBUM_NONE_TEXT, None)
+
+        # Add "New Album..." option
+        combo.addItem(ALBUM_NEW_TEXT, ALBUM_NEW_DATA)
+
+        # Add albums from cache
+        selected_index = 0
+        for album in self._albums_cache:
+            combo.addItem(album['album_name'], album['id'])
+            if selected_album_id is not None and album['id'] == selected_album_id:
+                selected_index = combo.count() - 1
+
+        combo.setCurrentIndex(selected_index)
+        combo.blockSignals(False)
+
+    def _on_album_changed(self, path: str, combo: QComboBox):
+        """Handle album selection change for a source directory."""
+        album_data = combo.currentData()
+
+        # Check if "New Album..." was selected
+        if album_data == ALBUM_NEW_DATA:
+            new_album_id = self._create_new_album(path, combo)
+            if new_album_id is None:
+                # User cancelled or creation failed - reset to "(None)"
+                combo.blockSignals(True)
+                combo.setCurrentIndex(0)  # "(None)" is always first
+                combo.blockSignals(False)
+            return
+
+        album_id = album_data
+
+        # Update database
+        if self.db_metadata:
+            self.db_metadata.update_source_album(path, album_id)
+            logger.debug(f"Updated album for {path}: {album_id}")
+
+        # Find the row for this path and update sub-albums checkbox state
+        self._update_sub_albums_checkbox_state(path, album_id)
+
+    def _create_new_album(self, path: str, combo: QComboBox) -> int:
+        """
+        Open dialog to create a new album.
+
+        Args:
+            path: Source directory path (for context)
+            combo: The combo box that triggered this action
+
+        Returns:
+            New album ID if created, None if cancelled or failed
+        """
+        if not self.album_manager:
+            QMessageBox.warning(self, "No Database",
+                              "Cannot create album: No database loaded.")
+            return None
+
+        dialog = NewAlbumDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+
+        album_data = dialog.get_album_data()
+
+        try:
+            # Create the album
+            from album_manager import AlbumStorageError
+            new_album_id = self.album_manager.create_album(
+                name=album_data['name'],
+                storage_location=album_data['storage_location'],
+                description=album_data['description'],
+                sync_deletions=album_data['sync_deletions']
+            )
+
+            if new_album_id:
+                logger.info(f"Created new album '{album_data['name']}' with ID {new_album_id}")
+
+                # Refresh album cache and all dropdowns
+                self._refresh_albums_cache()
+                self.refresh_album_dropdowns()
+
+                # Select the new album in this dropdown
+                combo.blockSignals(True)
+                for i in range(combo.count()):
+                    if combo.itemData(i) == new_album_id:
+                        combo.setCurrentIndex(i)
+                        break
+                combo.blockSignals(False)
+
+                # Update database with the new album association
+                if self.db_metadata:
+                    self.db_metadata.update_source_album(path, new_album_id)
+
+                # Update sub-albums checkbox state
+                self._update_sub_albums_checkbox_state(path, new_album_id)
+
+                QMessageBox.information(self, "Album Created",
+                                       f"Album '{album_data['name']}' was created successfully.")
+                return new_album_id
+            else:
+                QMessageBox.warning(self, "Creation Failed",
+                                  f"Failed to create album. The name may already exist.")
+                return None
+
+        except AlbumStorageError as e:
+            QMessageBox.warning(self, "Storage Error",
+                              f"Could not create album storage:\n\n{str(e)}")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to create album: {e}", exc_info=True)
+            QMessageBox.critical(self, "Error",
+                               f"Failed to create album:\n\n{str(e)}")
+            return None
+
+    def _update_sub_albums_checkbox_state(self, path: str, album_id: int):
+        """Update the sub-albums checkbox enabled state for a source directory."""
+        for row in range(self.source_table.rowCount()):
+            path_item = self.source_table.item(row, 2)
+            if path_item and path_item.text() == path:
+                # Get sub-albums checkbox widget
+                sub_albums_widget = self.source_table.cellWidget(row, 6)
+                if sub_albums_widget:
+                    sub_albums_checkbox = sub_albums_widget.findChild(QCheckBox)
+                    if sub_albums_checkbox:
+                        # Enable/disable based on album selection
+                        has_album = album_id is not None
+                        sub_albums_checkbox.setEnabled(has_album)
+                        # If no album selected, uncheck and save
+                        if not has_album and sub_albums_checkbox.isChecked():
+                            sub_albums_checkbox.setChecked(False)
+                            if self.db_metadata:
+                                self.db_metadata.update_source_sub_albums_enabled(path, False)
+                break
+
+    def _on_sub_albums_changed(self, path: str, state: int):
+        """Handle sub-albums checkbox state change."""
+        enabled = (state == Qt.Checked)
+        if self.db_metadata:
+            self.db_metadata.update_source_sub_albums_enabled(path, enabled)
+            logger.debug(f"Updated sub-albums enabled for {path}: {enabled}")
+
+    def refresh_album_dropdowns(self):
+        """
+        Refresh all album dropdowns in the source table.
+        Call this when albums are created/deleted/renamed.
+        """
+        self._refresh_albums_cache()
+
+        for row in range(self.source_table.rowCount()):
+            # Get current album ID from the dropdown
+            album_combo = self.source_table.cellWidget(row, 5)
+            if album_combo and isinstance(album_combo, QComboBox):
+                current_album_id = album_combo.currentData()
+                self._populate_album_dropdown(album_combo, current_album_id)
+
+    def get_source_album_mapping(self) -> dict:
+        """
+        Get a mapping of source paths to their album associations.
+
+        Returns:
+            Dict mapping source path to dict with 'album_id' and 'enable_sub_albums'
+        """
+        mapping = {}
+        for row in range(self.source_table.rowCount()):
+            path_item = self.source_table.item(row, 2)
+            if not path_item:
+                continue
+
+            path = path_item.text()
+
+            # Get album ID from dropdown
+            album_combo = self.source_table.cellWidget(row, 5)
+            album_id = None
+            if album_combo and isinstance(album_combo, QComboBox):
+                album_id = album_combo.currentData()
+
+            # Get sub-albums enabled from checkbox
+            enable_sub_albums = False
+            sub_albums_widget = self.source_table.cellWidget(row, 6)
+            if sub_albums_widget:
+                sub_albums_checkbox = sub_albums_widget.findChild(QCheckBox)
+                if sub_albums_checkbox:
+                    enable_sub_albums = sub_albums_checkbox.isChecked()
+
+            if album_id is not None:  # Only include sources with album association
+                mapping[path] = {
+                    'album_id': album_id,
+                    'enable_sub_albums': enable_sub_albums
+                }
+
+        return mapping
 
     # ========== Ignored Directories Methods ==========
 
@@ -874,9 +1246,10 @@ class ImportSettingsTab(QWidget):
 
     # ========== Database Integration Methods ==========
 
-    def set_database(self, db_metadata):
-        """Set database and load settings."""
+    def set_database(self, db_metadata, album_manager=None):
+        """Set database and album manager, then load settings."""
         self.db_metadata = db_metadata
+        self.album_manager = album_manager
 
         if db_metadata is None:
             return

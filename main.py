@@ -141,7 +141,7 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME, batch_size=constants.DEFAULT_BATCH_SIZE, progress_callback=None, audit_manager=None, session_id=None, should_stop=None):
+def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME, batch_size=constants.DEFAULT_BATCH_SIZE, progress_callback=None, audit_manager=None, session_id=None, should_stop=None, album_manager=None, source_album_mapping=None):
     """
     Organize files by moving or copying them to the Destination directory.
 
@@ -156,12 +156,16 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
     session_id (str): Optional session ID for audit logging
     should_stop (callable): Optional callable that returns True if processing should be cancelled.
         Used for graceful shutdown - when True is returned, commits partial progress and exits cleanly.
+    album_manager (AlbumManager): Optional album manager for adding files to albums during import
+    source_album_mapping (dict): Optional mapping of source paths to album associations
+        Format: {source_path: {'album_id': int, 'enable_sub_albums': bool}}
 
     Returns:
     dict: Dictionary containing:
         total_files_processed - Integer containing the total number of files in all the provided directories.
         total_new_original_files - Integer containing the total number of NEW photos detected.
         was_cancelled - Boolean indicating if processing was stopped before completion.
+        total_album_additions - Integer containing the number of files added to albums.
 
     """
     try:
@@ -171,9 +175,17 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
         total_files_processed = 0
         total_new_original_files = 0
         total_errors = 0  # Track errors for audit
+        total_album_additions = 0  # Track files added to albums
         current_file_being_processed = 0
         file_counter = 0  # Sequential counter for filename templates
         was_cancelled = False  # Track if processing was cancelled by user
+
+        # Prepare album mapping for quick source lookup
+        album_source_lookup = {}  # Maps source directory path to album config
+        if source_album_mapping:
+            for source_path, album_config in source_album_mapping.items():
+                album_source_lookup[source_path] = album_config
+            logger.info(f"Album integration: {len(album_source_lookup)} source directories have album associations")
 
         # Extract settings from config
         source_directory = config.source_directory
@@ -199,6 +211,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                     "total_filtered": 0,
                     "total_unreliable_dates": 0,
                     "total_errors": 0,
+                    "total_album_additions": 0,
                     "filter_statistics": {},
                     "filtered_files": [],
                     "was_cancelled": True
@@ -234,6 +247,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                     "total_filtered": len(results.get('filtered_files', [])),
                     "total_unreliable_dates": results.get('unreliable_dates_count', 0),
                     "total_errors": 0,
+                    "total_album_additions": 0,
                     "filter_statistics": results.get('filter_statistics', {}),
                     "filtered_files": results.get('filtered_files', []),
                     "was_cancelled": True
@@ -510,6 +524,85 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                         except Exception as e:
                             logger.error(f"Failed to update database with archive path: {e}", exc_info=True)
 
+                        # Add file to album if source has album association
+                        if album_manager and album_source_lookup and file_hash:
+                            try:
+                                # Find matching source directory
+                                matching_source = None
+                                relative_subdir = ""
+                                for source_path in album_source_lookup:
+                                    if file_path.startswith(source_path):
+                                        matching_source = source_path
+                                        # Calculate relative subdirectory path
+                                        rel_path = os.path.relpath(file_path, source_path)
+                                        rel_dir = os.path.dirname(rel_path)
+                                        if rel_dir and rel_dir != '.':
+                                            relative_subdir = rel_dir
+                                        break
+
+                                if matching_source:
+                                    album_config = album_source_lookup[matching_source]
+                                    album_id = album_config['album_id']
+                                    enable_sub_albums = album_config.get('enable_sub_albums', False)
+
+                                    target_album_id = album_id
+
+                                    # Handle sub-albums if enabled and file is in a subdirectory
+                                    if enable_sub_albums and relative_subdir:
+                                        # Get parent album info for sub-album naming
+                                        parent_album = album_manager.get_album(album_id)
+                                        if parent_album:
+                                            # Generate sub-album name: "Parent Album - Subdir1 - Subdir2"
+                                            subdir_parts = relative_subdir.replace(os.sep, ' - ')
+                                            sub_album_name = f"{parent_album['album_name']} - {subdir_parts}"
+
+                                            # Check if sub-album exists, create if not
+                                            existing_sub_album = album_manager.get_album_by_name(sub_album_name)
+                                            if existing_sub_album:
+                                                target_album_id = existing_sub_album['id']
+                                            else:
+                                                # Create sub-album with storage in subfolder of parent
+                                                parent_storage = parent_album['storage_location']
+                                                sub_storage = os.path.join(parent_storage, relative_subdir.replace(os.sep, os.sep))
+                                                try:
+                                                    new_album_id = album_manager.create_album(
+                                                        name=sub_album_name,
+                                                        storage_location=sub_storage,
+                                                        description=f"Auto-created sub-album for {relative_subdir}",
+                                                        sync_deletions=parent_album.get('sync_deletions', True)
+                                                    )
+                                                    if new_album_id:
+                                                        target_album_id = new_album_id
+                                                        logger.info(f"Created sub-album: {sub_album_name}")
+
+                                                        # Record sub-album mapping in database
+                                                        source_dir = db_metadata.get_source_directory_by_path(matching_source)
+                                                        if source_dir:
+                                                            db_metadata.get_or_create_sub_album(
+                                                                source_directory_id=source_dir['id'],
+                                                                parent_album_id=album_id,
+                                                                sub_album_id=new_album_id,
+                                                                relative_subdir_path=relative_subdir
+                                                            )
+                                                except Exception as sub_err:
+                                                    logger.warning(f"Failed to create sub-album '{sub_album_name}': {sub_err}")
+                                                    # Fall back to parent album
+                                                    target_album_id = album_id
+
+                                    # Add file to album (copies to album storage)
+                                    album_file_path = album_manager.add_photo_to_album(
+                                        album_id=target_album_id,
+                                        file_hash=file_hash,
+                                        archive_path=target_path
+                                    )
+                                    if album_file_path:
+                                        total_album_additions += 1
+                                        logger.debug(f"Added to album: {os.path.basename(target_path)}")
+
+                            except Exception as album_err:
+                                # Album errors are non-fatal - log and continue
+                                logger.warning(f"Failed to add file to album: {album_err}")
+
                         # if file = heic convert to jpeg
                         try:
                             if file_path.endswith(constants.HEIC_EXTENSIONS):
@@ -573,6 +666,10 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
         # The was_cancelled variable is set in the file processing loop above
         files_actually_organized = current_file_being_processed - 1 if was_cancelled else total_new_original_files
 
+        # Log album additions summary
+        if total_album_additions > 0:
+            logger.info(f"Album additions: {total_album_additions} files added to albums")
+
         organize_files_return = {
             "total_files_processed": total_files_processed,
             "total_new_original_files": files_actually_organized,
@@ -580,6 +677,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             "total_filtered": len(filtered_files),
             "total_unreliable_dates": unreliable_dates_count,
             "total_errors": total_errors,
+            "total_album_additions": total_album_additions,
             "filter_statistics": filter_stats or {},
             "filtered_files": filtered_files,
             "was_cancelled": was_cancelled if 'was_cancelled' in dir() else False
@@ -595,6 +693,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             "total_filtered": len(filtered_files) if 'filtered_files' in dir() else 0,
             "total_unreliable_dates": unreliable_dates_count if 'unreliable_dates_count' in dir() else 0,
             "total_errors": total_errors,
+            "total_album_additions": total_album_additions if 'total_album_additions' in dir() else 0,
             "filter_statistics": filter_stats if 'filter_stats' in dir() else {},
             "filtered_files": filtered_files if 'filtered_files' in dir() else [],
             "was_cancelled": was_cancelled if 'was_cancelled' in dir() else False
