@@ -198,6 +198,20 @@ class PhotoDatabase:
             logger.exception(f"Failed to retrieve hashes from database: {e}")
             raise
 
+    def get_all_historical_hashes(self):
+        """
+        Retrieve all historical file hashes.
+
+        In Schema v5, there is no separate FileHashHistory table.
+        All hashes (including revision hashes) are stored directly in UniquePhotos.
+        Since get_all_hashes() already returns all hashes from UniquePhotos,
+        this method returns an empty set to maintain API compatibility.
+
+        Returns:
+            set: Empty set (all hashes are already in get_all_hashes())
+        """
+        return set()
+
     def insert_unique_photo(self, file_hash, file_path, create_datetime, create_year, create_month, create_day,
                            partial_hash=None, partial_hash_bytes=None, file_size=None, source_path=None):
         """

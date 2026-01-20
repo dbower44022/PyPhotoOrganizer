@@ -31,6 +31,7 @@ class ReprocessWorker(QThread):
     status_update = Signal(str)  # status message
     completed = Signal(dict)  # results dictionary
     error_occurred = Signal(str)  # error message
+    file_processed = Signal(str, str)  # source_path, result ('success', 'skipped', 'failed')
 
     def __init__(self, database_path: str, file_records: List[Dict[str, Any]],
                  archive_location: str, organization_template: str,
@@ -147,6 +148,7 @@ class ReprocessWorker(QThread):
                         'source_path': source_path,
                         'reason': 'Source file not found'
                     })
+                    self.file_processed.emit(source_path, 'failed')
                     continue
 
                 try:
@@ -179,6 +181,7 @@ class ReprocessWorker(QThread):
                             'source_path': source_path,
                             'reason': 'Duplicate of existing file'
                         })
+                        self.file_processed.emit(source_path, 'skipped')
                         continue
 
                     # Get file creation date
@@ -358,8 +361,10 @@ class ReprocessWorker(QThread):
                         'filename': filename,
                         'source_path': source_path,
                         'destination_path': target_path,
+                        'file_hash': file_hash,
                         'operation': operation
                     })
+                    self.file_processed.emit(source_path, 'success')
 
                 except Exception as e:
                     error_msg = f"Failed to reprocess {filename}: {str(e)}"
@@ -384,6 +389,7 @@ class ReprocessWorker(QThread):
                         'source_path': source_path,
                         'reason': str(e)
                     })
+                    self.file_processed.emit(source_path, 'failed')
 
             # Compile results
             results = {

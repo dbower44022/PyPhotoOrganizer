@@ -101,6 +101,9 @@ class FileLogTableModel(QAbstractTableModel):
             return self._get_tooltip(log, col_key)
 
         elif role == Qt.ForegroundRole:
+            # Dim text for rows being processed
+            if log.get('_processing'):
+                return QBrush(QColor('#888888'))
             if col_key == "status":
                 status = log.get('status', '')
                 if status == 'success':
@@ -111,6 +114,11 @@ class FileLogTableModel(QAbstractTableModel):
                     return QBrush(QColor('gray'))
                 elif status == 'duplicate':
                     return QBrush(QColor('orange'))
+
+        elif role == Qt.BackgroundRole:
+            # Highlight rows being processed
+            if log.get('_processing'):
+                return QBrush(QColor('#ffffcc'))  # Light yellow background
 
         elif role == Qt.UserRole:
             # Return raw data for sorting
@@ -237,6 +245,58 @@ class FileLogTableModel(QAbstractTableModel):
         self._data = []
         self._display_cache.clear()
         self.endResetModel()
+
+    def removeRowsBySourcePath(self, source_paths: set) -> int:
+        """
+        Remove rows matching the given source paths.
+
+        Args:
+            source_paths: Set of source file paths to remove
+
+        Returns:
+            Number of rows removed
+        """
+        if not source_paths:
+            return 0
+
+        # Find indices to remove (in reverse order to maintain indices during removal)
+        indices_to_remove = []
+        for i, log in enumerate(self._data):
+            if log.get('source_path') in source_paths:
+                indices_to_remove.append(i)
+
+        if not indices_to_remove:
+            return 0
+
+        # Remove in reverse order to maintain valid indices
+        self.beginResetModel()
+        for i in reversed(indices_to_remove):
+            del self._data[i]
+        self._display_cache.clear()
+        self.endResetModel()
+
+        return len(indices_to_remove)
+
+    def markRowsAsProcessing(self, source_paths: set):
+        """
+        Mark rows as being processed (for visual feedback).
+
+        Args:
+            source_paths: Set of source file paths being processed
+        """
+        for i, log in enumerate(self._data):
+            if log.get('source_path') in source_paths:
+                log['_processing'] = True
+                # Emit dataChanged for the row
+                top_left = self.index(i, 0)
+                bottom_right = self.index(i, self.columnCount() - 1)
+                self.dataChanged.emit(top_left, bottom_right)
+
+    def clearProcessingFlags(self):
+        """Clear all processing flags."""
+        for log in self._data:
+            if '_processing' in log:
+                del log['_processing']
 
 
 class FileLogFilterProxyModel(QSortFilterProxyModel):
@@ -679,6 +739,15 @@ class ImportHistoryTab(QWidget):
         self._search_timer.setSingleShot(True)
         self._search_timer.timeout.connect(self._apply_search)
 
+        # Track recently overridden files (for filter and undo)
+        self._recently_overridden_logs = []
+        self._last_override_skip_results = None  # For undo capability
+
+        # Track state for preserving selection after operations
+        self._preserved_session_id = None
+        self._preserved_scroll_position = 0
+        self._preserved_selection_paths = set()
+
         self.init_ui()
 
     def init_ui(self):
@@ -784,6 +853,7 @@ class ImportHistoryTab(QWidget):
             "New Files (Added to Archive)",
             "Duplicates",
             "Filtered (Icons/Thumbnails)",
+            "Recently Overridden",
             "Errors"
         ])
         self._show_combo.currentTextChanged.connect(self._on_show_filter_changed)
@@ -802,6 +872,12 @@ class ImportHistoryTab(QWidget):
         # Record count label
         self._count_label = QLabel("0 records")
         filter_layout.addWidget(self._count_label)
+
+        # Select All Visible button
+        self._select_all_btn = QPushButton("Select All Visible")
+        self._select_all_btn.setToolTip("Select all visible rows in the current view")
+        self._select_all_btn.clicked.connect(self._select_all_visible)
+        filter_layout.addWidget(self._select_all_btn)
 
         grid_layout.addLayout(filter_layout)
 
@@ -918,6 +994,14 @@ class ImportHistoryTab(QWidget):
             "Import selected filtered files, bypassing size/dimension filters"
         )
         export_layout.addWidget(self.override_skip_btn)
+
+        # Undo Override Skip button
+        self.undo_override_btn = QPushButton("Undo Override")
+        self.undo_override_btn.clicked.connect(self.undo_last_override_skip)
+        self.undo_override_btn.setToolTip(
+            "Undo the last override skip operation (delete imported files)"
+        )
+        export_layout.addWidget(self.undo_override_btn)
 
         # Delete session button
         self.delete_btn = QPushButton("Delete Session")
@@ -1323,12 +1407,26 @@ class ImportHistoryTab(QWidget):
             self._model.setData(self._duplicate_logs)
         elif show == "Filtered (Icons/Thumbnails)":
             self._model.setData(self._filtered_logs)
+        elif show == "Recently Overridden":
+            self._model.setData(getattr(self, '_recently_overridden_logs', []))
         elif show == "Errors":
             self._model.setData(self._error_logs)
         else:  # "All Files"
             self._model.setData(self._all_logs)
 
         self._update_count()
+
+    def _select_all_visible(self):
+        """Select all visible rows in the current view."""
+        row_count = self._proxy.rowCount()
+        if row_count == 0:
+            QMessageBox.information(self, "No Records",
+                "No records to select in the current view.")
+            return
+
+        # Select all visible rows
+        self._view.selectAll()
+        logger.info(f"Selected all {row_count} visible rows")
 
     def _on_search_changed(self, text: str):
         """Handle search text change with debounce."""
@@ -1796,13 +1894,18 @@ class ImportHistoryTab(QWidget):
                 "'Filtered (Icons/Thumbnails)' to see filtered files.")
             return
 
-        # 4. Verify source files exist
+        # 4. Verify source files exist and calculate total size
         missing_files = []
         valid_records = []
+        total_size = 0
         for record in filtered_records:
             source_path = record.get('source_path', '')
             if os.path.exists(source_path):
                 valid_records.append(record)
+                try:
+                    total_size += os.path.getsize(source_path)
+                except OSError:
+                    pass
             else:
                 missing_files.append(os.path.basename(source_path))
 
@@ -1831,11 +1934,15 @@ class ImportHistoryTab(QWidget):
                 "Archive location not configured.")
             return
 
-        # 6. Show confirmation
+        # Format total size for display
+        size_str = self._format_file_size(total_size)
+
+        # 6. Show confirmation with file size
         count = len(valid_records)
         reply = QMessageBox.question(
             self, "Confirm Override Skip",
             f"Import {count} filtered file(s)?\n\n"
+            f"Total size: {size_str}\n\n"
             f"These files were previously skipped by the photo filter "
             f"(size/dimension criteria).\n\n"
             f"Destination: {archive_location}\n"
@@ -1847,6 +1954,14 @@ class ImportHistoryTab(QWidget):
 
         if reply != QMessageBox.Yes:
             return
+
+        # 6.5. Preserve current state for restoration after completion
+        self._preserved_session_id = self.current_session_id
+        self._preserved_scroll_position = self._view.verticalScrollBar().value()
+        # Store source paths of selected rows for position restoration
+        self._preserved_selection_paths = set()
+        for record in valid_records:
+            self._preserved_selection_paths.add(record.get('source_path', ''))
 
         # 7. Build source album mapping from database
         source_album_mapping = {}
@@ -1867,7 +1982,10 @@ class ImportHistoryTab(QWidget):
             from album_manager import AlbumManager
             album_manager = AlbumManager(self.database_path)
 
-        # 9. Create and start worker (reuse ReprocessWorker)
+        # 9. Mark selected rows as processing (visual feedback)
+        self._model.markRowsAsProcessing(self._preserved_selection_paths)
+
+        # 10. Create and start worker (reuse ReprocessWorker)
         from ui.reprocess_worker import ReprocessWorker
 
         self.override_skip_worker = ReprocessWorker(
@@ -1886,6 +2004,7 @@ class ImportHistoryTab(QWidget):
         self.override_skip_worker.status_update.connect(self._on_override_skip_status)
         self.override_skip_worker.completed.connect(self._on_override_skip_completed)
         self.override_skip_worker.error_occurred.connect(self._on_override_skip_error)
+        self.override_skip_worker.file_processed.connect(self._on_override_skip_file_processed)
 
         # Create progress dialog
         self.override_skip_progress_dialog = QProgressDialog(
@@ -1910,6 +2029,21 @@ class ImportHistoryTab(QWidget):
         """Update status for override skip operation."""
         logger.info(f"Override skip status: {message}")
 
+    def _on_override_skip_file_processed(self, source_path: str, result: str):
+        """Handle per-file processing result for real-time UI updates."""
+        if result in ('success', 'skipped'):
+            # Remove the row from the view immediately
+            self._model.removeRowsBySourcePath({source_path})
+
+            # Also remove from cached filtered logs
+            if hasattr(self, '_filtered_logs'):
+                self._filtered_logs = [
+                    log for log in self._filtered_logs
+                    if log.get('source_path') != source_path
+                ]
+
+            self._update_count()
+
     def _on_override_skip_completed(self, results):
         """Handle override skip completion."""
         if hasattr(self, 'override_skip_progress_dialog'):
@@ -1918,29 +2052,81 @@ class ImportHistoryTab(QWidget):
         successful = results.get('successful', 0)
         failed = results.get('failed', 0)
         skipped = results.get('skipped', 0)
+        successful_files = results.get('successful_files', [])
+        skipped_files = results.get('skipped_files', [])
 
+        # Store results for undo capability
+        self._last_override_skip_results = results
+
+        # Build set of source paths that were successfully processed or skipped as duplicates
+        # These should be removed from the filtered view
+        paths_to_remove = set()
+        for item in successful_files:
+            paths_to_remove.add(item.get('source_path', ''))
+        for item in skipped_files:
+            paths_to_remove.add(item.get('source_path', ''))
+
+        # Add successful files to recently overridden list (for the filter)
+        for item in successful_files:
+            # Create a log-like entry for the recently overridden view
+            override_log = {
+                'source_path': item.get('source_path', ''),
+                'destination_path': item.get('destination_path', ''),
+                'operation': 'override_skip',
+                'status': 'success',
+                'file_hash': item.get('file_hash', ''),
+            }
+            self._recently_overridden_logs.append(override_log)
+
+        # Clear processing flags (in case any remain)
+        self._model.clearProcessingFlags()
+
+        # Note: Rows are already removed incrementally via _on_override_skip_file_processed
+        # This is a safety net to ensure any missed rows are cleaned up
+        if paths_to_remove:
+            # Try to remove any remaining rows (should be 0 if incremental removal worked)
+            remaining_removed = self._model.removeRowsBySourcePath(paths_to_remove)
+            if remaining_removed > 0:
+                logger.info(f"Safety cleanup removed {remaining_removed} additional rows from view")
+
+        # Restore scroll position
+        if self._preserved_scroll_position > 0:
+            QTimer.singleShot(50, lambda: self._view.verticalScrollBar().setValue(
+                min(self._preserved_scroll_position, self._view.verticalScrollBar().maximum())
+            ))
+
+        # Update the count label
+        self._update_count()
+
+        # Build result message
         msg = f"Override Skip Complete\n\n"
         msg += f"Successfully imported: {successful}\n"
         msg += f"Duplicates skipped: {skipped}\n"
         msg += f"Failed: {failed}"
 
         # Add destination info for successful files
+        if successful > 0 and successful_files:
+            first_file = successful_files[0]
+            dest_path = first_file.get('destination_path', '')
+            if dest_path:
+                msg += f"\n\nFiles copied to: {os.path.dirname(dest_path)}"
+
+        # Note about viewing imported files
         if successful > 0:
-            successful_files = results.get('successful_files', [])
-            if successful_files:
-                first_file = successful_files[0]
-                dest_path = first_file.get('destination_path', '')
-                if dest_path:
-                    msg += f"\n\nFiles copied to: {os.path.dirname(dest_path)}"
+            msg += "\n\nTip: Use 'Recently Overridden' filter to see imported files."
 
         QMessageBox.information(self, "Override Skip Complete", msg)
-        self.refresh_sessions()
+
+        # Note: We intentionally do NOT call refresh_sessions() here
+        # to preserve the current session view and scroll position
         logger.info(f"Override skip completed: {successful} successful, {skipped} skipped, {failed} failed")
 
     def _on_override_skip_error(self, error_message):
         """Handle override skip error."""
         if hasattr(self, 'override_skip_progress_dialog'):
             self.override_skip_progress_dialog.close()
+        # Clear processing flags on error
+        self._model.clearProcessingFlags()
         QMessageBox.critical(self, "Error", f"Override skip failed:\n{error_message}")
         logger.error(f"Override skip error: {error_message}")
 
@@ -1948,7 +2134,125 @@ class ImportHistoryTab(QWidget):
         """Handle override skip cancellation."""
         if hasattr(self, 'override_skip_worker'):
             self.override_skip_worker.stop()
+            # Clear processing flags on cancel
+            self._model.clearProcessingFlags()
             logger.info("Override skip cancelled by user")
+
+    def _format_file_size(self, size_bytes: int) -> str:
+        """Format file size in human-readable format."""
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size_bytes < 1024:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024
+        return f"{size_bytes:.1f} PB"
+
+    def undo_last_override_skip(self):
+        """Undo the last override skip operation."""
+        if not self._last_override_skip_results:
+            QMessageBox.information(self, "Nothing to Undo",
+                "No recent override skip operation to undo.")
+            return
+
+        successful_files = self._last_override_skip_results.get('successful_files', [])
+        if not successful_files:
+            QMessageBox.information(self, "Nothing to Undo",
+                "No files were imported in the last override skip operation.")
+            return
+
+        # Show confirmation
+        count = len(successful_files)
+        reply = QMessageBox.question(
+            self, "Confirm Undo",
+            f"Undo the import of {count} file(s)?\n\n"
+            "This will:\n"
+            "- Delete files from the archive\n"
+            "- Remove entries from the database\n"
+            "- Restore rows to the filtered view\n\n"
+            "Source files will not be affected.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            import DuplicateFileDetection
+
+            deleted_count = 0
+            db_removed_count = 0
+            restored_to_view = []
+
+            with DuplicateFileDetection.PhotoDatabase(self.database_path) as db:
+                for item in successful_files:
+                    dest_path = item.get('destination_path', '')
+                    source_path = item.get('source_path', '')
+                    file_hash = item.get('file_hash', '')
+
+                    # Delete archive file
+                    if dest_path and os.path.exists(dest_path):
+                        try:
+                            os.remove(dest_path)
+                            deleted_count += 1
+                            logger.info(f"Deleted archive file: {dest_path}")
+                        except OSError as e:
+                            logger.warning(f"Failed to delete {dest_path}: {e}")
+
+                    # Remove from database
+                    if file_hash:
+                        try:
+                            db.cursor.execute(
+                                "DELETE FROM UniquePhotos WHERE file_hash = ?",
+                                (file_hash,)
+                            )
+                            if db.cursor.rowcount > 0:
+                                db_removed_count += 1
+                        except Exception as e:
+                            logger.warning(f"Failed to remove hash {file_hash} from DB: {e}")
+
+                    # Restore to filtered view (recreate the log entry)
+                    if source_path:
+                        restored_log = {
+                            'source_path': source_path,
+                            'operation': 'skip_filtered',
+                            'status': 'skipped',
+                            'filter_reason': 'Restored after undo',
+                        }
+                        restored_to_view.append(restored_log)
+
+                db.conn.commit()
+
+            # Add restored items back to filtered logs
+            if restored_to_view and hasattr(self, '_filtered_logs'):
+                self._filtered_logs.extend(restored_to_view)
+                # If currently showing filtered view, refresh it
+                if self._show_combo.currentText() == "Filtered (Icons/Thumbnails)":
+                    self._apply_show_filter()
+
+            # Remove from recently overridden
+            paths_undone = {item.get('source_path', '') for item in successful_files}
+            self._recently_overridden_logs = [
+                log for log in self._recently_overridden_logs
+                if log.get('source_path') not in paths_undone
+            ]
+
+            # Clear the undo state
+            self._last_override_skip_results = None
+
+            QMessageBox.information(self, "Undo Complete",
+                f"Undo completed:\n\n"
+                f"Archive files deleted: {deleted_count}\n"
+                f"Database entries removed: {db_removed_count}\n"
+                f"Rows restored to view: {len(restored_to_view)}")
+
+            logger.info(f"Undo override skip: deleted {deleted_count} files, "
+                       f"removed {db_removed_count} DB entries, "
+                       f"restored {len(restored_to_view)} rows")
+
+        except Exception as e:
+            logger.error(f"Failed to undo override skip: {e}", exc_info=True)
+            QMessageBox.critical(self, "Undo Failed",
+                f"Failed to undo override skip:\n{e}")
 
     def open_selected_file(self):
         """Open the selected file with default application."""
