@@ -95,6 +95,7 @@ class AuditManager:
             destination_path TEXT,
             file_hash TEXT,
             partial_hash TEXT,
+            content_hash TEXT,
             operation TEXT NOT NULL,
             status TEXT NOT NULL,
             file_size INTEGER,
@@ -110,6 +111,7 @@ class AuditManager:
             error_message TEXT,
             error_traceback TEXT,
             duplicate_of_hash TEXT,
+            content_duplicate_of_hash TEXT,
             filter_reason TEXT,
             filter_details TEXT,
             album_name TEXT,
@@ -233,17 +235,19 @@ class AuditManager:
                     VALUES (1)
                 """)
 
-                # Auto-upgrade: Add album columns to FileProcessingLog if they don't exist
+                # Auto-upgrade: Add new columns to FileProcessingLog if they don't exist
                 cursor.execute("PRAGMA table_info(FileProcessingLog)")
                 existing_columns = {row[1] for row in cursor.fetchall()}
 
-                album_columns = [
+                new_columns = [
                     ("album_name", "TEXT"),
                     ("album_path", "TEXT"),
                     ("sub_album_name", "TEXT"),
+                    ("content_hash", "TEXT"),
+                    ("content_duplicate_of_hash", "TEXT"),
                 ]
 
-                for col_name, col_type in album_columns:
+                for col_name, col_type in new_columns:
                     if col_name not in existing_columns:
                         cursor.execute(f"ALTER TABLE FileProcessingLog ADD COLUMN {col_name} {col_type}")
                         logger.info(f"Added column {col_name} to FileProcessingLog table")
@@ -534,6 +538,7 @@ class AuditManager:
         status: str,
         file_hash: Optional[str] = None,
         partial_hash: Optional[str] = None,
+        content_hash: Optional[str] = None,
         destination_path: Optional[str] = None,
         file_size: Optional[int] = None,
         creation_date: Optional[str] = None,
@@ -544,6 +549,7 @@ class AuditManager:
         error_message: Optional[str] = None,
         error_traceback: Optional[str] = None,
         duplicate_of_hash: Optional[str] = None,
+        content_duplicate_of_hash: Optional[str] = None,
         filter_reason: Optional[str] = None,
         filter_details: Optional[Dict] = None,
         album_name: Optional[str] = None,
@@ -556,10 +562,11 @@ class AuditManager:
         Args:
             session_id: Current session ID
             source_path: Source file path
-            operation: 'copy', 'move', 'duplicate detected', 'skip_filtered', 'error'
-            status: 'success', 'failed', 'skipped', 'duplicate'
+            operation: 'copy', 'move', 'duplicate detected', 'content_duplicate_detected', 'skip_filtered', 'error'
+            status: 'success', 'failed', 'skipped', 'duplicate', 'content_duplicate'
             file_hash: Full SHA-256 hash
             partial_hash: Partial hash (first 16KB)
+            content_hash: Content (pixel) hash for images
             destination_path: Destination path (if applicable)
             file_size: File size in bytes
             creation_date: Extracted creation date
@@ -570,6 +577,7 @@ class AuditManager:
             error_message: Error message
             error_traceback: Full traceback for debugging
             duplicate_of_hash: Hash of original file (if duplicate)
+            content_duplicate_of_hash: Hash of file with matching content (if content duplicate)
             filter_reason: Why file was filtered
             filter_details: Detailed filter results
             album_name: Name of album file was added to (None if no album)
@@ -589,18 +597,19 @@ class AuditManager:
                     cursor = conn.cursor()
                     cursor.execute("""
                         INSERT INTO FileProcessingLog
-                        (session_id, source_path, destination_path, file_hash, partial_hash,
+                        (session_id, source_path, destination_path, file_hash, partial_hash, content_hash,
                          operation, status, file_size, creation_date, date_source, date_reliable,
                          process_timestamp, duration_ms, error_code, error_message, error_traceback,
-                         duplicate_of_hash, filter_reason, filter_details,
+                         duplicate_of_hash, content_duplicate_of_hash, filter_reason, filter_details,
                          album_name, album_path, sub_album_name)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
-                        session_id, source_path, destination_path, file_hash, partial_hash,
+                        session_id, source_path, destination_path, file_hash, partial_hash, content_hash,
                         operation, status, file_size, creation_date, date_source,
                         1 if date_reliable else 0, process_timestamp, duration_ms,
                         error_code, error_message, error_traceback, duplicate_of_hash,
-                        filter_reason, json.dumps(filter_details) if filter_details else None,
+                        content_duplicate_of_hash, filter_reason,
+                        json.dumps(filter_details) if filter_details else None,
                         album_name, album_path, sub_album_name
                     ))
                     conn.commit()
@@ -1277,9 +1286,9 @@ class AuditManager:
                 writer = csv.writer(f)
                 writer.writerow([
                     'source_path', 'destination_path', 'operation', 'status',
-                    'file_hash', 'file_size', 'creation_date', 'date_source',
+                    'file_hash', 'content_hash', 'file_size', 'creation_date', 'date_source',
                     'duration_ms', 'error_code', 'error_message',
-                    'duplicate_of_hash', 'filter_reason',
+                    'duplicate_of_hash', 'content_duplicate_of_hash', 'filter_reason',
                     'album_name', 'album_path', 'sub_album_name'
                 ])
 
@@ -1290,6 +1299,7 @@ class AuditManager:
                         file_log.get('operation', ''),
                         file_log.get('status', ''),
                         file_log.get('file_hash', ''),
+                        file_log.get('content_hash', ''),
                         file_log.get('file_size', ''),
                         file_log.get('creation_date', ''),
                         file_log.get('date_source', ''),
@@ -1297,6 +1307,7 @@ class AuditManager:
                         file_log.get('error_code', ''),
                         file_log.get('error_message', ''),
                         file_log.get('duplicate_of_hash', ''),
+                        file_log.get('content_duplicate_of_hash', ''),
                         file_log.get('filter_reason', ''),
                         file_log.get('album_name', ''),
                         file_log.get('album_path', ''),

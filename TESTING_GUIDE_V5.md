@@ -350,6 +350,196 @@ sqlite3 PhotoDB_BowerPhotoArchiveDB.db "SELECT source_path, operation, status FR
 
 ---
 
+### Test 8: Content-Based Duplicate Detection (10 minutes)
+
+Content-based hashing detects visually identical images even when file metadata differs.
+
+**Setup:**
+1. Create test images with same pixels but different EXIF:
+   ```bash
+   mkdir -p ~/content_hash_test
+   cd ~/content_hash_test
+
+   # Create original image
+   convert -size 200x200 xc:blue original.jpg
+
+   # Create copies with different EXIF (same pixels)
+   cp original.jpg modified_exif1.jpg
+   cp original.jpg modified_exif2.jpg
+   exiftool -DateTimeOriginal="2020:01:01 10:00:00" modified_exif1.jpg
+   exiftool -DateTimeOriginal="2021:06:15 14:30:00" modified_exif2.jpg
+   ```
+
+**Test A: Enable content hashing**
+1. Launch GUI: `python main_gui.py`
+2. Go to System Settings tab
+3. Find "Content-Based Duplicate Detection" section
+4. Ensure checkbox is enabled
+5. Expected: Setting persists after restart
+
+**Test B: Import with content hashing**
+1. Add `~/content_hash_test` as source folder
+2. Start Processing
+3. Go to Import History tab
+4. Select "Content Duplicates" from Show dropdown
+
+**Expected behavior:**
+- First file (`original.jpg`) imports successfully
+- Second file (`modified_exif1.jpg`) detected as content duplicate
+- Third file (`modified_exif2.jpg`) detected as content duplicate
+- Content duplicates appear with purple highlighting
+
+**Verification:**
+```bash
+# Check content_hash column populated
+sqlite3 PhotoDB_BowerPhotoArchiveDB.db "SELECT file_hash, file_name, content_hash FROM UniquePhotos WHERE content_hash IS NOT NULL LIMIT 5"
+# Should show content_hash values
+
+# Check duplicate content hashes
+sqlite3 PhotoDB_BowerPhotoArchiveDB.db "
+SELECT content_hash, COUNT(*) as count
+FROM UniquePhotos
+WHERE content_hash IS NOT NULL
+GROUP BY content_hash
+HAVING count > 1
+"
+# Should show content hashes with count > 1 (content duplicates)
+
+# Check FileProcessingLog for content duplicates
+sqlite3 PhotoDB_BowerPhotoArchiveDB.db "SELECT source_path, operation FROM FileProcessingLog WHERE operation = 'content_duplicate' ORDER BY process_timestamp DESC LIMIT 5"
+```
+
+**Pass criteria:**
+- ✅ Content hashes calculated for all images
+- ✅ Content duplicates detected correctly
+- ✅ Purple highlighting in Import History
+- ✅ content_hash column populated in database
+- ✅ Videos skipped (content_hash = NULL)
+
+---
+
+### Test 9: Content Hash Backfill (5 minutes)
+
+**Setup:**
+1. Ensure archive has images without content hashes
+   ```bash
+   # Clear content hashes for testing backfill
+   sqlite3 PhotoDB_BowerPhotoArchiveDB.db "UPDATE UniquePhotos SET content_hash = NULL"
+   ```
+
+**Test:**
+1. Go to System Settings tab
+2. Find "Content-Based Duplicate Detection" section
+3. Click "Calculate Content Hashes for Existing Files"
+4. Watch progress bar
+5. Click "Cancel" mid-process to test cancellation
+6. Restart backfill and let it complete
+
+**Expected behavior:**
+- Progress bar shows scanning progress
+- Status updates show current file
+- Cancel button stops gracefully
+- Completion dialog shows:
+  - Files processed
+  - Files skipped (videos)
+  - Errors (if any)
+  - Discovered duplicates (newly found)
+
+**Verification:**
+```bash
+# Check content hashes populated
+sqlite3 PhotoDB_BowerPhotoArchiveDB.db "SELECT COUNT(*) as total, SUM(CASE WHEN content_hash IS NOT NULL THEN 1 ELSE 0 END) as with_hash FROM UniquePhotos"
+# with_hash should be > 0
+
+# Check videos have NULL content_hash
+sqlite3 PhotoDB_BowerPhotoArchiveDB.db "SELECT file_name FROM UniquePhotos WHERE content_hash IS NULL AND (file_name LIKE '%.mp4' OR file_name LIKE '%.mov')"
+# Should list video files
+```
+
+**Pass criteria:**
+- ✅ Progress bar updates correctly
+- ✅ Cancel stops gracefully
+- ✅ Completion shows accurate statistics
+- ✅ Content hashes calculated for images
+- ✅ Videos correctly skipped
+- ✅ Discovered duplicates reported (if any)
+
+---
+
+### Test 10: Photo Review Content Duplicates Filter (5 minutes)
+
+**Setup:**
+1. Ensure database has content duplicates (from Test 8)
+
+**Test:**
+1. Launch Photo Review: `python photo_review_app.py`
+2. Find View dropdown in toolbar
+3. Select "Content Duplicates"
+
+**Expected behavior:**
+- Grid shows only files with matching content hashes
+- Files grouped by content hash
+- Thumbnails load correctly
+- Can select and work with files normally
+
+**Verification:**
+- Count files shown in grid
+- Should match count from:
+  ```bash
+  sqlite3 PhotoDB_BowerPhotoArchiveDB.db "
+  SELECT COUNT(*) FROM UniquePhotos u
+  WHERE u.content_hash IS NOT NULL
+  AND u.content_hash IN (
+      SELECT content_hash FROM UniquePhotos
+      WHERE content_hash IS NOT NULL
+      GROUP BY content_hash HAVING COUNT(*) > 1
+  )"
+  ```
+
+**Pass criteria:**
+- ✅ View filter dropdown works
+- ✅ Content duplicates displayed correctly
+- ✅ Thumbnails load without errors
+- ✅ Selection and actions work normally
+- ✅ Switch back to "Browse Folders" works
+
+---
+
+### Test 11: Content Hash Test GUI (3 minutes)
+
+**Test:**
+1. Launch test GUI: `python tests/content_hash_test_gui.py`
+2. Click "Browse" and select `~/content_hash_test`
+3. Click "Scan Files"
+4. Review results
+
+**Expected behavior:**
+- Progress bar shows scanning progress
+- Results table populates with:
+  - Filename
+  - Content Hash
+  - File Size
+  - Status (Unique/Duplicate)
+- Duplicates highlighted with colors
+- Summary shows statistics
+- Duplicates panel lists groups
+
+**Test export:**
+1. Click "Export Results"
+2. Save as TXT
+3. Save as CSV
+4. Save as JSON
+5. Verify all formats contain correct data
+
+**Pass criteria:**
+- ✅ GUI launches without errors
+- ✅ Scanning works correctly
+- ✅ Duplicates detected and highlighted
+- ✅ Export works for all formats
+- ✅ Cancel button functional
+
+---
+
 ## Performance Checks
 
 ### Query Performance
@@ -453,6 +643,10 @@ All tests must pass:
 - ✅ EXIF editing creates revision records
 - ✅ Delete/restore works correctly
 - ✅ Duplicate detection works for all scenarios
+- ✅ Content-based duplicate detection works
+- ✅ Content hash backfill works correctly
+- ✅ Photo Review content duplicates filter works
+- ✅ Content hash test GUI functions properly
 - ✅ No data loss
 - ✅ No performance regression
 - ✅ All revision chains valid

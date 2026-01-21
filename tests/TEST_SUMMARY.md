@@ -19,6 +19,8 @@ tests/
 ├── TEST_SUMMARY.md               # This file
 ├── requirements-test.txt         # Test dependencies
 ├── test_example.py               # Example tests and patterns
+├── test_content_hash.py          # Content hashing tests (CLI + pytest)
+├── content_hash_test_gui.py      # Content hashing GUI test tool
 ├── conftest.py                   # Shared fixtures and configuration
 │
 ├── unit/                         # Unit Tests (40+ tests)
@@ -101,6 +103,27 @@ Project Root:
 - Database discovery
 - Schema upgrades
 
+### Content Hashing Tests (`tests/`)
+
+**test_content_hash.py** - Content-Based Duplicate Detection
+- `hash_image_content()` function testing
+- EXIF rotation handling (images with orientation tags)
+- RGB conversion (grayscale, RGBA images)
+- Same pixels = same hash verification
+- Different pixels = different hash verification
+- Video file handling (returns None)
+- Error handling (corrupted files, missing files)
+- Duplicate detection across test images
+- Command-line interface (--verbose, --recursive, --json)
+
+**content_hash_test_gui.py** - GUI Test Tool
+- Folder selection and scanning
+- Progress reporting
+- Results table display
+- Duplicate highlighting (color-coded groups)
+- Export functionality (TXT, CSV, JSON)
+- Cancel operation support
+
 ### Integration Tests (`tests/integration/`)
 
 **test_full_workflow.py** - End-to-End Workflows
@@ -110,6 +133,7 @@ Project Root:
 - Unreliable date flagging
 - Multi-source processing
 - Large-scale processing (100+ files)
+- Content-based duplicate detection integration
 
 ### Test Utilities (`tests/test_utils/`)
 
@@ -336,12 +360,13 @@ start htmlcov/index.html     # Windows
 
 ## Statistics
 
-- **Test Files**: 9
-- **Test Cases**: 100+
+- **Test Files**: 11
+- **Test Cases**: 110+
 - **Fixtures**: 25+
 - **Test Utilities**: 20+ helper functions
-- **Documentation**: 500+ lines
+- **Documentation**: 600+ lines
 - **Example Tests**: 15 comprehensive examples
+- **GUI Test Tools**: 1 (content_hash_test_gui.py)
 
 ---
 

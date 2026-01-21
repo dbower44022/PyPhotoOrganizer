@@ -230,7 +230,8 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                 config=config,  # Pass config for photo filtering
                 audit_manager=audit_manager,
                 session_id=session_id,
-                should_stop=should_stop  # Pass stop check callable
+                should_stop=should_stop,  # Pass stop check callable
+                content_hash_enabled=config.get('content_hash_enabled', True)  # Content-based duplicate detection
             )
             logger.info(f"The DuplicateFileDetection.find_duplicates returned = {results}")
 
@@ -259,6 +260,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             # The files that are NOT duplicates, will be returned in original_files.  These need to be processed to be copied/moved
             original_files = results.get('original_files')
             filtered_files = results.get('filtered_files', [])
+            content_duplicate_files = results.get('content_duplicate_files', [])
             filter_stats = results.get('filter_statistics')
             unreliable_dates_count = results.get('unreliable_dates_count', 0)
 
@@ -695,11 +697,13 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             "total_new_original_files": files_actually_organized,
             "total_duplicates": len(duplicate_files),
             "total_filtered": len(filtered_files),
+            "total_content_duplicates": len(content_duplicate_files) if 'content_duplicate_files' in dir() else 0,
             "total_unreliable_dates": unreliable_dates_count,
             "total_errors": total_errors,
             "total_album_additions": total_album_additions,
             "filter_statistics": filter_stats or {},
             "filtered_files": filtered_files,
+            "content_duplicate_files": content_duplicate_files if 'content_duplicate_files' in dir() else [],
             "was_cancelled": was_cancelled if 'was_cancelled' in dir() else False
         }
         return organize_files_return
@@ -711,11 +715,13 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             "total_new_original_files": total_new_original_files,
             "total_duplicates": len(duplicate_files) if 'duplicate_files' in dir() else 0,
             "total_filtered": len(filtered_files) if 'filtered_files' in dir() else 0,
+            "total_content_duplicates": len(content_duplicate_files) if 'content_duplicate_files' in dir() else 0,
             "total_unreliable_dates": unreliable_dates_count if 'unreliable_dates_count' in dir() else 0,
             "total_errors": total_errors,
             "total_album_additions": total_album_additions if 'total_album_additions' in dir() else 0,
             "filter_statistics": filter_stats if 'filter_stats' in dir() else {},
             "filtered_files": filtered_files if 'filtered_files' in dir() else [],
+            "content_duplicate_files": content_duplicate_files if 'content_duplicate_files' in dir() else [],
             "was_cancelled": was_cancelled if 'was_cancelled' in dir() else False
         }
         return organize_files_return
