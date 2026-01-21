@@ -312,6 +312,200 @@ class ImageModifier:
             return False, "", error_msg
 
     @staticmethod
+    def auto_enhance(input_path: str) -> Tuple[bool, dict, str]:
+        """
+        Analyze image histogram and return optimal adjustment values.
+
+        Uses statistical analysis of brightness, contrast, and saturation
+        to calculate adjustment values that would improve the image.
+
+        Args:
+            input_path: Path to input image
+
+        Returns:
+            tuple: (success, adjustments_dict, error_message)
+                   adjustments_dict contains: brightness, contrast, saturation (-100 to +100)
+        """
+        try:
+            logger.info(f"Auto-enhance analysis: {input_path}")
+
+            # Open image
+            img = Image.open(input_path)
+
+            # Convert to RGB if necessary for analysis
+            if img.mode not in ('RGB', 'L'):
+                img = img.convert('RGB')
+
+            # Calculate image statistics
+            from PIL import ImageStat
+            stat = ImageStat.Stat(img)
+
+            # Brightness analysis: Target mean ~128 (middle gray)
+            # stat.mean gives mean for each channel (R, G, B)
+            mean_brightness = sum(stat.mean[:3]) / 3 if img.mode == 'RGB' else stat.mean[0]
+            logger.info(f"  Mean brightness: {mean_brightness:.1f}")
+
+            # Calculate brightness adjustment
+            # Target is 128 (middle gray), scale factor 1.28 for -100 to +100 range
+            brightness_adjust = int((128 - mean_brightness) / 1.28)
+            # Clamp to reasonable range
+            brightness_adjust = max(-50, min(50, brightness_adjust))
+            logger.info(f"  Brightness adjustment: {brightness_adjust:+d}")
+
+            # Contrast analysis: Target stddev ~64 (good tonal range)
+            # stat.stddev gives standard deviation for each channel
+            mean_stddev = sum(stat.stddev[:3]) / 3 if img.mode == 'RGB' else stat.stddev[0]
+            logger.info(f"  Mean stddev: {mean_stddev:.1f}")
+
+            # Calculate contrast adjustment
+            if mean_stddev < 40:  # Low contrast - needs boost
+                contrast_adjust = int((64 - mean_stddev) * 1.5)
+            elif mean_stddev > 80:  # High contrast - might need reduction
+                contrast_adjust = int((64 - mean_stddev) * 0.5)
+            else:
+                contrast_adjust = 0
+            # Clamp to reasonable range
+            contrast_adjust = max(-40, min(60, contrast_adjust))
+            logger.info(f"  Contrast adjustment: {contrast_adjust:+d}")
+
+            # Saturation analysis: Analyze using HSV colorspace
+            saturation_adjust = 0
+            if img.mode == 'RGB':
+                hsv_img = img.convert('HSV')
+                hsv_stat = ImageStat.Stat(hsv_img)
+                # Saturation is the second channel in HSV
+                hsv_saturation = hsv_stat.mean[1]
+                logger.info(f"  HSV saturation mean: {hsv_saturation:.1f}")
+
+                # Calculate saturation adjustment
+                # Target ~128 for good color vibrancy
+                if hsv_saturation < 80:  # Undersaturated
+                    saturation_adjust = int((100 - hsv_saturation) / 2)
+                elif hsv_saturation > 180:  # Oversaturated
+                    saturation_adjust = int((128 - hsv_saturation) / 3)
+                else:
+                    saturation_adjust = 0
+                # Clamp to reasonable range
+                saturation_adjust = max(-30, min(40, saturation_adjust))
+                logger.info(f"  Saturation adjustment: {saturation_adjust:+d}")
+
+            adjustments = {
+                'brightness': brightness_adjust,
+                'contrast': contrast_adjust,
+                'saturation': saturation_adjust
+            }
+
+            logger.info(f"  ✓ Auto-enhance analysis complete")
+            logger.info(f"  Recommended adjustments: {adjustments}")
+
+            return True, adjustments, ""
+
+        except Exception as e:
+            error_msg = f"Failed to analyze image for auto-enhance: {str(e)}"
+            logger.error(f"  ✗ {error_msg}", exc_info=True)
+            return False, {}, error_msg
+
+    @staticmethod
+    def apply_edits(input_path: str, brightness: float = 0, contrast: float = 0,
+                   saturation: float = 0, crop_box: Tuple[int, int, int, int] = None) -> Tuple[bool, str, str]:
+        """
+        Apply combined edits (crop and/or color adjustments) to an image.
+
+        This method applies crop first (if specified), then color adjustments.
+        It's more efficient than separate calls when both operations are needed.
+
+        Args:
+            input_path: Path to input image
+            brightness: Brightness adjustment (-100 to +100, 0 = no change)
+            contrast: Contrast adjustment (-100 to +100, 0 = no change)
+            saturation: Saturation adjustment (-100 to +100, 0 = no change)
+            crop_box: Optional crop box as (left, upper, right, lower) in pixels
+
+        Returns:
+            tuple: (success, output_path, error_message)
+        """
+        try:
+            logger.info(f"Applying combined edits: {input_path}")
+            logger.info(f"  Brightness: {brightness:+.1f}, Contrast: {contrast:+.1f}, Saturation: {saturation:+.1f}")
+            if crop_box:
+                logger.info(f"  Crop box: {crop_box}")
+
+            # Open image
+            img = Image.open(input_path)
+            original_format = img.format
+            logger.info(f"  Original size: {img.size}, Format: {original_format}")
+
+            # Extract EXIF data
+            exif_dict = None
+            try:
+                exif_data = img.info.get('exif')
+                if exif_data:
+                    exif_dict = piexif.load(exif_data)
+                    logger.info("  ✓ EXIF data extracted for preservation")
+            except Exception as e:
+                logger.warning(f"  Could not extract EXIF data: {e}")
+
+            # Apply crop first if specified
+            if crop_box:
+                left, upper, right, lower = crop_box
+                width, height = img.size
+
+                # Validate crop box
+                if left < 0 or upper < 0 or right > width or lower > height:
+                    raise ValueError(f"Crop box {crop_box} exceeds image bounds {img.size}")
+                if right <= left or lower <= upper:
+                    raise ValueError(f"Invalid crop box {crop_box} - negative area")
+
+                img = img.crop(crop_box)
+                logger.info(f"  ✓ Cropped to: {img.size}")
+
+            # Apply color adjustments
+            adjusted = img
+
+            # Brightness: -100 to +100 → factor 0.0 to 2.0
+            if brightness != 0:
+                factor = 1.0 + (brightness / 100.0)
+                enhancer = ImageEnhance.Brightness(adjusted)
+                adjusted = enhancer.enhance(factor)
+                logger.info(f"  Applied brightness factor: {factor:.2f}")
+
+            # Contrast: -100 to +100 → factor 0.0 to 2.0
+            if contrast != 0:
+                factor = 1.0 + (contrast / 100.0)
+                enhancer = ImageEnhance.Contrast(adjusted)
+                adjusted = enhancer.enhance(factor)
+                logger.info(f"  Applied contrast factor: {factor:.2f}")
+
+            # Saturation: -100 to +100 → factor 0.0 to 2.0
+            if saturation != 0:
+                factor = 1.0 + (saturation / 100.0)
+                enhancer = ImageEnhance.Color(adjusted)
+                adjusted = enhancer.enhance(factor)
+                logger.info(f"  Applied saturation factor: {factor:.2f}")
+
+            # Create temporary output file
+            base, ext = os.path.splitext(input_path)
+            output_path = f"{base}_edited{ext}"
+
+            # Save with EXIF data
+            if exif_dict:
+                exif_bytes = piexif.dump(exif_dict)
+                adjusted.save(output_path, format=original_format or 'JPEG',
+                            exif=exif_bytes, quality=95)
+            else:
+                adjusted.save(output_path, format=original_format or 'JPEG', quality=95)
+
+            logger.info(f"  ✓ Edits applied successfully")
+            logger.info(f"  Output: {output_path}")
+
+            return True, output_path, ""
+
+        except Exception as e:
+            error_msg = f"Failed to apply edits: {str(e)}"
+            logger.error(f"  ✗ {error_msg}", exc_info=True)
+            return False, "", error_msg
+
+    @staticmethod
     def convert_format(input_path: str, target_format: str,
                       quality: int = 95) -> Tuple[bool, str, str]:
         """
