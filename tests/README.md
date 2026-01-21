@@ -27,6 +27,8 @@ This test suite provides comprehensive coverage of PyPhotoOrganizer functionalit
 tests/
 ├── conftest.py                 # Shared fixtures and pytest configuration
 ├── pytest.ini                  # Pytest settings (in project root)
+├── test_content_hash.py        # Content hashing tests (CLI + pytest)
+├── content_hash_test_gui.py    # Content hashing GUI test tool
 │
 ├── unit/                       # Unit tests for individual components
 │   ├── test_hashing.py         # File hashing functions
@@ -200,6 +202,50 @@ pytest tests/integration/
 # Run integration tests excluding slow ones
 pytest tests/integration/ -m "not slow"
 ```
+
+### Content Hash Tests (`tests/`)
+
+Tests for content-based (pixel) duplicate detection:
+
+- **test_content_hash.py**: Pytest tests and CLI tool for content hashing
+  - `hash_image_content()` function correctness
+  - EXIF orientation handling
+  - RGB normalization
+  - Duplicate detection accuracy
+  - Video file handling (should return None)
+  - Error handling for corrupted files
+
+- **content_hash_test_gui.py**: GUI tool for interactive testing
+
+```bash
+# Run content hash pytest tests
+pytest tests/test_content_hash.py -v
+
+# Run as command-line tool
+python tests/test_content_hash.py ~/my_photos --verbose
+
+# Run with JSON output
+python tests/test_content_hash.py ~/my_photos --json
+
+# Run recursive scan
+python tests/test_content_hash.py ~/my_photos --recursive
+
+# Launch GUI test tool
+python tests/content_hash_test_gui.py
+```
+
+**CLI Options:**
+- `--verbose` or `-v`: Show detailed output for each file
+- `--recursive` or `-r`: Scan subdirectories
+- `--json` or `-j`: Output results as JSON
+
+**GUI Features:**
+- Browse for folder
+- Progress bar during scanning
+- Results table with columns: Filename, Content Hash, File Size, Status
+- Duplicate highlighting with color-coded groups
+- Export to TXT, CSV, or JSON
+- Cancel button for long-running scans
 
 ## Test Markers
 

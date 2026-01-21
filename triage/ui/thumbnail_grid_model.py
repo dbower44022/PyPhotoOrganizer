@@ -319,6 +319,104 @@ class ThumbnailGridModel(QAbstractListModel):
             logger.error(f"Error loading folder {folder_path}: {e}", exc_info=True)
             raise  # Re-raise to be caught by caller
 
+    def load_content_duplicates(self):
+        """
+        Load all images that have duplicate content hashes.
+
+        This finds files where the same pixel content exists in multiple files
+        (different file hashes but identical visual content).
+
+        Returns:
+            int: Number of duplicate groups found
+        """
+        try:
+            # Cancel pending thumbnail generation
+            if hasattr(self, 'thumbnail_cache') and self.thumbnail_cache:
+                self.thumbnail_cache.cancel_all_generation()
+                self.thumbnail_cache.clear_memory_cache()
+
+            # Set flag to prevent data() from being called during reset
+            self._is_resetting = True
+
+            self.beginResetModel()
+            self.file_items.clear()
+
+            # Clear marks (new view = fresh start)
+            self.marked_for_deletion.clear()
+            self.marked_as_favorite.clear()
+            self.marked_for_date_correction.clear()
+
+            # Video extensions to filter out
+            video_extensions = {'.mov', '.mp4', '.avi', '.mkv', '.m4v', '.mpg', '.mpeg', '.wmv', '.MOV', '.MP4', '.AVI'}
+
+            duplicate_groups = 0
+
+            with PhotoDatabase(self.db_path) as db:
+                # Find all content hashes that appear more than once
+                # This query gets all files whose content_hash is shared with at least one other file
+                query = """
+                    SELECT u.file_hash, u.file_name, u.file_size, u.content_hash
+                    FROM UniquePhotos u
+                    WHERE u.content_hash IS NOT NULL
+                      AND u.content_hash IN (
+                          SELECT content_hash
+                          FROM UniquePhotos
+                          WHERE content_hash IS NOT NULL
+                          GROUP BY content_hash
+                          HAVING COUNT(*) > 1
+                      )
+                    ORDER BY u.content_hash, u.file_name
+                """
+
+                db.cursor.execute(query)
+
+                # Track unique content hashes to count groups
+                seen_content_hashes = set()
+                videos_filtered = 0
+
+                for row in db.cursor.fetchall():
+                    file_path = row[1]
+                    file_ext = os.path.splitext(file_path)[1]
+                    content_hash = row[3]
+
+                    # Skip video files
+                    if file_ext in video_extensions:
+                        videos_filtered += 1
+                        continue
+
+                    # Track unique content hashes for group count
+                    if content_hash not in seen_content_hashes:
+                        seen_content_hashes.add(content_hash)
+                        duplicate_groups += 1
+
+                    self.file_items.append({
+                        'file_hash': row[0],
+                        'file_path': file_path,
+                        'file_size': row[2],
+                        'content_hash': content_hash
+                    })
+
+                if videos_filtered > 0:
+                    logger.info(f"Filtered out {videos_filtered} video files")
+
+            # Load existing marks from database
+            self._load_existing_marks()
+
+            self.endResetModel()
+
+            # Clear resetting flag AFTER endResetModel
+            self._is_resetting = False
+
+            logger.info(f"Loaded {len(self.file_items)} content duplicate images in {duplicate_groups} groups")
+            return duplicate_groups
+
+        except Exception as e:
+            # Make sure to call endResetModel even on error
+            self.endResetModel()
+            self._is_resetting = False
+            logger.error(f"Error loading content duplicates: {e}", exc_info=True)
+            raise
+
     def _load_existing_marks(self):
         """Load existing marks from database into memory sets."""
         # Get all active marks

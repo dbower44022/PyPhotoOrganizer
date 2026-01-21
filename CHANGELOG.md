@@ -5,6 +5,95 @@ All notable changes to PyPhotoOrganizer will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] - 2026-01-21
+
+### Added
+
+**Content-Based (Pixel) Duplicate Detection**
+
+A new hybrid duplicate detection system that identifies visually identical images even when their file hashes differ due to metadata changes.
+
+**Core Feature:**
+- **Algorithm**: SHA-256 hash of normalized RGB pixel bytes
+- **EXIF Handling**: Auto-rotates images using EXIF orientation before hashing
+- **RGB Normalization**: Converts all color modes to RGB for consistent comparison
+- **Video Support**: Videos skipped (returns NULL content_hash)
+
+**Database Changes:**
+- Added `content_hash` column to `UniquePhotos` table
+- Added `content_hash_enabled` setting to `DatabaseMetadata` table
+- Added `content_hash` and `content_duplicate_of_hash` columns to `FileProcessingLog` table
+- Auto-migration for existing databases
+
+**New Functions (DuplicateFileDetection.py):**
+- `hash_image_content(file_path)` - Calculate pixel-based content hash
+- `PhotoDatabase.has_content_hash(content_hash)` - Check if content hash exists
+- `PhotoDatabase.get_files_by_content_hash(content_hash)` - Get all matching files
+- `PhotoDatabase.update_content_hash(file_hash, content_hash)` - Update content hash
+- `PhotoDatabase.get_files_without_content_hash(limit)` - Get files for backfill
+- `PhotoDatabase.count_files_without_content_hash()` - Count files needing backfill
+
+**New Settings (database_metadata.py):**
+- `is_content_hash_enabled()` - Check if content hashing is enabled
+- `set_content_hash_enabled(enabled)` - Enable/disable content hashing
+
+**Backfill Capability:**
+- New `ContentHashBackfillWorker` (`ui/content_hash_worker.py`)
+- Background thread calculates content hashes for existing archives
+- Progress reporting with cancellation support
+- Detects and reports newly discovered duplicates during backfill
+
+**System Settings UI:**
+- New "Content-Based Duplicate Detection" section
+- Enable/disable checkbox
+- "Calculate Content Hashes for Existing Files" button
+- Progress bar and cancel button during backfill
+- Statistics on completion (processed, skipped, errors, discovered duplicates)
+
+**Import History Integration:**
+- "Content Duplicates" option in Show dropdown filter
+- Purple color (#9966CC) highlighting for content_duplicate status
+- Tracks content_duplicate_files in results
+
+**Photo Review (Triage) Integration:**
+- New View filter dropdown in toolbar
+- "Content Duplicates" option shows files with matching content hashes
+- New `ThumbnailGridModel.load_content_duplicates()` method
+
+**Test Tools:**
+- New `tests/test_content_hash.py` - Command-line and pytest tests
+  - Supports --verbose, --recursive, --json flags
+  - Tests hash_image_content() function correctness
+- New `tests/content_hash_test_gui.py` - GUI test tool
+  - Folder selection and recursive scanning
+  - Progress bar and cancel button
+  - Results table with duplicate highlighting (color-coded groups)
+  - Summary statistics and duplicate groups panel
+  - Export to TXT, CSV, JSON formats
+
+**Use Cases:**
+- Detecting images with edited EXIF dates
+- Finding images re-saved with different compression
+- Identifying images with stripped metadata
+- Cross-format comparison (same pixels in JPEG vs PNG)
+
+**Files Created:**
+- `ui/content_hash_worker.py` - Background worker for backfill
+- `tests/test_content_hash.py` - Regression test suite
+- `tests/content_hash_test_gui.py` - GUI test tool
+
+**Files Modified:**
+- `DuplicateFileDetection.py` - Content hash function and database methods
+- `main.py` - Pass content_hash_enabled to find_duplicates()
+- `audit_manager.py` - Added content_hash columns to schema
+- `database_metadata.py` - Added content_hash_enabled setting
+- `ui/system_settings_tab.py` - Added Content-Based Duplicate Detection UI
+- `ui/import_history_tab.py` - Added content duplicates filter
+- `triage/ui/thumbnail_grid_model.py` - Added load_content_duplicates()
+- `triage/ui/triage_window.py` - Added View filter dropdown
+
+---
+
 ## [3.2.0] - 2026-01-20
 
 ### Added

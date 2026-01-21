@@ -310,6 +310,13 @@ class DatabaseMetadata:
                     logger.info("Upgrading database: adding photo_review_state column")
                     cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN photo_review_state TEXT DEFAULT '{}'")
 
+                # Add content_hash_enabled column if missing (for content-based duplicate detection)
+                if 'content_hash_enabled' not in columns:
+                    logger.info("Upgrading database: adding content_hash_enabled column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN content_hash_enabled INTEGER DEFAULT 1")
+                    # Set default value for existing rows
+                    cursor.execute("UPDATE DatabaseMetadata SET content_hash_enabled = 1 WHERE content_hash_enabled IS NULL")
+
                 conn.commit()
                 logger.debug(f"Metadata table ensured in {self.database_path}")
 
@@ -2965,6 +2972,83 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to set thumbnail cache dir: {e}")
+            return False
+
+    # -------------------------------------------------------------------------
+    # Content Hash Settings Methods
+    # -------------------------------------------------------------------------
+
+    def is_content_hash_enabled(self) -> bool:
+        """
+        Check if content-based (pixel) hashing is enabled for duplicate detection.
+
+        Returns:
+            True if enabled (default), False otherwise
+        """
+        try:
+            self._ensure_metadata_table()
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT content_hash_enabled FROM DatabaseMetadata WHERE id = 1
+                """)
+                result = cursor.fetchone()
+
+                if result is None or result[0] is None:
+                    return True  # Default to enabled
+                return bool(result[0])
+
+        except Exception as e:
+            logger.error(f"Error checking content hash enabled status: {e}", exc_info=True)
+            return True  # Default to enabled on error
+
+    def set_content_hash_enabled(self, enabled: bool) -> bool:
+        """
+        Enable or disable content-based (pixel) hashing for duplicate detection.
+
+        Content hashing detects visually identical images even when their metadata
+        or file bytes differ. This is useful for finding duplicates where one copy
+        has been re-encoded or had EXIF data modified.
+
+        Args:
+            enabled: True to enable content hashing, False to disable
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            logger.info(f"→ set_content_hash_enabled({enabled}) called for database: {self.database_path}")
+            self._ensure_metadata_table()
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Check if row exists
+                cursor.execute("SELECT COUNT(*) FROM DatabaseMetadata WHERE id = 1")
+                count = cursor.fetchone()[0]
+                if count == 0:
+                    logger.error("Cannot set content hash enabled: DatabaseMetadata row (id=1) does not exist!")
+                    return False
+
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET content_hash_enabled = ?
+                    WHERE id = 1
+                """, (1 if enabled else 0,))
+
+                rows_affected = cursor.rowcount
+                conn.commit()
+
+                if rows_affected > 0:
+                    logger.info(f"Content hashing {'ENABLED' if enabled else 'DISABLED'} successfully")
+                    return True
+                else:
+                    logger.warning("UPDATE returned 0 rows affected - row may not exist")
+                    return False
+
+        except Exception as e:
+            logger.error(f"Failed to set content hash enabled state: {e}", exc_info=True)
             return False
 
     # -------------------------------------------------------------------------

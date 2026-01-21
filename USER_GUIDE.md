@@ -286,6 +286,87 @@ During import:
 
 ---
 
+## Content-Based Duplicate Detection
+
+**NEW in v3.3** - PyPhotoOrganizer now includes content-based (pixel) hashing to detect visually identical images even when their metadata differs.
+
+### What is Content-Based Hashing?
+
+Traditional file hashing (SHA-256) detects exact byte-for-byte duplicates. However, two photos can be visually identical but have different file hashes due to:
+- Different EXIF metadata (edited dates, software tags)
+- Re-saved with slightly different compression
+- Stripped or modified metadata
+
+Content-based hashing solves this by hashing the actual pixel data, ignoring metadata.
+
+### How It Works
+
+1. **Algorithm**: SHA-256 hash of normalized RGB pixel bytes
+2. **EXIF Handling**: Images are auto-rotated using EXIF orientation before hashing
+3. **Normalization**: All images converted to RGB mode for consistent comparison
+4. **Videos**: Videos are skipped (only images are content-hashed)
+
+### During Import
+
+When content hashing is enabled:
+1. Files are first checked for exact file duplicates (fast)
+2. Unique files then have their content hash calculated
+3. If content hash matches an existing file, it's flagged as a "content duplicate"
+4. Content duplicates appear with purple highlighting in Import History
+
+### Viewing Content Duplicates
+
+**Import History Tab:**
+- Use the "Show" dropdown and select "Content Duplicates"
+- Content duplicates are highlighted in purple (#9966CC)
+
+**Photo Review App:**
+- Use the View filter dropdown in the toolbar
+- Select "Content Duplicates" to see all files with matching pixel content
+- Files are grouped by their content hash
+
+### Backfilling Existing Archives
+
+For archives created before content hashing was available:
+
+1. Go to **System Settings** tab
+2. Find the "Content-Based Duplicate Detection" section
+3. Click **"Calculate Content Hashes for Existing Files"**
+4. Progress bar shows backfill status
+5. Click **"Cancel"** to stop if needed
+
+**What the backfill does:**
+- Scans all image files without content hashes
+- Calculates and stores content hash for each
+- Detects newly discovered duplicates (same content, different files)
+- Reports statistics when complete
+
+### Enable/Disable Content Hashing
+
+Content hashing is enabled by default. To toggle:
+
+1. Go to **System Settings** tab
+2. Find "Content-Based Duplicate Detection" section
+3. Check/uncheck **"Enable content-based duplicate detection"**
+
+**Performance Note:** Content hashing adds processing time during imports (must decode and hash each image's pixels). For large imports, you may want to disable it temporarily.
+
+### Content Hash Test Tool
+
+A standalone GUI tool is available for testing content hashing:
+
+```bash
+python tests/content_hash_test_gui.py
+```
+
+Features:
+- Select any folder to scan for images
+- View content hashes for all files
+- Identify duplicates (highlighted with colors)
+- Export results (TXT, CSV, JSON)
+
+---
+
 ## Processing Photos
 
 ### Copy vs Move Mode
