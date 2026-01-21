@@ -24,6 +24,100 @@ import piexif
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_exif_dict(exif_dict: dict) -> dict:
+    """
+    Sanitize EXIF dictionary to fix problematic values that piexif can't handle.
+
+    Some EXIF tags have values in unexpected formats (e.g., integers instead of bytes).
+    This function converts them to formats piexif can dump correctly.
+
+    Args:
+        exif_dict: EXIF dictionary from piexif.load()
+
+    Returns:
+        Sanitized EXIF dictionary
+    """
+    if not exif_dict:
+        return exif_dict
+
+    # Tags that should be bytes but might be integers
+    # 41729 = SceneType, 41730 = CFAPattern
+    problematic_tags = {
+        41729: 1,  # SceneType - default to 1 byte
+        41730: None,  # CFAPattern - remove if problematic
+    }
+
+    for ifd_name in ['0th', 'Exif', '1st', 'GPS', 'Interop']:
+        ifd = exif_dict.get(ifd_name, {})
+        if not ifd:
+            continue
+
+        tags_to_remove = []
+        for tag, value in list(ifd.items()):
+            # Check if this is a problematic tag
+            if tag in problematic_tags:
+                if isinstance(value, int):
+                    # Convert int to bytes
+                    try:
+                        ifd[tag] = bytes([value])
+                    except (ValueError, TypeError):
+                        tags_to_remove.append(tag)
+                elif isinstance(value, tuple):
+                    # Some values come as tuples, try to handle them
+                    try:
+                        if all(isinstance(v, int) for v in value):
+                            ifd[tag] = bytes(value)
+                        else:
+                            tags_to_remove.append(tag)
+                    except (ValueError, TypeError):
+                        tags_to_remove.append(tag)
+
+            # Check for other problematic value types
+            elif value is None:
+                tags_to_remove.append(tag)
+
+        # Remove problematic tags
+        for tag in tags_to_remove:
+            del ifd[tag]
+            logger.debug(f"  Removed problematic EXIF tag {tag} from {ifd_name}")
+
+    return exif_dict
+
+
+def _safe_exif_dump(exif_dict: dict) -> Optional[bytes]:
+    """
+    Safely dump EXIF dictionary to bytes, handling errors gracefully.
+
+    Args:
+        exif_dict: EXIF dictionary from piexif.load()
+
+    Returns:
+        EXIF bytes if successful, None if failed
+    """
+    if not exif_dict:
+        return None
+
+    try:
+        # First try to sanitize
+        sanitized = _sanitize_exif_dict(exif_dict)
+        return piexif.dump(sanitized)
+    except Exception as e:
+        logger.warning(f"  Failed to dump EXIF data: {e}")
+
+        # Try progressively removing IFDs until it works
+        for ifd_to_remove in ['Interop', 'GPS', '1st', 'Exif']:
+            try:
+                if ifd_to_remove in exif_dict:
+                    exif_dict[ifd_to_remove] = {}
+                return piexif.dump(exif_dict)
+            except Exception:
+                continue
+
+        # Last resort: return None and save without EXIF
+        logger.warning("  Could not preserve EXIF data, saving without")
+        return None
+
+
 class ImageModifier:
     """
     PIL-based image modification operations.
@@ -84,9 +178,12 @@ class ImageModifier:
 
             # Save with EXIF data
             if exif_dict:
-                exif_bytes = piexif.dump(exif_dict)
-                rotated.save(output_path, format=original_format or 'JPEG',
-                           exif=exif_bytes, quality=95)
+                exif_bytes = _safe_exif_dump(exif_dict)
+                if exif_bytes:
+                    rotated.save(output_path, format=original_format or 'JPEG',
+                               exif=exif_bytes, quality=95)
+                else:
+                    rotated.save(output_path, format=original_format or 'JPEG', quality=95)
             else:
                 rotated.save(output_path, format=original_format or 'JPEG', quality=95)
 
@@ -150,9 +247,12 @@ class ImageModifier:
 
             # Save with EXIF data
             if exif_dict:
-                exif_bytes = piexif.dump(exif_dict)
-                cropped.save(output_path, format=original_format or 'JPEG',
-                           exif=exif_bytes, quality=95)
+                exif_bytes = _safe_exif_dump(exif_dict)
+                if exif_bytes:
+                    cropped.save(output_path, format=original_format or 'JPEG',
+                               exif=exif_bytes, quality=95)
+                else:
+                    cropped.save(output_path, format=original_format or 'JPEG', quality=95)
             else:
                 cropped.save(output_path, format=original_format or 'JPEG', quality=95)
 
@@ -215,9 +315,12 @@ class ImageModifier:
 
             # Save with EXIF data
             if exif_dict:
-                exif_bytes = piexif.dump(exif_dict)
-                resized.save(output_path, format=original_format or 'JPEG',
-                           exif=exif_bytes, quality=95)
+                exif_bytes = _safe_exif_dump(exif_dict)
+                if exif_bytes:
+                    resized.save(output_path, format=original_format or 'JPEG',
+                               exif=exif_bytes, quality=95)
+                else:
+                    resized.save(output_path, format=original_format or 'JPEG', quality=95)
             else:
                 resized.save(output_path, format=original_format or 'JPEG', quality=95)
 
@@ -295,9 +398,12 @@ class ImageModifier:
 
             # Save with EXIF data
             if exif_dict:
-                exif_bytes = piexif.dump(exif_dict)
-                adjusted.save(output_path, format=original_format or 'JPEG',
-                            exif=exif_bytes, quality=95)
+                exif_bytes = _safe_exif_dump(exif_dict)
+                if exif_bytes:
+                    adjusted.save(output_path, format=original_format or 'JPEG',
+                                exif=exif_bytes, quality=95)
+                else:
+                    adjusted.save(output_path, format=original_format or 'JPEG', quality=95)
             else:
                 adjusted.save(output_path, format=original_format or 'JPEG', quality=95)
 
@@ -489,9 +595,12 @@ class ImageModifier:
 
             # Save with EXIF data
             if exif_dict:
-                exif_bytes = piexif.dump(exif_dict)
-                adjusted.save(output_path, format=original_format or 'JPEG',
-                            exif=exif_bytes, quality=95)
+                exif_bytes = _safe_exif_dump(exif_dict)
+                if exif_bytes:
+                    adjusted.save(output_path, format=original_format or 'JPEG',
+                                exif=exif_bytes, quality=95)
+                else:
+                    adjusted.save(output_path, format=original_format or 'JPEG', quality=95)
             else:
                 adjusted.save(output_path, format=original_format or 'JPEG', quality=95)
 
@@ -573,7 +682,9 @@ class ImageModifier:
                 save_kwargs['optimize'] = True
 
             if exif_dict and target_format.upper() in ('JPEG', 'TIFF'):
-                save_kwargs['exif'] = piexif.dump(exif_dict)
+                exif_bytes = _safe_exif_dump(exif_dict)
+                if exif_bytes:
+                    save_kwargs['exif'] = exif_bytes
 
             img.save(output_path, **save_kwargs)
 
