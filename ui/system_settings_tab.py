@@ -152,6 +152,60 @@ class SystemSettingsTab(QWidget):
         perf_group.setLayout(perf_layout)
         layout.addWidget(perf_group)
 
+        # Content-Based Duplicate Detection Settings
+        content_hash_group = QGroupBox("Content-Based Duplicate Detection")
+        content_hash_group.setStyleSheet(self.groupbox_style)
+        content_hash_layout = QVBoxLayout()
+
+        content_hash_desc = QLabel(
+            "Content hashing detects visually identical images even when file bytes differ "
+            "(e.g., after re-encoding or EXIF modification). Uses pixel data to find duplicates."
+        )
+        content_hash_desc.setWordWrap(True)
+        content_hash_desc.setStyleSheet("font-style: italic; color: gray; padding: 5px;")
+        content_hash_layout.addWidget(content_hash_desc)
+
+        self.content_hash_enabled_check = QCheckBox("Enable content-based duplicate detection during import")
+        self.content_hash_enabled_check.setChecked(True)
+        self.content_hash_enabled_check.stateChanged.connect(self.on_content_hash_enabled_changed)
+        content_hash_layout.addWidget(self.content_hash_enabled_check)
+
+        # Backfill section
+        backfill_layout = QHBoxLayout()
+        self.backfill_btn = QPushButton("Calculate Content Hashes for Existing Files")
+        self.backfill_btn.setToolTip("Calculate content hashes for archive files that don't have them yet")
+        self.backfill_btn.clicked.connect(self.start_content_hash_backfill)
+        backfill_layout.addWidget(self.backfill_btn)
+
+        self.cancel_backfill_btn = QPushButton("Cancel")
+        self.cancel_backfill_btn.setToolTip("Cancel the content hash calculation")
+        self.cancel_backfill_btn.clicked.connect(self.cancel_content_hash_backfill)
+        self.cancel_backfill_btn.hide()
+        backfill_layout.addWidget(self.cancel_backfill_btn)
+
+        backfill_layout.addStretch()
+        content_hash_layout.addLayout(backfill_layout)
+
+        # Progress bar (hidden by default)
+        from PySide6.QtWidgets import QProgressBar
+        self.backfill_progress = QProgressBar()
+        self.backfill_progress.setRange(0, 100)
+        self.backfill_progress.setValue(0)
+        self.backfill_progress.hide()
+        content_hash_layout.addWidget(self.backfill_progress)
+
+        # Status label
+        self.backfill_status_label = QLabel("")
+        self.backfill_status_label.setStyleSheet("color: #666;")
+        self.backfill_status_label.hide()
+        content_hash_layout.addWidget(self.backfill_status_label)
+
+        content_hash_group.setLayout(content_hash_layout)
+        layout.addWidget(content_hash_group)
+
+        # Initialize backfill worker reference
+        self._backfill_worker = None
+
         # Thumbnail Cache Settings
         cache_group = QGroupBox("Thumbnail Cache Settings (Date Corrections Tab)")
         cache_group.setStyleSheet(self.groupbox_style)
@@ -403,6 +457,12 @@ class SystemSettingsTab(QWidget):
 
         # Load retention settings
         self.load_retention_settings()
+
+        # Load content hash settings
+        content_hash_enabled = db_metadata.is_content_hash_enabled()
+        self.content_hash_enabled_check.blockSignals(True)
+        self.content_hash_enabled_check.setChecked(content_hash_enabled)
+        self.content_hash_enabled_check.blockSignals(False)
 
     def refresh_database_statistics(self):
         """Refresh the database statistics display."""
@@ -786,3 +846,159 @@ class SystemSettingsTab(QWidget):
             logger.error(f"Validation failed:\n{full_error}")
             QMessageBox.critical(self, "Validation Failed",
                                f"Invalid settings:\n\n{str(e)}")
+
+    # ========== Content Hash Methods ==========
+
+    def on_content_hash_enabled_changed(self, state):
+        """Handle content hash enabled checkbox change."""
+        if not self.db_metadata:
+            return
+
+        enabled = state == Qt.Checked
+        success = self.db_metadata.set_content_hash_enabled(enabled)
+        if success:
+            logger.info(f"Content hashing {'enabled' if enabled else 'disabled'}")
+        else:
+            logger.warning("Failed to save content hash setting")
+            # Revert checkbox
+            self.content_hash_enabled_check.blockSignals(True)
+            self.content_hash_enabled_check.setChecked(not enabled)
+            self.content_hash_enabled_check.blockSignals(False)
+
+    def start_content_hash_backfill(self):
+        """Start the content hash backfill process."""
+        if not self.db_metadata:
+            QMessageBox.warning(self, "No Database", "Please select a database first.")
+            return
+
+        # Check if already running
+        if self._backfill_worker is not None and self._backfill_worker.isRunning():
+            QMessageBox.information(self, "Already Running",
+                                   "Content hash calculation is already in progress.")
+            return
+
+        # Confirm with user
+        reply = QMessageBox.question(
+            self, "Calculate Content Hashes",
+            "This will calculate content hashes for all archive files that don't have them yet.\n\n"
+            "This may take a while for large archives.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Import worker
+        from ui.content_hash_worker import ContentHashBackfillWorker
+
+        # Create and start worker
+        self._backfill_worker = ContentHashBackfillWorker(
+            database_path=self.db_metadata.database_path,
+            batch_size=100
+        )
+
+        # Connect signals
+        self._backfill_worker.progress_update.connect(self._on_backfill_progress)
+        self._backfill_worker.status_update.connect(self._on_backfill_status)
+        self._backfill_worker.completed.connect(self._on_backfill_completed)
+        self._backfill_worker.error_occurred.connect(self._on_backfill_error)
+
+        # Update UI
+        self.backfill_btn.setEnabled(False)
+        self.cancel_backfill_btn.show()
+        self.backfill_progress.show()
+        self.backfill_progress.setValue(0)
+        self.backfill_status_label.setText("Starting...")
+        self.backfill_status_label.show()
+
+        # Start worker
+        self._backfill_worker.start()
+
+    def cancel_content_hash_backfill(self):
+        """Cancel the content hash backfill process."""
+        if self._backfill_worker and self._backfill_worker.isRunning():
+            self._backfill_worker.stop()
+            self.backfill_status_label.setText("Cancelling...")
+
+    def _on_backfill_progress(self, current, total, filename):
+        """Handle backfill progress update."""
+        if total > 0:
+            percent = int((current / total) * 100)
+            self.backfill_progress.setValue(percent)
+            self.backfill_status_label.setText(f"Processing {current}/{total}: {filename}")
+
+    def _on_backfill_status(self, message):
+        """Handle backfill status update."""
+        self.backfill_status_label.setText(message)
+
+    def _on_backfill_completed(self, results):
+        """Handle backfill completion."""
+        # Reset UI
+        self.backfill_btn.setEnabled(True)
+        self.cancel_backfill_btn.hide()
+        self.backfill_progress.hide()
+
+        status = results.get('status', 'unknown')
+        files_updated = results.get('files_updated', 0)
+        files_skipped = results.get('files_skipped', 0)
+        files_failed = results.get('files_failed', 0)
+        discovered_duplicates = results.get('discovered_duplicates', [])
+        dup_count = len(discovered_duplicates)
+
+        if status == 'completed':
+            status_text = f"Complete: {files_updated} updated, {files_skipped} skipped, {files_failed} failed"
+            if dup_count > 0:
+                status_text += f", {dup_count} duplicates discovered"
+            self.backfill_status_label.setText(status_text)
+
+            if files_updated > 0 or dup_count > 0:
+                message = (
+                    f"Content hash calculation complete!\n\n"
+                    f"Files updated: {files_updated}\n"
+                    f"Files skipped (videos/missing): {files_skipped}\n"
+                    f"Files failed: {files_failed}"
+                )
+
+                if dup_count > 0:
+                    message += f"\n\nDiscovered {dup_count} content duplicate(s)!\n"
+                    message += "These are files with identical pixel content but different file hashes.\n\n"
+
+                    # Show up to 5 examples
+                    examples = discovered_duplicates[:5]
+                    for dup in examples:
+                        file_name = os.path.basename(dup['file_path'])
+                        dup_of_name = os.path.basename(dup['duplicate_of_path'])
+                        message += f"  - {file_name} matches {dup_of_name}\n"
+
+                    if dup_count > 5:
+                        message += f"  ... and {dup_count - 5} more\n"
+
+                    message += "\nYou can find these in the database by querying files with the same content_hash."
+
+                QMessageBox.information(self, "Backfill Complete", message)
+
+        elif status == 'cancelled':
+            status_text = f"Cancelled: {files_updated} files updated before cancellation"
+            if dup_count > 0:
+                status_text += f", {dup_count} duplicates discovered"
+            self.backfill_status_label.setText(status_text)
+        else:
+            self.backfill_status_label.setText(f"Failed: {results.get('error', 'Unknown error')}")
+
+        self._backfill_worker = None
+
+    def _on_backfill_error(self, error_msg):
+        """Handle backfill error."""
+        self.backfill_btn.setEnabled(True)
+        self.cancel_backfill_btn.hide()
+        self.backfill_progress.hide()
+        self.backfill_status_label.setText(f"Error: {error_msg}")
+
+        QMessageBox.critical(
+            self, "Backfill Error",
+            f"Content hash calculation failed:\n\n{error_msg}"
+        )
+
+        self._backfill_worker = None

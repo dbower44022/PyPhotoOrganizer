@@ -626,6 +626,91 @@ def is_duplicate(file_path, database):
 - Corrupted files: Caught by Pillow validation
 - Identical first 16KB: Full hash distinguishes
 
+### Content-Based (Pixel) Hashing Algorithm
+
+**Problem:** Two visually identical images may have different file hashes due to:
+- Different EXIF metadata (edited dates, software tags)
+- Re-saved with slightly different compression
+- Stripped or modified metadata
+
+**Solution:** Hash the actual pixel data, ignoring file metadata
+
+**Algorithm:**
+```python
+def hash_image_content(file_path):
+    """Calculate SHA-256 hash of normalized pixel content."""
+    try:
+        with Image.open(file_path) as img:
+            # 1. Apply EXIF rotation (so rotated originals match)
+            img = ImageOps.exif_transpose(img)
+
+            # 2. Convert to RGB for consistent comparison
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+
+            # 3. Get raw pixel bytes
+            pixel_data = img.tobytes()
+
+            # 4. Calculate SHA-256 hash
+            hasher = hashlib.sha256()
+            hasher.update(pixel_data)
+            return hasher.hexdigest()
+
+    except Exception:
+        return None  # Videos, corrupted files, etc.
+```
+
+**Key Design Decisions:**
+
+1. **EXIF Transpose First**: Applies EXIF orientation tag before hashing, so a
+   rotated image with "Orientation: 6" will match the same image that was
+   physically rotated (pixels match).
+
+2. **RGB Normalization**: Converts all color modes (grayscale, RGBA, palette)
+   to RGB for consistent comparison across different encodings.
+
+3. **Videos Return None**: PIL cannot decode video frames, so videos are
+   skipped (content_hash remains NULL in database).
+
+4. **Stored Separately**: Content hash stored in `UniquePhotos.content_hash`
+   column alongside the file hash. Both are used for duplicate detection.
+
+**Detection Flow:**
+```
+1. File Import
+   ├─> Calculate file hash (SHA-256 of bytes) → Primary duplicate check
+   ├─> If unique: Calculate content hash (SHA-256 of pixels)
+   └─> Check content_hash in database
+        ├─> Match found: "Content duplicate" (same pixels, different file)
+        └─> No match: Store content_hash, file is truly unique
+```
+
+**Database Schema:**
+```sql
+-- Column added to UniquePhotos table
+ALTER TABLE UniquePhotos ADD COLUMN content_hash TEXT;
+
+-- Index for content hash lookups
+CREATE INDEX idx_unique_content_hash ON UniquePhotos(content_hash);
+```
+
+**Use Cases:**
+- Detecting images with edited EXIF dates
+- Finding images re-saved with different compression
+- Identifying images with stripped metadata
+- Cross-format comparison (same pixels in JPEG vs PNG)
+
+**Performance:**
+- Slower than file hashing (must decode image pixels)
+- Only calculated for images (not videos)
+- Cached in database (calculated once per file)
+- Backfill available for existing archives
+
+**UI Integration:**
+- Import History: "Content Duplicates" filter (purple highlighting)
+- Photo Review: "Content Duplicates" view filter
+- System Settings: Enable/disable toggle, backfill button
+
 ### Date Extraction Algorithm
 
 **Priority Order:**

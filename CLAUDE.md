@@ -45,7 +45,7 @@ python main.py              # CLI mode
 | Module | Purpose |
 |--------|---------|
 | `main.py` | Orchestration: `organize_files()` copies/moves unique files to archive |
-| `DuplicateFileDetection.py` | `PhotoDatabase`, `find_duplicates()`, `get_creation_date()`, `hash_file()` |
+| `DuplicateFileDetection.py` | `PhotoDatabase`, `find_duplicates()`, `get_creation_date()`, `hash_file()`, `hash_image_content()` |
 | `database_metadata.py` | `DatabaseMetadata` class: archive binding, source dirs, unreliable dates |
 | `config.py` | `Config` class: settings loading with defaults |
 | `photo_filter.py` | `PhotoFilter`: filters icons/thumbnails by size/dimensions/filename |
@@ -65,6 +65,7 @@ python main.py              # CLI mode
 | `import_history_tab.py` | Session history, file preview, export, override skip |
 | `worker.py` | `ProcessingWorker` background thread |
 | `reprocess_worker.py` | `ReprocessWorker` for reprocessing/override skip with album support |
+| `content_hash_worker.py` | `ContentHashBackfillWorker` for backfilling content hashes |
 | `theme.py` | `ThemeManager`, light/dark mode support |
 
 ### Database Tables
@@ -74,7 +75,7 @@ All tables in SQLite database (default: `PhotoDB.db`):
 | Table | Purpose |
 |-------|---------|
 | `DatabaseMetadata` | Archive location, settings, schema version |
-| `UniquePhotos` | File hashes, paths, creation dates, revision tracking (Schema v5) |
+| `UniquePhotos` | File hashes, paths, creation dates, revision tracking, content_hash (Schema v5) |
 | `SourceDirectories` | Persistent source folder configs with album associations |
 | `SourceDirectorySubAlbums` | Tracks auto-created sub-albums for source subdirectories |
 | `UnreliableDates` | Files with questionable dates |
@@ -145,6 +146,66 @@ For files ≥1MB:
 3. If match → verify with full hash (handles collisions)
 
 Small files (<1MB): Direct full hash.
+
+### Content-Based (Pixel) Hashing
+
+Detects visually identical images that have different file hashes due to metadata changes.
+
+**Algorithm:**
+```python
+def hash_image_content(file_path):
+    """Calculate SHA-256 hash of normalized pixel content."""
+    with Image.open(file_path) as img:
+        img = ImageOps.exif_transpose(img)  # Apply EXIF rotation
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        pixel_data = img.tobytes()
+        return hashlib.sha256(pixel_data).hexdigest()
+```
+
+**Key behaviors:**
+- Returns `None` for videos (only images supported)
+- Applies EXIF rotation before hashing (rotated images match originals)
+- Converts to RGB for consistent comparison across color modes
+- Stored in `UniquePhotos.content_hash` column
+
+**Database methods (PhotoDatabase class):**
+- `has_content_hash(content_hash)` - Check if content hash exists
+- `get_files_by_content_hash(content_hash)` - Get all files with matching content hash
+- `update_content_hash(file_hash, content_hash)` - Update content hash for existing record
+- `get_files_without_content_hash(limit)` - Get files needing backfill
+- `count_files_without_content_hash()` - Count for progress display
+
+**Settings (DatabaseMetadata):**
+- `is_content_hash_enabled()` - Check if content hashing is enabled
+- `set_content_hash_enabled(enabled)` - Enable/disable content hashing
+- Default: enabled
+
+**find_duplicates() integration:**
+```python
+def find_duplicates(..., content_hash_enabled=True):
+    # For each unique file (images only):
+    # 1. Calculate content hash
+    # 2. Check has_content_hash() for existing match
+    # 3. If match: add to content_duplicate_files list
+    # 4. Store content hash in database
+
+    results["content_duplicate_files"] = content_duplicate_files
+```
+
+**Backfill worker (`ui/content_hash_worker.py`):**
+```python
+class ContentHashBackfillWorker(QThread):
+    progress_update = Signal(int, int, str)  # current, total, filename
+    status_update = Signal(str)
+    completed = Signal(dict)  # {processed, skipped, errors, discovered_duplicates}
+    error_occurred = Signal(str)
+```
+
+**UI integration:**
+- System Settings tab: Enable checkbox + "Calculate Content Hashes" button
+- Import History: "Content Duplicates" filter option (purple #9966CC)
+- Photo Review: "Content Duplicates" view filter
 
 ### Hash History System (Schema v5)
 
@@ -477,6 +538,7 @@ with profile_block("Database query", logger):
 7. **Callbacks return stop signal** - `progress_callback()` returns `True` to stop processing
 8. **EXIF orientation** - use `ImageOps.exif_transpose()` when loading images for display
 9. **Config passed to worker** - database-bound settings must be explicitly added to config dict
+10. **Content hashing for images only** - `hash_image_content()` returns `None` for videos
 
 ## Known Issues
 

@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 from PIL.ExifTags import TAGS
 from PIL import IptcImagePlugin
 from tqdm import tqdm
@@ -176,6 +176,19 @@ class PhotoDatabase:
                 ON UniquePhotos(create_year, create_month, create_day)
             ''')
 
+            # Add content_hash column if it doesn't exist (auto-migration)
+            self.cursor.execute("PRAGMA table_info(UniquePhotos)")
+            columns = [row[1] for row in self.cursor.fetchall()]
+            if 'content_hash' not in columns:
+                logger.info("Upgrading database: adding content_hash column")
+                self.cursor.execute("ALTER TABLE UniquePhotos ADD COLUMN content_hash TEXT")
+
+            # Create index for content hash lookups
+            self.cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_unique_content_hash
+                ON UniquePhotos(content_hash)
+            ''')
+
             self.conn.commit()
             logger.info("Database tables and indexes initialized successfully (Schema v5)")
         except Exception as e:
@@ -213,7 +226,8 @@ class PhotoDatabase:
         return set()
 
     def insert_unique_photo(self, file_hash, file_path, create_datetime, create_year, create_month, create_day,
-                           partial_hash=None, partial_hash_bytes=None, file_size=None, source_path=None):
+                           partial_hash=None, partial_hash_bytes=None, file_size=None, source_path=None,
+                           content_hash=None):
         """
         Insert a new unique photo record into the database (Schema v5).
 
@@ -228,6 +242,7 @@ class PhotoDatabase:
             partial_hash_bytes (int, optional): Number of bytes used for partial hash
             file_size (int, optional): File size in bytes
             source_path (str, optional): Original import source location
+            content_hash (str, optional): SHA-256 hash of normalized pixel content
         """
         try:
             # Insert into UniquePhotos (v5 schema)
@@ -236,13 +251,13 @@ class PhotoDatabase:
                 """INSERT INTO UniquePhotos
                    (file_hash, partial_hash, partial_hash_bytes, file_size, file_name, source_path,
                     revised_photo, revision_reason, revision_timestamp,
-                    create_datetime, create_year, create_month, create_day)
-                   VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?)""",
+                    create_datetime, create_year, create_month, create_day, content_hash)
+                   VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?)""",
                 (file_hash, partial_hash, partial_hash_bytes, file_size, file_path, source_path,
-                 create_datetime, create_year, create_month, create_day)
+                 create_datetime, create_year, create_month, create_day, content_hash)
             )
 
-            logger.debug(f"Inserted unique photo: {file_path} (partial_hash: {partial_hash is not None}, source: {source_path})")
+            logger.debug(f"Inserted unique photo: {file_path} (partial_hash: {partial_hash is not None}, source: {source_path}, content_hash: {content_hash is not None})")
         except sqlite3.IntegrityError:
             # Hash already exists (PRIMARY KEY constraint)
             logger.warning(f"Attempted to insert duplicate hash: {file_hash}")
@@ -308,6 +323,125 @@ class PhotoDatabase:
             return [row[0] for row in results]
         except Exception as e:
             logger.exception(f"Failed to check partial hash: {e}")
+            raise
+
+    def has_content_hash(self, content_hash):
+        """
+        Check if a content hash already exists in the database.
+
+        Parameters:
+            content_hash (str): SHA-256 content hash to check
+
+        Returns:
+            bool: True if content hash exists, False otherwise
+        """
+        if content_hash is None:
+            return False
+        try:
+            self.cursor.execute(
+                "SELECT 1 FROM UniquePhotos WHERE content_hash = ? LIMIT 1",
+                (content_hash,)
+            )
+            result = self.cursor.fetchone()
+            return result is not None
+        except Exception as e:
+            logger.exception(f"Failed to check if content hash exists: {e}")
+            raise
+
+    def get_files_by_content_hash(self, content_hash):
+        """
+        Get all files that have the specified content hash.
+
+        Parameters:
+            content_hash (str): SHA-256 content hash to look up
+
+        Returns:
+            list: List of dicts with file_hash, file_name, source_path for matching files
+        """
+        if content_hash is None:
+            return []
+        try:
+            self.cursor.execute(
+                """SELECT file_hash, file_name, source_path
+                   FROM UniquePhotos
+                   WHERE content_hash = ?""",
+                (content_hash,)
+            )
+            results = self.cursor.fetchall()
+            return [
+                {"file_hash": row[0], "file_name": row[1], "source_path": row[2]}
+                for row in results
+            ]
+        except Exception as e:
+            logger.exception(f"Failed to get files by content hash: {e}")
+            raise
+
+    def update_content_hash(self, file_hash, content_hash):
+        """
+        Update the content hash for an existing record.
+        Used for backfilling content hashes on existing files.
+
+        Parameters:
+            file_hash (str): Primary key of the record to update
+            content_hash (str): The content hash to set
+
+        Returns:
+            bool: True if record was updated, False if not found
+        """
+        try:
+            self.cursor.execute(
+                "UPDATE UniquePhotos SET content_hash = ? WHERE file_hash = ?",
+                (content_hash, file_hash)
+            )
+            return self.cursor.rowcount > 0
+        except Exception as e:
+            logger.exception(f"Failed to update content hash: {e}")
+            raise
+
+    def get_files_without_content_hash(self, limit=100):
+        """
+        Get files that don't have a content hash calculated yet.
+        Used for backfilling content hashes.
+
+        Parameters:
+            limit (int): Maximum number of records to return
+
+        Returns:
+            list: List of dicts with file_hash and file_name (archive path)
+        """
+        try:
+            self.cursor.execute(
+                """SELECT file_hash, file_name
+                   FROM UniquePhotos
+                   WHERE content_hash IS NULL
+                   LIMIT ?""",
+                (limit,)
+            )
+            results = self.cursor.fetchall()
+            return [
+                {"file_hash": row[0], "file_name": row[1]}
+                for row in results
+            ]
+        except Exception as e:
+            logger.exception(f"Failed to get files without content hash: {e}")
+            raise
+
+    def count_files_without_content_hash(self):
+        """
+        Count how many files don't have a content hash yet.
+        Used for progress display during backfill.
+
+        Returns:
+            int: Count of files without content_hash
+        """
+        try:
+            self.cursor.execute(
+                "SELECT COUNT(*) FROM UniquePhotos WHERE content_hash IS NULL"
+            )
+            result = self.cursor.fetchone()
+            return result[0] if result else 0
+        except Exception as e:
+            logger.exception(f"Failed to count files without content hash: {e}")
             raise
 
     def create_revision(self, new_file_hash, parent_hash, revision_reason, file_path, file_size,
@@ -1328,10 +1462,73 @@ def hash_file_partial(filename, num_bytes=constants.PARTIAL_HASH_BYTES):
         raise
 
 
+def hash_image_content(file_path):
+    """
+    Calculate SHA-256 hash of the normalized pixel content of an image.
+
+    This hash is based purely on the visual content (RGB pixel data), ignoring
+    all metadata including EXIF. Two images that look identical will produce
+    the same content hash even if their metadata differs.
+
+    The image is normalized by:
+    1. Applying EXIF rotation via ImageOps.exif_transpose()
+    2. Converting to RGB mode (strips alpha channel, handles grayscale)
+    3. Hashing the raw pixel bytes
+
+    Parameters:
+        file_path (str): Path to the image file
+
+    Returns:
+        str or None: SHA-256 hex digest of pixel content, or None for:
+            - Video files (cannot be processed by PIL)
+            - Files that fail to load
+            - Any other processing errors
+    """
+    # Check if file is a video (cannot process with PIL)
+    video_extensions = {'.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.3gp'}
+    file_ext = os.path.splitext(file_path)[1].lower()
+    if file_ext in video_extensions:
+        logger.debug(f"Skipping content hash for video file: {file_path}")
+        return None
+
+    try:
+        # Register HEIF opener if needed
+        pillow_heif.register_heif_opener()
+
+        # Open and load the image
+        with Image.open(file_path) as img:
+            # Apply EXIF rotation to normalize orientation
+            img = ImageOps.exif_transpose(img)
+
+            # Convert to RGB mode for consistent hashing
+            # This handles RGBA (strips alpha), L (grayscale), P (palette), etc.
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+
+            # Get raw pixel data as bytes
+            pixel_data = img.tobytes()
+
+            # Calculate SHA-256 hash of pixel data
+            hasher = hashlib.sha256()
+            hasher.update(pixel_data)
+            content_hash = hasher.hexdigest()
+
+            logger.debug(f"Content hash for {file_path}: {content_hash}")
+            return content_hash
+
+    except UnidentifiedImageError:
+        logger.debug(f"Cannot identify image format for content hash: {file_path}")
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to calculate content hash for {file_path}: {e}")
+        return None
+
+
 def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME, batch_size=constants.DEFAULT_BATCH_SIZE,
                    partial_hash_enabled=True, partial_hash_bytes=constants.PARTIAL_HASH_BYTES,
                    partial_hash_min_file_size=constants.PARTIAL_HASH_MIN_FILE_SIZE,
-                   config=None, progress_callback=None, audit_manager=None, session_id=None, should_stop=None):
+                   config=None, progress_callback=None, audit_manager=None, session_id=None, should_stop=None,
+                   content_hash_enabled=True):
     """ Looks through a list of files and returns a list of duplicate and original files using two-stage hashing.
 
         Two-Stage Hashing Strategy:
@@ -1359,12 +1556,15 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
         config - Config object with photo filter settings (optional, if None filtering is disabled)
         should_stop - callable that returns True if processing should be cancelled (optional)
             Used for graceful shutdown - when True is returned, commits partial progress and exits cleanly.
+        content_hash_enabled - whether to calculate content (pixel) hashes for duplicate detection (default: True)
+            Content hashing detects visually identical images with different metadata/EXIF.
 
         Returns:
             results - a dictionary containing:
                 duplicate_files - list of files that already exist in the database
                 original_files - list of new unique files that were added to database
                 filtered_files - list of files that were filtered out (not real photos)
+                content_duplicate_files - list of files with same pixel content as existing files
                 status - "completed" if successful, "cancelled" if stopped early
                 files_processed - total number of files processed
                 files_skipped - number of files skipped (already in DB from previous run)
@@ -1404,6 +1604,7 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
         duplicate_files = []
         original_files = []
         filtered_files = []
+        content_duplicate_files = []  # Files with same pixel content as existing files
         files_processed = 0
         files_skipped = 0
         files_since_last_commit = 0
@@ -1781,15 +1982,44 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                     unreliable_dates_count += 1  # Increment counter
                                     logger.info(f"Flagged file with unreliable date: {filename} (reason: {flag_reason})")
 
+                            # Calculate content hash for content-based duplicate detection
+                            content_hash = None
+                            is_content_duplicate = False
+                            content_duplicate_of = None
+                            if content_hash_enabled:
+                                content_hash = hash_image_content(filename)
+                                if content_hash:
+                                    # Check if this content hash already exists
+                                    if db.has_content_hash(content_hash):
+                                        is_content_duplicate = True
+                                        matching_files = db.get_files_by_content_hash(content_hash)
+                                        if matching_files:
+                                            content_duplicate_of = matching_files[0]  # First match
+                                            logger.info(f"Content duplicate detected: {filename} matches content of {content_duplicate_of['file_name']}")
+
                             original_file = {
                                 "file_hash": file_hash,
                                 "file_path": filename,
                                 "file_create_datetime": file_create_date,
                                 "file_create_year": file_year,
                                 "file_create_month": file_month,
-                                "file_create_day": file_day
+                                "file_create_day": file_day,
+                                "content_hash": content_hash,
+                                "is_content_duplicate": is_content_duplicate
                             }
                             original_files.append(original_file)
+
+                            # Track content duplicates separately
+                            if is_content_duplicate and content_duplicate_of:
+                                content_duplicate_entry = {
+                                    "file_hash": file_hash,
+                                    "file_path": filename,
+                                    "file_create_datetime": file_create_date,
+                                    "content_hash": content_hash,
+                                    "duplicate_of_hash": content_duplicate_of["file_hash"],
+                                    "duplicate_of_path": content_duplicate_of["file_name"]
+                                }
+                                content_duplicate_files.append(content_duplicate_entry)
 
                             # Add to database with partial hash info and source path (v5 schema)
                             db.insert_unique_photo(
@@ -1802,7 +2032,8 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                 partial_hash=partial_hash,  # Will be None for small files
                                 partial_hash_bytes=partial_hash_bytes if partial_hash else None,
                                 file_size=file_size,
-                                source_path=filename  # Original source location (v5 schema)
+                                source_path=filename,  # Original source location (v5 schema)
+                                content_hash=content_hash
                             )
 
                             files_processed += 1
@@ -1832,6 +2063,7 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
             logger.info(f"Total files processed: {files_processed}/{len(files)}")
             logger.info(f"Unique files added: {len(original_files)}")
             logger.info(f"Duplicates found: {len(duplicate_files)}")
+            logger.info(f"Content duplicates found: {len(content_duplicate_files)}")
             logger.info(f"Files skipped (already in DB): {files_skipped}")
             if photo_filter and photo_filter.enabled:
                 logger.info(f"Files filtered (non-photos): {len(filtered_files)}")
@@ -1863,6 +2095,7 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
         results["duplicate_files"] = duplicate_files
         results["original_files"] = original_files
         results["filtered_files"] = filtered_files
+        results["content_duplicate_files"] = content_duplicate_files
         results["status"] = "cancelled" if was_cancelled else "completed"
         results["files_processed"] = files_processed
         results["files_skipped"] = files_skipped
