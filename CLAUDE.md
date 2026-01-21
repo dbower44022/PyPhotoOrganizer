@@ -164,6 +164,19 @@ class MyDialog(QDialog):
 | `DeletedFilesDialog` | `self.restore_worker` | `ui/deleted_files_dialog.py` |
 | `EditImageDialog` | `self.edit_worker` | `ui/edit_image_dialog.py` |
 
+**Tab/Window worker cleanup:**
+
+Tabs and main windows with background workers provide a `cleanup_workers()` method called from main window `closeEvent`:
+
+| Component | Worker(s) | File |
+|-----------|-----------|------|
+| `MainWindow` | `self.worker` (ProcessingWorker) | `ui/main_window.py` |
+| `SystemSettingsTab` | `self._backfill_worker` | `ui/system_settings_tab.py` |
+| `ImportHistoryTab` | `self.reprocess_worker`, `self.override_skip_worker` | `ui/import_history_tab.py` |
+| `PhotoReviewWindow` | `self.delete_worker` | `photo_review/review_window.py` |
+
+Main window calls `_cleanup_tab_workers()` in `closeEvent` which calls each tab's `cleanup_workers()` method.
+
 **Why this matters:** Without `closeEvent`, closing a dialog while a worker is running causes Qt to destroy the thread object mid-execution. This leads to database locks, corrupted state, and Qt warnings.
 
 ### Long-Running Process Recovery

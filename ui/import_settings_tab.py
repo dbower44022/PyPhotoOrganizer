@@ -437,6 +437,10 @@ class ImportSettingsTab(QWidget):
         pattern_group.setLayout(pattern_layout)
         layout.addWidget(pattern_group)
 
+        # Auto-populate with default filename patterns
+        for pattern in constants.DEFAULT_EXCLUDED_PATTERNS:
+            self.pattern_list.addItem(pattern)
+
         layout.addStretch()
 
         # Start and Stop buttons at the bottom
@@ -1087,13 +1091,39 @@ class ImportSettingsTab(QWidget):
 
         self.save_ignored_dirs_to_database()
 
-    def add_preset_ignored_dirs(self):
-        """Add common preset patterns for ignored directories."""
-        preset_patterns = [
+    def _get_preset_ignored_dir_patterns(self):
+        """Return the list of preset ignored directory patterns."""
+        return [
             "@eaDir", ".git", ".svn", "node_modules", "venv", ".venv",
             "__pycache__", "$RECYCLE.BIN", ".Trash-*", "Thumbs.db",
             ".DS_Store", "__MACOSX", ".thumbnails", "*.tmp", ".cache",
         ]
+
+    def _add_preset_ignored_dirs_silent(self):
+        """Add preset patterns silently (without message boxes). Used for auto-population."""
+        preset_patterns = self._get_preset_ignored_dir_patterns()
+
+        added_count = 0
+        for pattern in preset_patterns:
+            exists = False
+            for i in range(self.ignored_dirs_list.count()):
+                if self.ignored_dirs_list.item(i).text().lower() == pattern.lower():
+                    exists = True
+                    break
+
+            if not exists:
+                self.ignored_dirs_list.addItem(pattern)
+                added_count += 1
+
+        self.update_ignored_dirs_count()
+
+        if added_count > 0:
+            self.save_ignored_dirs_to_database()
+            logger.info(f"Auto-added {added_count} preset ignored directory patterns")
+
+    def add_preset_ignored_dirs(self):
+        """Add common preset patterns for ignored directories."""
+        preset_patterns = self._get_preset_ignored_dir_patterns()
 
         added_count = 0
         for pattern in preset_patterns:
@@ -1257,6 +1287,10 @@ class ImportSettingsTab(QWidget):
         # Load sources and ignored directories
         self.load_sources_from_database()
         self.load_ignored_dirs_from_database()
+
+        # Auto-add preset ignored directories if list is empty
+        if self.ignored_dirs_list.count() == 0:
+            self._add_preset_ignored_dirs_silent()
 
     def set_controls_enabled(self, enabled: bool):
         """Enable or disable controls during processing."""

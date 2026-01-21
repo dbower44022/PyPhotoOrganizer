@@ -750,6 +750,10 @@ class ImportHistoryTab(QWidget):
         self._preserved_scroll_position = 0
         self._preserved_selection_paths = set()
 
+        # Worker thread references (for cleanup on close)
+        self.reprocess_worker = None
+        self.override_skip_worker = None
+
         self.init_ui()
 
     def init_ui(self):
@@ -2366,3 +2370,22 @@ class ImportHistoryTab(QWidget):
 
         # Show brief confirmation (no blocking dialog)
         logger.info(f"Copied to clipboard: {file_path}")
+
+    def cleanup_workers(self):
+        """
+        Stop and wait for any running worker threads.
+
+        Called by main window before closing to prevent
+        'QThread destroyed while thread is still running' errors.
+        """
+        if self.reprocess_worker and self.reprocess_worker.isRunning():
+            logger.info("Stopping reprocess worker before close...")
+            self.reprocess_worker.stop()
+            self.reprocess_worker.wait()
+            logger.info("Reprocess worker stopped")
+
+        if self.override_skip_worker and self.override_skip_worker.isRunning():
+            logger.info("Stopping override skip worker before close...")
+            self.override_skip_worker.stop()
+            self.override_skip_worker.wait()
+            logger.info("Override skip worker stopped")

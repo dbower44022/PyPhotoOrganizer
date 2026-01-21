@@ -933,6 +933,9 @@ class PhotoReviewWindow(QMainWindow):
         self.file_details_panel = None
         self.preview_splitter = None
 
+        # Worker thread references (for cleanup on close)
+        self.delete_worker = None
+
         if self.splash_callback:
             self.splash_callback("Creating interface...")
 
@@ -2262,5 +2265,12 @@ class PhotoReviewWindow(QMainWindow):
                 'last_folder': self.query_panel.get_current_folder()
             }
             self.database_metadata.set_photo_review_state(state)
+
+        # Clean up any running worker threads
+        if self.delete_worker and self.delete_worker.isRunning():
+            logger.info("Stopping delete worker before close...")
+            self.delete_worker.cancel()
+            self.delete_worker.wait()
+            logger.info("Delete worker stopped")
 
         event.accept()

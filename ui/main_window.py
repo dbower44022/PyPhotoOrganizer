@@ -479,10 +479,22 @@ class MainWindow(QMainWindow):
                 self.status_bar.showMessage("Stopping and saving progress...")
                 self.worker.stop()
                 self.worker.wait()  # Wait for thread to finish
+                self._cleanup_tab_workers()
                 self.save_window_geometry()  # Save position before closing
                 event.accept()
             else:
                 event.ignore()
         else:
+            self._cleanup_tab_workers()
             self.save_window_geometry()  # Save position before closing
             event.accept()
+
+    def _cleanup_tab_workers(self):
+        """Stop and wait for any worker threads in tabs."""
+        # Clean up System Settings tab workers (content hash backfill)
+        if hasattr(self.system_settings_tab, 'cleanup_workers'):
+            self.system_settings_tab.cleanup_workers()
+
+        # Clean up Import History tab workers (reprocess, override skip)
+        if hasattr(self.import_history_tab, 'cleanup_workers'):
+            self.import_history_tab.cleanup_workers()
