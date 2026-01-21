@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QProgressDialog, QWidget, QMessageBox, QCheckBox
 )
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QCloseEvent
 import logging
 import os
 from typing import List
@@ -182,6 +183,7 @@ class BatchEditDialog(QDialog):
         self.records = records
         self.db_metadata = db_metadata
         self.logger = logger_instance
+        self.batch_worker = None
 
         self._init_ui()
         self._connect_signals()
@@ -503,3 +505,12 @@ class BatchEditDialog(QDialog):
                 "No Changes",
                 "No photos were edited."
             )
+
+    def closeEvent(self, event: QCloseEvent):
+        """Handle dialog close - ensure worker thread is properly stopped."""
+        if self.batch_worker and self.batch_worker.isRunning():
+            self.logger.info("Stopping batch edit worker before dialog close...")
+            self.batch_worker.cancel()
+            self.batch_worker.wait()  # Wait for thread to finish
+            self.logger.info("Batch edit worker stopped")
+        event.accept()

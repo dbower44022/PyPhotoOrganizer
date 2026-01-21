@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget, QSplitter, QFrame, QMessageBox, QSizePolicy, QScrollArea
 )
 from PySide6.QtCore import Qt, QTimer, QRect, QPoint, QSize, Signal
-from PySide6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush, QCursor
+from PySide6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QBrush, QCursor, QCloseEvent
 import logging
 import os
 from typing import Optional, Tuple
@@ -869,6 +869,7 @@ class EditImageDialog(QDialog):
         self.db_metadata = db_metadata
         self.logger = logger_instance
         self.edit_state = EditState()
+        self.edit_worker = None
 
         self._init_ui()
         self._load_image()
@@ -1213,3 +1214,12 @@ class EditImageDialog(QDialog):
             self.reject()
         else:
             super().keyPressEvent(event)
+
+    def closeEvent(self, event: QCloseEvent):
+        """Handle dialog close - ensure worker thread is properly stopped."""
+        if self.edit_worker and self.edit_worker.isRunning():
+            self.logger.info("Stopping edit worker before dialog close...")
+            self.edit_worker.cancel()
+            self.edit_worker.wait()  # Wait for thread to finish
+            self.logger.info("Edit worker stopped")
+        event.accept()

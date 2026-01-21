@@ -132,6 +132,40 @@ Uses cooperative cancellation pattern:
 
 **Resume capability**: Re-running skips already-processed files (detected as duplicates via hash).
 
+### Dialog Worker Thread Cleanup
+
+Dialogs that spawn QThread workers must implement `closeEvent` to prevent "QThread destroyed while thread is still running" errors and database lock issues.
+
+**Required pattern for dialogs with workers:**
+```python
+from PySide6.QtGui import QCloseEvent
+
+class MyDialog(QDialog):
+    def __init__(self, ...):
+        super().__init__(...)
+        self.worker = None  # Initialize to None
+        ...
+
+    def closeEvent(self, event: QCloseEvent):
+        """Handle dialog close - ensure worker thread is properly stopped."""
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()  # Request graceful stop
+            self.worker.wait()    # Block until thread finishes
+        event.accept()
+```
+
+**Dialogs with this pattern implemented:**
+
+| Dialog | Worker Variable | File |
+|--------|-----------------|------|
+| `AddToAlbumDialog` | `self.worker` | `ui/add_to_album_dialog.py` |
+| `RotateImageDialog` | `self.rotate_worker` | `ui/rotate_image_dialog.py` |
+| `BatchEditDialog` | `self.batch_worker` | `ui/batch_edit_dialog.py` |
+| `DeletedFilesDialog` | `self.restore_worker` | `ui/deleted_files_dialog.py` |
+| `EditImageDialog` | `self.edit_worker` | `ui/edit_image_dialog.py` |
+
+**Why this matters:** Without `closeEvent`, closing a dialog while a worker is running causes Qt to destroy the thread object mid-execution. This leads to database locks, corrupted state, and Qt warnings.
+
 ### Long-Running Process Recovery
 
 - Database commits every `batch_size` files (default: 100)
@@ -539,6 +573,7 @@ with profile_block("Database query", logger):
 8. **EXIF orientation** - use `ImageOps.exif_transpose()` when loading images for display
 9. **Config passed to worker** - database-bound settings must be explicitly added to config dict
 10. **Content hashing for images only** - `hash_image_content()` returns `None` for videos
+11. **Dialog worker cleanup** - dialogs with QThread workers must implement `closeEvent` with `worker.wait()`
 
 ## Known Issues
 
