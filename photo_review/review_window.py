@@ -126,6 +126,7 @@ class SelectionActionBar(QWidget):
 
     delete_clicked = Signal()
     rotate_clicked = Signal()
+    edit_clicked = Signal()
     correct_date_clicked = Signal()
     album_clicked = Signal()
     deselect_clicked = Signal()
@@ -162,6 +163,9 @@ class SelectionActionBar(QWidget):
 
         self.rotate_btn = self._create_action_button("🔄 Rotate", self.rotate_clicked)
         layout.addWidget(self.rotate_btn)
+
+        self.edit_btn = self._create_action_button("✏ Edit", self.edit_clicked)
+        layout.addWidget(self.edit_btn)
 
         self.date_btn = self._create_action_button("📅 Fix Date", self.correct_date_clicked)
         layout.addWidget(self.date_btn)
@@ -1148,6 +1152,11 @@ class PhotoReviewWindow(QMainWindow):
         rotate_action.triggered.connect(self.rotate_selected)
         actions_menu.addAction(rotate_action)
 
+        edit_action = QAction("✏ &Edit Selected...", self)
+        edit_action.setShortcut("E")
+        edit_action.triggered.connect(self.edit_selected)
+        actions_menu.addAction(edit_action)
+
         correct_date_action = QAction("📅 &Correct Date...", self)
         correct_date_action.setShortcut("D")
         correct_date_action.triggered.connect(self.correct_date_selected)
@@ -1445,6 +1454,7 @@ class PhotoReviewWindow(QMainWindow):
         self.action_bar = SelectionActionBar()
         self.action_bar.delete_clicked.connect(self.delete_selected)
         self.action_bar.rotate_clicked.connect(self.rotate_selected)
+        self.action_bar.edit_clicked.connect(self.edit_selected)
         self.action_bar.correct_date_clicked.connect(self.correct_date_selected)
         self.action_bar.album_clicked.connect(self.add_selected_to_album)
         self.action_bar.deselect_clicked.connect(self.deselect_all)
@@ -1861,6 +1871,50 @@ class PhotoReviewWindow(QMainWindow):
         dialog.exec()
         self.run_current_query()
 
+    def edit_selected(self):
+        """Edit selected files (brightness, contrast, saturation, crop)."""
+        if not self.grid_view:
+            return
+
+        selected = self.grid_view.get_selected_items()
+        if not selected:
+            QMessageBox.information(self, "No Selection", "Please select files to edit.")
+            return
+
+        # Check Prior Revision Archive is configured
+        prior_archive = self.database_metadata.get_prior_revision_archive_location()
+        if not prior_archive:
+            QMessageBox.warning(
+                self, "Prior Revision Archive Not Configured",
+                "Please configure Prior Revision Archive location in the main application settings."
+            )
+            return
+
+        if len(selected) == 1:
+            # Single photo edit dialog
+            from ui.edit_image_dialog import EditImageDialog
+
+            dialog = EditImageDialog(
+                parent=self,
+                record=selected[0],
+                db_metadata=self.database_metadata,
+                logger_instance=logger
+            )
+            dialog.exec()
+        else:
+            # Batch edit dialog (multiple photos)
+            from ui.batch_edit_dialog import BatchEditDialog
+
+            dialog = BatchEditDialog(
+                parent=self,
+                records=selected,
+                db_metadata=self.database_metadata,
+                logger_instance=logger
+            )
+            dialog.exec()
+
+        self.run_current_query()
+
     def correct_date_selected(self):
         """Correct dates for selected files."""
         if not self.grid_view:
@@ -2116,6 +2170,7 @@ class PhotoReviewWindow(QMainWindow):
 <table>
 <tr><td><b>Delete</b></td><td>Delete selected to vault</td></tr>
 <tr><td><b>R</b></td><td>Rotate selected</td></tr>
+<tr><td><b>E</b></td><td>Edit selected (brightness, contrast, crop)</td></tr>
 <tr><td><b>D</b></td><td>Correct date</td></tr>
 </table>
 """
