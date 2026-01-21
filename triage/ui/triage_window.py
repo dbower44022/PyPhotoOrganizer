@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QSplitter, QToolBar, QStatusBar, QLabel,
-                               QPushButton, QMessageBox, QFileDialog)
+                               QPushButton, QMessageBox, QFileDialog, QComboBox)
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence
 
@@ -190,6 +190,23 @@ class TriageWindow(QMainWindow):
         select_db_btn = QPushButton("Select Database...")
         select_db_btn.clicked.connect(self._select_database)
         toolbar.addWidget(select_db_btn)
+
+        toolbar.addSeparator()
+
+        # View filter dropdown
+        toolbar.addWidget(QLabel("View:"))
+        self.view_filter_combo = QComboBox()
+        self.view_filter_combo.addItems([
+            "Browse Folders",
+            "Content Duplicates"
+        ])
+        self.view_filter_combo.setToolTip(
+            "Browse Folders: Navigate archive by folder structure\n"
+            "Content Duplicates: Show files with identical pixel content"
+        )
+        self.view_filter_combo.currentIndexChanged.connect(self._on_view_filter_changed)
+        self.view_filter_combo.setMinimumWidth(150)
+        toolbar.addWidget(self.view_filter_combo)
 
         toolbar.addSeparator()
 
@@ -385,11 +402,66 @@ class TriageWindow(QMainWindow):
                 f"Failed to load database:\n{e}"
             )
 
+    def _on_view_filter_changed(self, index: int):
+        """Handle view filter dropdown change."""
+        try:
+            if not self.grid_model:
+                return
+
+            view_mode = self.view_filter_combo.currentText()
+            logger.info(f"View filter changed to: {view_mode}")
+
+            if view_mode == "Content Duplicates":
+                # Show content duplicates view
+                self.folder_browser.setEnabled(False)
+                self.folder_label.setText("(Content Duplicates - all folders)")
+
+                # Load content duplicates
+                duplicate_groups = self.grid_model.load_content_duplicates()
+
+                # Update stats
+                count = self.grid_model.rowCount()
+                self.stats_label.setText(f"{count} images in {duplicate_groups} duplicate groups")
+                self.status_bar.showMessage(
+                    f"Showing {count} images with duplicate content ({duplicate_groups} groups)"
+                )
+
+                if count == 0:
+                    self.status_bar.showMessage("No content duplicates found in archive")
+
+            else:
+                # Browse Folders mode
+                self.folder_browser.setEnabled(True)
+                self.folder_label.setText("(select folder from tree)")
+                self.stats_label.setText("Select a folder")
+                self.status_bar.showMessage("Select a folder from the tree to browse")
+
+                # Clear the grid until user selects a folder
+                if self.grid_model:
+                    self.grid_model.beginResetModel()
+                    self.grid_model.file_items.clear()
+                    self.grid_model.endResetModel()
+
+        except Exception as e:
+            logger.error(f"Error changing view filter: {e}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "View Filter Error",
+                f"Failed to change view:\n{e}"
+            )
+
     def _on_folder_selected(self, folder_path: str):
         """Handle folder selection from browser."""
         try:
             if not self.grid_model:
                 return
+
+            # Switch to Browse Folders mode if not already there
+            if self.view_filter_combo.currentText() != "Browse Folders":
+                self.view_filter_combo.blockSignals(True)
+                self.view_filter_combo.setCurrentText("Browse Folders")
+                self.view_filter_combo.blockSignals(False)
+                self.folder_browser.setEnabled(True)
 
             logger.info(f"Loading folder: {folder_path}")
             self.folder_label.setText(folder_path)

@@ -114,6 +114,8 @@ class FileLogTableModel(QAbstractTableModel):
                     return QBrush(QColor('gray'))
                 elif status == 'duplicate':
                     return QBrush(QColor('orange'))
+                elif status == 'content_duplicate':
+                    return QBrush(QColor('#9966CC'))  # Purple for content duplicates
 
         elif role == Qt.BackgroundRole:
             # Highlight rows being processed
@@ -852,6 +854,7 @@ class ImportHistoryTab(QWidget):
             "All Files",
             "New Files (Added to Archive)",
             "Duplicates",
+            "Content Duplicates",
             "Filtered (Icons/Thumbnails)",
             "Recently Overridden",
             "Errors"
@@ -1305,6 +1308,7 @@ class ImportHistoryTab(QWidget):
                 self._all_logs = all_logs
                 self._new_files_logs = []
                 self._duplicate_logs = []
+                self._content_duplicate_logs = []
                 self._filtered_logs = []
                 self._error_logs = []
 
@@ -1318,6 +1322,8 @@ class ImportHistoryTab(QWidget):
                         self._new_files_logs.append(log)
                     elif op == 'duplicate detected':
                         self._duplicate_logs.append(log)
+                    elif op == 'content_duplicate_detected':
+                        self._content_duplicate_logs.append(log)
                     elif op == 'skip_filtered':
                         self._filtered_logs.append(log)
 
@@ -1325,7 +1331,7 @@ class ImportHistoryTab(QWidget):
                     if status == 'failed':
                         self._error_logs.append(log)
 
-            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Filtered: {len(self._filtered_logs)}, Errors: {len(self._error_logs)}")
+            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Content Duplicates: {len(self._content_duplicate_logs)}, Filtered: {len(self._filtered_logs)}, Errors: {len(self._error_logs)}")
 
             # Apply current show filter
             with profile_block("Apply show filter and populate model", logger):
@@ -1358,6 +1364,7 @@ class ImportHistoryTab(QWidget):
                 self._all_logs = all_logs
                 self._new_files_logs = []
                 self._duplicate_logs = []
+                self._content_duplicate_logs = []
                 self._filtered_logs = []
                 self._error_logs = []
 
@@ -1371,6 +1378,8 @@ class ImportHistoryTab(QWidget):
                         self._new_files_logs.append(log)
                     elif op == 'duplicate detected':
                         self._duplicate_logs.append(log)
+                    elif op == 'content_duplicate_detected':
+                        self._content_duplicate_logs.append(log)
                     elif op == 'skip_filtered':
                         self._filtered_logs.append(log)
 
@@ -1378,7 +1387,7 @@ class ImportHistoryTab(QWidget):
                     if status == 'failed':
                         self._error_logs.append(log)
 
-            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Filtered: {len(self._filtered_logs)}, Errors: {len(self._error_logs)}")
+            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Content Duplicates: {len(self._content_duplicate_logs)}, Filtered: {len(self._filtered_logs)}, Errors: {len(self._error_logs)}")
 
             # Apply current show filter
             with profile_block("Apply show filter and populate model", logger):
@@ -1405,6 +1414,8 @@ class ImportHistoryTab(QWidget):
             self._model.setData(self._new_files_logs)
         elif show == "Duplicates":
             self._model.setData(self._duplicate_logs)
+        elif show == "Content Duplicates":
+            self._model.setData(getattr(self, '_content_duplicate_logs', []))
         elif show == "Filtered (Icons/Thumbnails)":
             self._model.setData(self._filtered_logs)
         elif show == "Recently Overridden":

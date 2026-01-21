@@ -240,6 +240,126 @@ Expected: CLI should run exactly as before, with tqdm progress bars
 
 ---
 
+## Content-Based Duplicate Detection Testing
+
+Content-based hashing detects visually identical images even when their file hashes differ (e.g., due to metadata changes).
+
+### Test 1: Enable/Disable Content Hashing
+
+1. **Launch GUI:**
+   ```bash
+   python3 main_gui.py
+   ```
+
+2. **System Settings Tab:**
+   - Find "Content-Based Duplicate Detection" section
+   - Verify checkbox "Enable content-based duplicate detection" is present
+   - Toggle checkbox on/off
+   - Expected: Setting should persist after restart
+
+### Test 2: Import with Content Hashing
+
+1. **Create Test Images:**
+   ```bash
+   mkdir -p ~/content_hash_test
+   cd ~/content_hash_test
+
+   # Create a test image
+   convert -size 100x100 xc:red test_original.jpg
+
+   # Create a copy with different EXIF (same pixels)
+   cp test_original.jpg test_modified_exif.jpg
+   exiftool -DateTimeOriginal="2025:01:15 10:00:00" test_modified_exif.jpg
+   ```
+
+2. **Import Images:**
+   - Add `~/content_hash_test` as source folder
+   - Ensure content hashing is enabled in System Settings
+   - Start processing
+
+3. **Verify Content Duplicate Detection:**
+   - Go to Import History tab
+   - Select "Content Duplicates" from Show dropdown
+   - Expected: `test_modified_exif.jpg` should appear with purple highlighting
+
+### Test 3: Backfill Content Hashes
+
+1. **System Settings Tab:**
+   - Find "Content-Based Duplicate Detection" section
+   - Click "Calculate Content Hashes for Existing Files"
+
+2. **Verify Progress:**
+   - Progress bar should appear and update
+   - Status should show files being processed
+   - "Cancel" button should be functional
+
+3. **Verify Completion:**
+   - Dialog should show:
+     - Number of files processed
+     - Number skipped (videos)
+     - Number of errors (if any)
+     - Number of discovered duplicates
+
+### Test 4: Content Duplicates in Photo Review
+
+1. **Launch Photo Review:**
+   ```bash
+   python3 photo_review_app.py
+   ```
+
+2. **Test View Filter:**
+   - Find the View dropdown in toolbar
+   - Select "Content Duplicates"
+   - Expected: Grid shows only files with matching content hashes
+   - Files should be grouped by content hash
+
+3. **Verify Display:**
+   - Images with same content should appear adjacent
+   - Thumbnail cache should work correctly
+
+### Test 5: Content Hash Test GUI
+
+1. **Launch Test GUI:**
+   ```bash
+   python3 tests/content_hash_test_gui.py
+   ```
+
+2. **Test Functionality:**
+   - Click "Browse" and select a folder with images
+   - Click "Scan Files"
+   - Expected: Progress bar shows scanning progress
+   - Results table populates with:
+     - Filename
+     - Content Hash
+     - File Size
+     - Status (Unique/Duplicate)
+
+3. **Test Duplicate Detection:**
+   - Duplicates should be highlighted with colors
+   - Each duplicate group gets a different color
+   - Summary shows total files and duplicate groups
+
+4. **Test Export:**
+   - Click "Export Results"
+   - Test TXT, CSV, and JSON formats
+   - Verify exported files contain correct data
+
+### Test 6: Cancel Backfill Operation
+
+1. **Start Backfill:**
+   - Click "Calculate Content Hashes for Existing Files"
+
+2. **Cancel Mid-Process:**
+   - Click "Cancel" button while progress bar is active
+   - Expected: Operation stops gracefully
+   - Progress already made should be saved
+
+3. **Resume:**
+   - Click "Calculate Content Hashes" again
+   - Expected: Should skip already-processed files
+
+---
+
 ## Known Limitations
 
 1. **Display:** Requires X11/Wayland display (won't work in pure SSH without X forwarding)
