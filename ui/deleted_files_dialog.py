@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QHeaderView, QMessageBox, QProgressDialog,
                                QCheckBox, QGroupBox, QAbstractItemView)
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QCloseEvent
 import os
 import logging
 from datetime import datetime
@@ -33,6 +34,7 @@ class DeletedFilesDialog(QDialog):
         self.db_metadata = db_metadata
         self.dialog_logger = dialog_logger
         self.deleted_files = []
+        self.restore_worker = None
         self.init_ui()
         self.load_deleted_files()
 
@@ -401,3 +403,12 @@ class DeletedFilesDialog(QDialog):
                 return f"{bytes:.1f} {unit}"
             bytes /= 1024.0
         return f"{bytes:.1f} TB"
+
+    def closeEvent(self, event: QCloseEvent):
+        """Handle dialog close - ensure worker thread is properly stopped."""
+        if self.restore_worker and self.restore_worker.isRunning():
+            self.dialog_logger.info("Stopping restore worker before dialog close...")
+            self.restore_worker.cancel()
+            self.restore_worker.wait()  # Wait for thread to finish
+            self.dialog_logger.info("Restore worker stopped")
+        event.accept()

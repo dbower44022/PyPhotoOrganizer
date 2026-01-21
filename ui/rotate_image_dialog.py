@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QSpinBox, QCheckBox, QRadioButton,
                                QButtonGroup, QGroupBox, QMessageBox, QProgressDialog)
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QCloseEvent
 import logging
 import os
 
@@ -33,6 +34,7 @@ class RotateImageDialog(QDialog):
         self.selected_records = selected_records if isinstance(selected_records, list) else [selected_records]
         self.db_metadata = db_metadata
         self.logger = logger
+        self.rotate_worker = None
         self.init_ui()
 
     def init_ui(self):
@@ -263,3 +265,12 @@ class RotateImageDialog(QDialog):
         # Close dialog if successful or no errors to report
         if success_count > 0 or not errors:
             self.accept()
+
+    def closeEvent(self, event: QCloseEvent):
+        """Handle dialog close - ensure worker thread is properly stopped."""
+        if self.rotate_worker and self.rotate_worker.isRunning():
+            self.logger.info("Stopping rotation worker before dialog close...")
+            self.rotate_worker.cancel()
+            self.rotate_worker.wait()  # Wait for thread to finish
+            self.logger.info("Rotation worker stopped")
+        event.accept()

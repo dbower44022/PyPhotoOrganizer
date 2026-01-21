@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QFileDialog, QCheckBox, QGroupBox, QFormLayout
 )
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QCloseEvent
 import os
 import logging
 
@@ -301,6 +302,15 @@ class AddToAlbumDialog(QDialog):
             )
 
         self.accept()
+
+    def closeEvent(self, event: QCloseEvent):
+        """Handle dialog close - ensure worker thread is properly stopped."""
+        if self.worker and self.worker.isRunning():
+            logger.info("Stopping album worker before dialog close...")
+            self.worker.cancel()
+            self.worker.wait()  # Wait for thread to finish
+            logger.info("Album worker stopped")
+        event.accept()
 
 
 class CreateAlbumDialog(QDialog):
