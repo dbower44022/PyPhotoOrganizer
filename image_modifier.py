@@ -834,7 +834,15 @@ class VersionManager:
             logger.info(f"  Storage path: {version_path}")
 
             # Copy file to version storage
-            shutil.copy2(file_path, version_path)
+            try:
+                shutil.copy2(file_path, version_path)
+            except OSError as e:
+                # Handle SMB/network shares that don't support chmod (errno 95)
+                if e.errno == 95:
+                    logger.warning(f"copy2 failed (metadata not supported), falling back to copy: {e}")
+                    shutil.copyfile(file_path, version_path)
+                else:
+                    raise
             logger.info(f"  ✓ File copied to version storage")
 
             # Create database record
@@ -946,7 +954,15 @@ class VersionManager:
             logger.info(f"  Storage path: {version_path}")
 
             # Copy modified file to version storage
-            shutil.copy2(modified_file_path, version_path)
+            try:
+                shutil.copy2(modified_file_path, version_path)
+            except OSError as e:
+                # Handle SMB/network shares that don't support chmod (errno 95)
+                if e.errno == 95:
+                    logger.warning(f"copy2 failed (metadata not supported), falling back to copy: {e}")
+                    shutil.copyfile(modified_file_path, version_path)
+                else:
+                    raise
             logger.info(f"  ✓ File copied to version storage")
 
             # Mark previous version as inactive
@@ -1074,7 +1090,15 @@ class VersionManager:
                 raise FileNotFoundError(f"Version file not found: {storage_path}")
 
             # Copy version file to target
-            shutil.copy2(storage_path, target_path)
+            try:
+                shutil.copy2(storage_path, target_path)
+            except OSError as e:
+                # Handle SMB/network shares that don't support chmod (errno 95)
+                if e.errno == 95:
+                    logger.warning(f"copy2 failed (metadata not supported), falling back to copy: {e}")
+                    shutil.copyfile(storage_path, target_path)
+                else:
+                    raise
             logger.info(f"  ✓ Version restored successfully")
 
             return True

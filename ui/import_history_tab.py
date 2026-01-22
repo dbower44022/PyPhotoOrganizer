@@ -37,6 +37,9 @@ from ui.preview import ImagePreviewWidget
 # Import detachable preview window for large image viewing
 from ui.detachable_preview_window import DetachablePreviewWindow
 
+# Import duplicate comparison dialog
+from ui.duplicate_comparison_dialog import DuplicateComparisonDialog
+
 logger = logging.getLogger(__name__)
 
 
@@ -731,6 +734,9 @@ class ImportHistoryTab(QWidget):
         # Detachable preview window (created on demand)
         self._detached_preview_window = None
 
+        # Duplicate comparison dialog (created on demand)
+        self._comparison_dialog = None
+
         # Model and proxy for file logs
         self._model = FileLogTableModel(self)
         self._proxy = FileLogFilterProxyModel(self)
@@ -1001,6 +1007,14 @@ class ImportHistoryTab(QWidget):
             "Import selected filtered files, bypassing size/dimension filters"
         )
         export_layout.addWidget(self.override_skip_btn)
+
+        # Compare Duplicates button
+        self.compare_duplicates_btn = QPushButton("Compare Duplicates")
+        self.compare_duplicates_btn.clicked.connect(self._compare_selected_duplicate)
+        self.compare_duplicates_btn.setToolTip(
+            "Open side-by-side comparison of selected duplicate with archive file"
+        )
+        export_layout.addWidget(self.compare_duplicates_btn)
 
         # Undo Override Skip button
         self.undo_override_btn = QPushButton("Undo Override")
@@ -1337,6 +1351,10 @@ class ImportHistoryTab(QWidget):
 
             logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Content Duplicates: {len(self._content_duplicate_logs)}, Filtered: {len(self._filtered_logs)}, Errors: {len(self._error_logs)}")
 
+            # Enrich duplicate logs with archive file paths
+            with profile_block("Enrich duplicate logs with archive paths", logger):
+                self._enrich_duplicate_logs()
+
             # Apply current show filter
             with profile_block("Apply show filter and populate model", logger):
                 self._apply_show_filter()
@@ -1392,6 +1410,10 @@ class ImportHistoryTab(QWidget):
                         self._error_logs.append(log)
 
             logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Content Duplicates: {len(self._content_duplicate_logs)}, Filtered: {len(self._filtered_logs)}, Errors: {len(self._error_logs)}")
+
+            # Enrich duplicate logs with archive file paths
+            with profile_block("Enrich duplicate logs with archive paths", logger):
+                self._enrich_duplicate_logs()
 
             # Apply current show filter
             with profile_block("Apply show filter and populate model", logger):
@@ -1523,6 +1545,11 @@ class ImportHistoryTab(QWidget):
             }
             self._detached_preview_window.update_preview(record)
 
+        # Also update comparison dialog if it's open and selected file is a duplicate
+        if self._comparison_dialog and self._comparison_dialog.isVisible():
+            if self._is_duplicate_log(log):
+                self._update_comparison_dialog(log)
+
     def _toggle_inline_preview(self, checked: bool):
         """Toggle the inline preview panel visibility."""
         self._preview_splitter.setVisible(checked)
@@ -1543,7 +1570,7 @@ class ImportHistoryTab(QWidget):
                     self._file_details.setFileDetails(log, preview_path)
 
     def _on_file_double_clicked(self, index):
-        """Handle double-click on file row - open detached preview."""
+        """Handle double-click on file row - open detached preview or comparison."""
         if not index.isValid():
             return
 
@@ -1553,7 +1580,11 @@ class ImportHistoryTab(QWidget):
         if not log:
             return
 
-        self._open_detached_preview(log)
+        # For duplicates, open the comparison dialog instead
+        if self._is_duplicate_log(log):
+            self._open_comparison_dialog(log)
+        else:
+            self._open_detached_preview(log)
 
     def _open_detached_preview(self, log: dict):
         """Open the detached preview window for a file log entry."""
@@ -1587,6 +1618,152 @@ class ImportHistoryTab(QWidget):
         self._detached_preview_window.show()
         self._detached_preview_window.raise_()
         self._detached_preview_window.activateWindow()
+
+    def _enrich_duplicate_logs(self):
+        """
+        Enrich duplicate logs with archive file paths.
+
+        For duplicate entries, looks up the archive path of the original file
+        using the duplicate_of_hash or content_duplicate_of_hash field.
+        This allows displaying the path to the existing archive file.
+        """
+        if not self.database_path:
+            return
+
+        # Combine both duplicate lists
+        all_duplicates = self._duplicate_logs + getattr(self, '_content_duplicate_logs', [])
+        if not all_duplicates:
+            return
+
+        try:
+            from DuplicateFileDetection import PhotoDatabase
+
+            with PhotoDatabase(self.database_path) as db:
+                enriched_count = 0
+                for log in all_duplicates:
+                    # Get the hash of the original file (the one in the archive)
+                    original_hash = log.get('duplicate_of_hash') or log.get('content_duplicate_of_hash')
+                    if not original_hash:
+                        continue
+
+                    # Look up the archive path for this hash
+                    archive_path = db.get_file_path_for_hash(original_hash)
+                    if archive_path:
+                        # Store the archive path in destination_path so it shows in the dest columns
+                        log['destination_path'] = archive_path
+                        log['_archive_duplicate_path'] = archive_path  # Also store explicitly
+                        enriched_count += 1
+
+                logger.info(f"Enriched {enriched_count}/{len(all_duplicates)} duplicate logs with archive paths")
+
+        except Exception as e:
+            logger.error(f"Failed to enrich duplicate logs: {e}", exc_info=True)
+
+    def _is_duplicate_log(self, log: dict) -> bool:
+        """Check if a log entry is a duplicate (regular or content duplicate)."""
+        operation = log.get('operation', '')
+        return operation in ('duplicate detected', 'content_duplicate_detected')
+
+    def _compare_selected_duplicate(self):
+        """Open comparison dialog for the selected duplicate entry."""
+        indexes = self._view.selectionModel().selectedRows()
+        if not indexes:
+            QMessageBox.information(
+                self, "No Selection",
+                "Please select a duplicate entry to compare.\n\n"
+                "Tip: Switch to 'Duplicates' or 'Content Duplicates' view "
+                "and select a file to compare."
+            )
+            return
+
+        # Get the first selected row
+        source_index = self._proxy.mapToSource(indexes[0])
+        log = self._model.getLog(source_index.row())
+        if not log:
+            return
+
+        # Check if it's a duplicate
+        if not self._is_duplicate_log(log):
+            QMessageBox.information(
+                self, "Not a Duplicate",
+                "The selected file is not a duplicate.\n\n"
+                "Comparison is only available for files marked as duplicates. "
+                "Switch to 'Duplicates' or 'Content Duplicates' view to see duplicate files."
+            )
+            return
+
+        self._open_comparison_dialog(log)
+
+    def _open_comparison_dialog(self, log: dict):
+        """Open the duplicate comparison dialog for a log entry."""
+        source_path = log.get('source_path', '')
+        archive_path = log.get('destination_path') or log.get('_archive_duplicate_path', '')
+
+        if not source_path:
+            QMessageBox.warning(
+                self, "Missing Source",
+                "Source file path is not available for this entry."
+            )
+            return
+
+        if not archive_path:
+            # Try to look up the archive path
+            original_hash = log.get('duplicate_of_hash') or log.get('content_duplicate_of_hash')
+            if original_hash and self.database_path:
+                try:
+                    from DuplicateFileDetection import PhotoDatabase
+                    with PhotoDatabase(self.database_path) as db:
+                        archive_path = db.get_file_path_for_hash(original_hash)
+                except Exception as e:
+                    logger.error(f"Failed to look up archive path: {e}")
+
+        if not archive_path:
+            QMessageBox.warning(
+                self, "Missing Archive Path",
+                "Could not find the archive file path for this duplicate.\n\n"
+                "The original file may have been deleted from the archive."
+            )
+            return
+
+        # Create comparison dialog if needed
+        if not self._comparison_dialog:
+            self._comparison_dialog = DuplicateComparisonDialog(parent=self.window())
+            logger.info("Created DuplicateComparisonDialog")
+
+        # Set the files and show
+        self._comparison_dialog.set_files(source_path, archive_path)
+        self._comparison_dialog.show()
+        self._comparison_dialog.raise_()
+        self._comparison_dialog.activateWindow()
+
+    def _update_comparison_dialog(self, log: dict):
+        """
+        Update the comparison dialog with a new log entry.
+
+        Called when selection changes in the grid and comparison dialog is visible.
+        Unlike _open_comparison_dialog, this doesn't show warnings for missing paths
+        since it's an automatic update, not a user-initiated action.
+        """
+        if not self._comparison_dialog:
+            return
+
+        source_path = log.get('source_path', '')
+        archive_path = log.get('destination_path') or log.get('_archive_duplicate_path', '')
+
+        # Try to look up archive path if not available
+        if not archive_path:
+            original_hash = log.get('duplicate_of_hash') or log.get('content_duplicate_of_hash')
+            if original_hash and self.database_path:
+                try:
+                    from DuplicateFileDetection import PhotoDatabase
+                    with PhotoDatabase(self.database_path) as db:
+                        archive_path = db.get_file_path_for_hash(original_hash)
+                except Exception as e:
+                    logger.debug(f"Failed to look up archive path for selection update: {e}")
+
+        # Only update if we have both paths (silently skip otherwise)
+        if source_path and archive_path:
+            self._comparison_dialog.set_files(source_path, archive_path)
 
     def _set_export_buttons_enabled(self, enabled):
         """Enable or disable export buttons."""
@@ -2047,6 +2224,16 @@ class ImportHistoryTab(QWidget):
     def _on_override_skip_file_processed(self, source_path: str, result: str):
         """Handle per-file processing result for real-time UI updates."""
         if result in ('success', 'skipped'):
+            # Find the proxy row index for this source path before removal
+            proxy_row_to_select = -1
+            for row in range(self._proxy.rowCount()):
+                proxy_index = self._proxy.index(row, 0)
+                source_index = self._proxy.mapToSource(proxy_index)
+                log = self._model._data[source_index.row()]
+                if log.get('source_path') == source_path:
+                    proxy_row_to_select = row
+                    break
+
             # Remove the row from the view immediately
             self._model.removeRowsBySourcePath({source_path})
 
@@ -2058,6 +2245,19 @@ class ImportHistoryTab(QWidget):
                 ]
 
             self._update_count()
+
+            # Select the next row to maintain user's place
+            if proxy_row_to_select >= 0 and self._proxy.rowCount() > 0:
+                # Select the same row index (which now contains the next item)
+                # or the last row if we removed the last item
+                new_row = min(proxy_row_to_select, self._proxy.rowCount() - 1)
+                new_index = self._proxy.index(new_row, 0)
+                self._view.selectionModel().select(
+                    new_index,
+                    self._view.selectionModel().SelectionFlag.ClearAndSelect |
+                    self._view.selectionModel().SelectionFlag.Rows
+                )
+                self._view.scrollTo(new_index)
 
     def _on_override_skip_completed(self, results):
         """Handle override skip completion."""
