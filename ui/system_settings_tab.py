@@ -1002,3 +1002,16 @@ class SystemSettingsTab(QWidget):
         )
 
         self._backfill_worker = None
+
+    def cleanup_workers(self):
+        """
+        Stop and wait for any running worker threads.
+
+        Called by main window before closing to prevent
+        'QThread destroyed while thread is still running' errors.
+        """
+        if self._backfill_worker and self._backfill_worker.isRunning():
+            logger.info("Stopping content hash backfill worker before close...")
+            self._backfill_worker.stop()
+            self._backfill_worker.wait()
+            logger.info("Content hash backfill worker stopped")
