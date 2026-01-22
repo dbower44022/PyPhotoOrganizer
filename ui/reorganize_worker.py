@@ -200,7 +200,15 @@ def reorganize_files(parent_widget, db_metadata, files_to_reorganize):
             logger.info(f"Copying file...")
             old_size = os.path.getsize(old_archive_path)
             logger.info(f"  Source size: {old_size:,} bytes")
-            shutil.copy2(old_archive_path, new_archive_path)
+            try:
+                shutil.copy2(old_archive_path, new_archive_path)
+            except OSError as e:
+                # Handle SMB/network shares that don't support chmod (errno 95)
+                if e.errno == 95:
+                    logger.warning(f"copy2 failed (metadata not supported), using copyfile: {e}")
+                    shutil.copyfile(old_archive_path, new_archive_path)
+                else:
+                    raise
             logger.info(f"  ✓ Copy completed")
 
             # Verify copy succeeded

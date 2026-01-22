@@ -322,8 +322,11 @@ class EditWorker(QThread):
                     self.worker_logger.warning(f"  Move failed, using copy+delete: {e}")
                     try:
                         shutil.copy2(archive_path, prior_revision_path)
-                    except PermissionError:
-                        shutil.copy(archive_path, prior_revision_path)
+                    except (PermissionError, OSError) as copy_err:
+                        # Handle permission errors and SMB/network shares (errno 95)
+                        if isinstance(copy_err, OSError) and copy_err.errno != 95:
+                            raise
+                        shutil.copyfile(archive_path, prior_revision_path)
                     os.remove(archive_path)
                     self.worker_logger.info(f"  Original copied to: {os.path.basename(prior_revision_path)}")
 
@@ -350,8 +353,11 @@ class EditWorker(QThread):
 
                 try:
                     shutil.copy2(edited_path, archive_path)
-                except PermissionError:
-                    shutil.copy(edited_path, archive_path)
+                except (PermissionError, OSError) as copy_err:
+                    # Handle permission errors and SMB/network shares (errno 95)
+                    if isinstance(copy_err, OSError) and copy_err.errno != 95:
+                        raise
+                    shutil.copyfile(edited_path, archive_path)
 
                 # Verify placement
                 if not os.path.exists(archive_path):
@@ -647,7 +653,13 @@ class BatchEditWorker(QThread):
                 try:
                     shutil.move(archive_path, prior_revision_path)
                 except Exception:
-                    shutil.copy2(archive_path, prior_revision_path)
+                    try:
+                        shutil.copy2(archive_path, prior_revision_path)
+                    except OSError as copy_err:
+                        if copy_err.errno == 95:  # Operation not supported (SMB)
+                            shutil.copyfile(archive_path, prior_revision_path)
+                        else:
+                            raise
                     os.remove(archive_path)
 
                 # Update original location in database
@@ -658,7 +670,13 @@ class BatchEditWorker(QThread):
                     """, (prior_revision_path, original_hash))
 
                 # Place edited file in main archive
-                shutil.copy2(edited_path, archive_path)
+                try:
+                    shutil.copy2(edited_path, archive_path)
+                except OSError as copy_err:
+                    if copy_err.errno == 95:  # Operation not supported (SMB)
+                        shutil.copyfile(edited_path, archive_path)
+                    else:
+                        raise
                 os.remove(edited_path)
 
                 # Create revision record

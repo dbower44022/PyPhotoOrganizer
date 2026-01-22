@@ -405,7 +405,15 @@ class AlbumManager:
         try:
             # Copy file with metadata preservation
             old_size = os.path.getsize(archive_path)
-            shutil.copy2(archive_path, album_file_path)
+            try:
+                shutil.copy2(archive_path, album_file_path)
+            except OSError as e:
+                # Handle SMB/network shares that don't support chmod (errno 95)
+                if e.errno == 95:
+                    logger.warning(f"copy2 failed (metadata not supported on destination), using copyfile: {e}")
+                    shutil.copyfile(archive_path, album_file_path)
+                else:
+                    raise
 
             # Verify copy
             if not os.path.exists(album_file_path):

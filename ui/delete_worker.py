@@ -170,7 +170,15 @@ class DeleteWorker(QThread):
                 old_size = os.path.getsize(archive_path)
                 self.worker_logger.info(f"  Copying to vault (size: {old_size} bytes)...")
 
-                shutil.copy2(archive_path, vault_path)
+                try:
+                    shutil.copy2(archive_path, vault_path)
+                except OSError as e:
+                    # Handle SMB/network shares that don't support chmod (errno 95)
+                    if e.errno == 95:
+                        self.worker_logger.warning(f"copy2 failed (metadata not supported), using copyfile: {e}")
+                        shutil.copyfile(archive_path, vault_path)
+                    else:
+                        raise
 
                 # Verify copy
                 if not os.path.exists(vault_path):

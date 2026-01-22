@@ -2362,7 +2362,15 @@ def safe_rename_or_copy(old_path, new_path):
             if os.path.exists(new_path):
                 logger.info(f"Cannot copy. Target file already exists: {new_path}")
                 return
-            shutil.copy2(old_path, new_path)
+            try:
+                shutil.copy2(old_path, new_path)
+            except OSError as copy2_err:
+                # Handle SMB/network shares that don't support chmod (errno 95)
+                if copy2_err.errno == 95:
+                    logger.warning(f"copy2 failed (metadata not supported), falling back to copy: {copy2_err}")
+                    shutil.copyfile(old_path, new_path)
+                else:
+                    raise
             logger.info(f"File copied to: {new_path}")
         except Exception as copy_err:
             logger.error(f"Copy also failed: {copy_err}")
