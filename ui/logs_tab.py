@@ -32,21 +32,24 @@ class ClickableLabel(QLabel):
 class LogsTab(QWidget):
     """Tab for viewing application logs with advanced features."""
 
+    # Maximum lines to display (limits memory usage for huge log files)
+    MAX_DISPLAY_LINES = 10000
+
     def __init__(self):
         super().__init__()
         self.current_log_file = None
         self.available_log_files = []
         self.auto_scroll = True
         self.all_log_entries = []  # Store all parsed entries
+        self._initialized = False  # Track if initial load has been done
+        self._last_file_position = 0  # Track file position for incremental reads
+        self._last_file_size = 0  # Track file size for change detection
         self.init_ui()
 
-        # Discover log files
-        self.discover_log_files()
-
-        # Set up auto-refresh timer
+        # Set up auto-refresh timer (but don't start it yet - wait for tab visibility)
         self.refresh_timer = QTimer()
-        self.refresh_timer.timeout.connect(self.refresh_logs)
-        self.refresh_timer.start(2000)  # Refresh every 2 seconds
+        self.refresh_timer.timeout.connect(self._incremental_refresh)
+        # Timer will be started in showEvent when tab becomes visible
 
     def init_ui(self):
         """Initialize the user interface."""
@@ -212,6 +215,72 @@ class LogsTab(QWidget):
 
         self.setLayout(main_layout)
 
+    def showEvent(self, event):
+        """Handle tab becoming visible - initialize and start timer."""
+        super().showEvent(event)
+        if not self._initialized:
+            # First time visible - do initial load
+            self._initialized = True
+            self.discover_log_files()
+        # Start auto-refresh timer when tab is visible (10 second interval)
+        if not self.refresh_timer.isActive():
+            self.refresh_timer.start(10000)
+
+    def hideEvent(self, event):
+        """Handle tab becoming hidden - stop timer to save resources."""
+        super().hideEvent(event)
+        # Stop timer when tab is not visible
+        if self.refresh_timer.isActive():
+            self.refresh_timer.stop()
+
+    def _incremental_refresh(self):
+        """Timer-based incremental refresh - only reads new log lines."""
+        if not self.current_log_file or not os.path.exists(self.current_log_file):
+            return
+
+        try:
+            current_size = os.path.getsize(self.current_log_file)
+
+            # If file was truncated (cleared), do full reload
+            if current_size < self._last_file_size:
+                self._last_file_position = 0
+                self._last_file_size = 0
+                self.all_log_entries = []
+                self.refresh_logs()
+                return
+
+            # If no changes, skip
+            if current_size == self._last_file_size:
+                return
+
+            # Read only new content from last position
+            with open(self.current_log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                f.seek(self._last_file_position)
+                new_lines = f.readlines()
+                self._last_file_position = f.tell()
+                self._last_file_size = current_size
+
+            if not new_lines:
+                return
+
+            # Parse new lines and append to entries
+            new_entries = []
+            for line in new_lines:
+                entry = self._parse_log_line(line)
+                if entry:
+                    new_entries.append(entry)
+
+            if new_entries:
+                self.all_log_entries.extend(new_entries)
+                # Trim to max size if needed
+                if len(self.all_log_entries) > self.MAX_DISPLAY_LINES:
+                    self.all_log_entries = self.all_log_entries[-self.MAX_DISPLAY_LINES:]
+                self.update_statistics()
+                self.filter_logs()
+
+        except Exception as e:
+            logger.warning(f"Error in incremental log refresh: {e}")
+
     def discover_log_files(self):
         """Discover all available log files."""
         try:
@@ -239,22 +308,34 @@ class LogsTab(QWidget):
         """Handle log file selection change."""
         if log_file and log_file != "No log files found":
             self.current_log_file = log_file
+            # Reset position tracking for new file
+            self._last_file_position = 0
+            self._last_file_size = 0
             self.clear_display()
             self.refresh_logs()
 
     def refresh_logs(self):
-        """Refresh logs from file."""
+        """Refresh logs from file (full reload, limited to last MAX_DISPLAY_LINES)."""
         if not self.current_log_file or not os.path.exists(self.current_log_file):
             return
 
         try:
+            # Read file efficiently - only keep last MAX_DISPLAY_LINES
             with open(self.current_log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                # For large files, read in chunks from the end
+                # For simplicity, read all and take last N lines
                 lines = f.readlines()
+                self._last_file_position = f.tell()
+                self._last_file_size = os.path.getsize(self.current_log_file)
 
-            # Clear and reload all entries
+            # Limit to last MAX_DISPLAY_LINES to prevent memory issues
+            if len(lines) > self.MAX_DISPLAY_LINES:
+                lines = lines[-self.MAX_DISPLAY_LINES:]
+
+            # Clear and reload entries
             self.all_log_entries = []
 
-            # Parse all log lines
+            # Parse log lines
             for line in lines:
                 entry = self._parse_log_line(line)
                 if entry:
@@ -267,7 +348,7 @@ class LogsTab(QWidget):
             self.filter_logs()
 
         except Exception as e:
-            print(f"Error reading log file: {e}")
+            logger.error(f"Error reading log file: {e}")
 
     def _parse_log_line(self, line):
         """
