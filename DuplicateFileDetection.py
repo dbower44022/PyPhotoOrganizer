@@ -1611,6 +1611,17 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
         unreliable_dates_count = 0  # Count files with suspicious/unreliable dates
         unreliable_dates_to_insert = []  # Batch unreliable date records to avoid DB lock
 
+        # NEW: Additional counters for enhanced progress reporting
+        photos_processed = 0  # Count of image files processed
+        videos_processed = 0  # Count of video files processed
+        bytes_processed = 0  # Total bytes processed for throughput calculation
+        current_file_size = 0  # Size of currently processing file
+
+        # Date source breakdown counters
+        date_from_exif = 0  # Files with EXIF date (includes IPTC)
+        date_from_os = 0  # Files using OS metadata date
+        date_from_video = 0  # Files using video metadata date
+
         # Initialize photo filter if config provided
         photo_filter = None
         if config:
@@ -1649,12 +1660,33 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                         # Update progress bar description with current file
                         pbar.set_postfix_str(os.path.basename(filename)[:constants.MAX_FILENAME_DISPLAY_LENGTH])
 
+                        # Get current file size for progress display
+                        try:
+                            current_file_size = os.path.getsize(filename) if os.path.isfile(filename) else 0
+                        except Exception:
+                            current_file_size = 0
+
                         # Progress callback for GUI - also checks for stop signal
                         if progress_callback:
                             stats = {
+                                # Existing stats
                                 'unique': len(original_files),
                                 'duplicates': len(duplicate_files),
-                                'filtered': len(filtered_files)
+                                'filtered': len(filtered_files),
+                                # NEW: Content duplicates count
+                                'content_duplicates': len(content_duplicate_files),
+                                # NEW: Unreliable dates count
+                                'unreliable_dates': unreliable_dates_count,
+                                # NEW: File type breakdown
+                                'photos_processed': photos_processed,
+                                'videos_processed': videos_processed,
+                                # NEW: Date source breakdown
+                                'date_from_exif': date_from_exif,
+                                'date_from_os': date_from_os,
+                                'date_from_video': date_from_video,
+                                # NEW: Throughput data
+                                'bytes_processed': bytes_processed,
+                                'current_file_size': current_file_size,
                             }
                             callback_result = progress_callback(file_index, len(files), filename, stats)
                             # If callback returns True, it means stop was requested
@@ -1759,6 +1791,16 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                             logger.exception(f"Failed to get file size for {filename}: {e}")
                             pbar.update(1)
                             continue
+
+                        # Track file type (photo vs video) for progress display
+                        is_video = _is_video_file(filename)
+                        if is_video:
+                            videos_processed += 1
+                        else:
+                            photos_processed += 1
+
+                        # Update bytes processed for throughput calculation
+                        bytes_processed += file_size
 
                         # TWO-STAGE HASHING OPTIMIZATION
                         file_hash = None
@@ -1937,6 +1979,14 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                             # Get the create date with reliability info
                             file_year, file_month, file_day, date_source, is_reliable = get_creation_date(filename, database_path)
                             file_create_date = f"{file_year}-{file_month}-{file_day}"
+
+                            # Track date source breakdown for progress display
+                            if date_source in ('exif', 'iptc'):
+                                date_from_exif += 1
+                            elif date_source in ('video_metadata', 'video_quicktime'):
+                                date_from_video += 1
+                            else:  # 'os_metadata', 'fallback', or other
+                                date_from_os += 1
 
                             # Check if date is unreliable and determine flag reason
                             if not is_reliable:
