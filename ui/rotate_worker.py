@@ -260,8 +260,11 @@ class RotateWorker(QThread):
                     self.worker_logger.warning(f"  ⚠ Move failed, using copy+delete: {e}")
                     try:
                         shutil.copy2(archive_path, prior_revision_path)
-                    except PermissionError:
-                        shutil.copy(archive_path, prior_revision_path)
+                    except (PermissionError, OSError) as copy_err:
+                        # Handle permission errors and SMB/network shares (errno 95)
+                        if isinstance(copy_err, OSError) and copy_err.errno != 95:
+                            raise
+                        shutil.copyfile(archive_path, prior_revision_path)
                         self.worker_logger.info("  ℹ Using copy() instead of copy2()")
                     os.remove(archive_path)
                     self.worker_logger.info(f"  ✓ Original copied to: {os.path.basename(prior_revision_path)}")
@@ -291,8 +294,11 @@ class RotateWorker(QThread):
 
                 try:
                     shutil.copy2(rotated_path, archive_path)
-                except PermissionError:
-                    shutil.copy(rotated_path, archive_path)
+                except (PermissionError, OSError) as copy_err:
+                    # Handle permission errors and SMB/network shares (errno 95)
+                    if isinstance(copy_err, OSError) and copy_err.errno != 95:
+                        raise
+                    shutil.copyfile(rotated_path, archive_path)
                     self.worker_logger.info("  ℹ Using copy() instead of copy2()")
 
                 # Verify placement
@@ -563,7 +569,13 @@ class UndoRotationWorker(QThread):
                     except Exception as e:
                         # Fallback: copy then delete
                         self.worker_logger.warning(f"  ⚠ Move failed, using copy+delete: {e}")
-                        shutil.copy2(current_path, current_to_prior_path)
+                        try:
+                            shutil.copy2(current_path, current_to_prior_path)
+                        except OSError as copy_err:
+                            if copy_err.errno == 95:  # Operation not supported (SMB)
+                                shutil.copyfile(current_path, current_to_prior_path)
+                            else:
+                                raise
                         os.remove(current_path)
 
                     self.worker_logger.info(f"  ✓ Current moved to: {os.path.basename(current_to_prior_path)}")
@@ -575,7 +587,13 @@ class UndoRotationWorker(QThread):
                     except Exception as e:
                         # Fallback: copy then delete
                         self.worker_logger.warning(f"  ⚠ Move failed, using copy+delete: {e}")
-                        shutil.copy2(parent_path, current_path)
+                        try:
+                            shutil.copy2(parent_path, current_path)
+                        except OSError as copy_err:
+                            if copy_err.errno == 95:  # Operation not supported (SMB)
+                                shutil.copyfile(parent_path, current_path)
+                            else:
+                                raise
                         os.remove(parent_path)
 
                     self.worker_logger.info(f"  ✓ Parent restored to: {os.path.basename(current_path)}")

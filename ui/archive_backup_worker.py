@@ -242,10 +242,21 @@ class ArchiveBackupWorker(QThread):
         db_backup_folder = os.path.join(backup_folder, "database")
         os.makedirs(db_backup_folder, exist_ok=True)
 
+        def _copy_with_fallback(src, dst):
+            """Copy file, falling back to copyfile() if copy2() fails on network shares."""
+            try:
+                shutil.copy2(src, dst)
+            except OSError as e:
+                if e.errno == 95:  # Operation not supported (SMB/network shares)
+                    logger.warning(f"copy2 failed (metadata not supported), using copyfile: {e}")
+                    shutil.copyfile(src, dst)
+                else:
+                    raise
+
         # Main database file
         if os.path.exists(self.database_path):
             dest = os.path.join(db_backup_folder, os.path.basename(self.database_path))
-            shutil.copy2(self.database_path, dest)
+            _copy_with_fallback(self.database_path, dest)
             files += 1
             bytes_copied += os.path.getsize(dest)
             self.progress_update.emit(files, files, os.path.basename(self.database_path))
@@ -254,7 +265,7 @@ class ArchiveBackupWorker(QThread):
         wal_path = self.database_path + '-wal'
         if os.path.exists(wal_path):
             dest = os.path.join(db_backup_folder, os.path.basename(wal_path))
-            shutil.copy2(wal_path, dest)
+            _copy_with_fallback(wal_path, dest)
             files += 1
             bytes_copied += os.path.getsize(dest)
 
@@ -262,7 +273,7 @@ class ArchiveBackupWorker(QThread):
         shm_path = self.database_path + '-shm'
         if os.path.exists(shm_path):
             dest = os.path.join(db_backup_folder, os.path.basename(shm_path))
-            shutil.copy2(shm_path, dest)
+            _copy_with_fallback(shm_path, dest)
             files += 1
             bytes_copied += os.path.getsize(dest)
 
@@ -312,7 +323,15 @@ class ArchiveBackupWorker(QThread):
                     dest_path = os.path.join(target_dir, filename)
 
                     try:
-                        shutil.copy2(source_path, dest_path)
+                        try:
+                            shutil.copy2(source_path, dest_path)
+                        except OSError as e:
+                            # Handle SMB/network shares that don't support chmod (errno 95)
+                            if e.errno == 95:
+                                logger.warning(f"copy2 failed (metadata not supported), using copyfile: {e}")
+                                shutil.copyfile(source_path, dest_path)
+                            else:
+                                raise
                         file_size = os.path.getsize(dest_path)
                         files += 1
                         bytes_copied += file_size

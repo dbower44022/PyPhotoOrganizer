@@ -234,7 +234,15 @@ class ReprocessWorker(QThread):
                     logger.info(f"{operation.title()}ing file to: {target_path}")
 
                     if self.copy_mode:
-                        shutil.copy2(source_path, target_path)
+                        try:
+                            shutil.copy2(source_path, target_path)
+                        except OSError as e:
+                            # Handle SMB/network shares that don't support chmod (errno 95)
+                            if e.errno == 95:
+                                logger.warning(f"copy2 failed (metadata not supported on destination), using copyfile: {e}")
+                                shutil.copyfile(source_path, target_path)
+                            else:
+                                raise
                     else:
                         shutil.move(source_path, target_path)
 

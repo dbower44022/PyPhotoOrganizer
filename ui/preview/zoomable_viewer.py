@@ -227,7 +227,7 @@ class UnifiedImageViewer(QGraphicsView):
         # Validate file type by extension
         ext = os.path.splitext(file_path)[1].lower()
         if ext not in self.VALID_IMAGE_EXTENSIONS:
-            self._show_placeholder(f"Not an image file\n({ext})")
+            self._show_placeholder("Invalid File Format")
             return False
 
         try:

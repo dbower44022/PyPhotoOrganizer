@@ -117,7 +117,15 @@ class RestoreWorker(QThread):
                 vault_size = os.path.getsize(vault_path)
                 self.worker_logger.info(f"  Copying from vault (size: {vault_size} bytes)...")
 
-                shutil.copy2(vault_path, restore_path)
+                try:
+                    shutil.copy2(vault_path, restore_path)
+                except OSError as e:
+                    # Handle SMB/network shares that don't support chmod (errno 95)
+                    if e.errno == 95:
+                        self.worker_logger.warning(f"copy2 failed (metadata not supported), using copyfile: {e}")
+                        shutil.copyfile(vault_path, restore_path)
+                    else:
+                        raise
 
                 # Verify copy
                 if not os.path.exists(restore_path):
