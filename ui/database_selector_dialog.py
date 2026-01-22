@@ -6,16 +6,61 @@ Allows users to select an existing database or create a new one.
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QListWidget, QListWidgetItem,
-                               QMessageBox, QTextEdit, QApplication)
+                               QMessageBox, QTextEdit, QApplication, QFileDialog)
 from PySide6.QtCore import Qt, Signal
 from database_metadata import DatabaseMetadata
 import os
+import sqlite3
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class DatabaseSelectorDialog(QDialog):
     """Dialog for selecting or creating a database."""
 
     database_selected = Signal(str)  # Emits database path
+
+    @staticmethod
+    def _get_last_activity_date(db_path: str) -> str:
+        """
+        Get the last activity date from the ImportSession table.
+
+        Args:
+            db_path: Path to the database file
+
+        Returns:
+            Last activity date string or 'Never' if no sessions
+        """
+        try:
+            conn = sqlite3.connect(db_path, timeout=5)
+            cursor = conn.cursor()
+
+            # Check if ImportSession table exists
+            cursor.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name='ImportSession'
+            """)
+            if not cursor.fetchone():
+                conn.close()
+                return 'Never'
+
+            # Get the most recent session end_timestamp or start_timestamp
+            cursor.execute("""
+                SELECT MAX(COALESCE(end_timestamp, start_timestamp))
+                FROM ImportSession
+            """)
+            result = cursor.fetchone()
+            conn.close()
+
+            if result and result[0]:
+                # Return date portion only (first 10 chars: YYYY-MM-DD)
+                return result[0][:10]
+            return 'Never'
+
+        except Exception as e:
+            logger.debug(f"Could not get last activity for {db_path}: {e}")
+            return 'Unknown'
 
     def __init__(self, parent=None, search_paths=None):
         """
@@ -80,6 +125,12 @@ class DatabaseSelectorDialog(QDialog):
         self.open_button.clicked.connect(self.on_open_clicked)
         button_layout.addWidget(self.open_button)
 
+        self.browse_button = QPushButton("Browse...")
+        self.browse_button.setMinimumHeight(35)
+        self.browse_button.setToolTip("Browse for a database file")
+        self.browse_button.clicked.connect(self.on_browse_clicked)
+        button_layout.addWidget(self.browse_button)
+
         self.create_button = QPushButton("Create New Database")
         self.create_button.setMinimumHeight(35)
         self.create_button.clicked.connect(self.on_create_clicked)
@@ -133,6 +184,8 @@ class DatabaseSelectorDialog(QDialog):
                     all_databases.append(db)
                     seen_paths.add(db_path)
 
+        # Sort databases by name (case-insensitive)
+        all_databases.sort(key=lambda db: db.get('database_name', '').lower())
         self.databases = all_databases
 
         if not self.databases:
@@ -148,7 +201,12 @@ class DatabaseSelectorDialog(QDialog):
             archive = db.get('archive_location', 'Unknown')
             photos = db.get('total_photos', 0)
 
-            item_text = f"{name}\n  Archive: {archive}\n  Photos: {photos:,}"
+            # Get last activity date from ImportSession table
+            db_path = db.get('path', '')
+            last_activity = self._get_last_activity_date(db_path)
+            db['last_activity'] = last_activity  # Store for info panel
+
+            item_text = f"{name}\n  Archive: {archive}\n  Photos: {photos:,}  |  Last Activity: {last_activity}"
             item = QListWidgetItem(item_text)
             item.setData(Qt.UserRole, db)  # Store database info
             self.database_list.addItem(item)
@@ -172,12 +230,13 @@ class DatabaseSelectorDialog(QDialog):
 
     def display_database_info(self, db_info):
         """Display detailed database information."""
+        last_activity = db_info.get('last_activity', 'Unknown')
         info_text = f"""
 Name: {db_info.get('database_name', 'N/A')}
 Description: {db_info.get('description', 'None')}
 Archive Location: {db_info.get('archive_location', 'N/A')}
 Created: {db_info.get('created_date', 'N/A')[:10]}
-Last Used: {db_info.get('last_used_date', 'Never')[:10] if db_info.get('last_used_date') else 'Never'}
+Last Activity: {last_activity}
 Total Photos: {db_info.get('total_photos', 0):,}
 Database File: {db_info.get('filename', 'N/A')}
         """.strip()
@@ -243,6 +302,62 @@ Database File: {db_info.get('filename', 'N/A')}
                         self.database_list.setCurrentItem(item)
                         self.open_database(db_info)
                         break
+
+    def on_browse_clicked(self):
+        """Handle Browse button click - open file dialog to find a database."""
+        # Determine starting directory
+        start_dir = ""
+        if self.search_paths:
+            for path in self.search_paths:
+                if os.path.isdir(path):
+                    start_dir = path
+                    break
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Database File",
+            start_dir,
+            "Database Files (*.db);;All Files (*)"
+        )
+
+        if not file_path:
+            return  # User cancelled
+
+        # Validate the selected file is a PyPhotoOrganizer database
+        try:
+            db_meta = DatabaseMetadata(file_path)
+            metadata = db_meta.get_metadata()
+
+            if not metadata:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Database",
+                    f"The selected file does not appear to be a valid "
+                    f"PyPhotoOrganizer database:\n\n{file_path}\n\n"
+                    f"Please select a database created by this application."
+                )
+                return
+
+            # Build db_info dict matching the format from find_databases
+            db_info = {
+                'path': os.path.abspath(file_path),
+                'filename': os.path.basename(file_path),
+                **metadata
+            }
+
+            # Get last activity date
+            db_info['last_activity'] = self._get_last_activity_date(file_path)
+
+            # Open the database directly
+            self.open_database(db_info)
+
+        except Exception as e:
+            logger.error(f"Failed to open database {file_path}: {e}")
+            QMessageBox.critical(
+                self,
+                "Error Opening Database",
+                f"Failed to open the database file:\n\n{file_path}\n\nError: {str(e)}"
+            )
 
     def get_selected_database(self):
         """Get the path of the selected database."""

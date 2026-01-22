@@ -280,7 +280,7 @@ class QueryPanel(QWidget):
         scroll_layout = QVBoxLayout(scroll_content)
         scroll_layout.setContentsMargins(0, 0, 8, 0)
         scroll_layout.setSpacing(8)
-        scroll_layout.setAlignment(Qt.AlignTop)  # Keep all content at top
+        # Note: Not using AlignTop - folder section will expand to fill space
 
         # -----------------------------------------------------------------
         # Saved Queries Section
@@ -502,14 +502,18 @@ class QueryPanel(QWidget):
         scroll_layout.addWidget(execute_container)
 
         # -----------------------------------------------------------------
-        # Folder Browser Section
+        # Folder Browser Section (expands to fill remaining space)
         # -----------------------------------------------------------------
         self.folder_section = CollapsibleSection("Archive Folders", "📁")
+        # Override size policy to allow vertical expansion
+        self.folder_section.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.folder_section.content_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         self.folder_tree = QTreeWidget()
         self.folder_tree.setHeaderHidden(True)
         self.folder_tree.setMinimumHeight(150)
-        self.folder_tree.setMaximumHeight(300)
+        # No maximum height - allow tree to expand to fill available space
+        self.folder_tree.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.folder_tree.itemClicked.connect(self._on_folder_clicked)
         self.folder_tree.itemExpanded.connect(self._on_folder_expanded)
         self.folder_section.add_widget(self.folder_tree)
@@ -518,7 +522,7 @@ class QueryPanel(QWidget):
         refresh_btn.clicked.connect(self._load_folder_tree)
         self.folder_section.add_widget(refresh_btn)
 
-        scroll_layout.addWidget(self.folder_section)
+        scroll_layout.addWidget(self.folder_section, 1)  # Stretch factor of 1 to fill space
 
         scroll.setWidget(scroll_content)
         layout.addWidget(scroll)
