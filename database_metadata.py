@@ -317,6 +317,21 @@ class DatabaseMetadata:
                     # Set default value for existing rows
                     cursor.execute("UPDATE DatabaseMetadata SET content_hash_enabled = 1 WHERE content_hash_enabled IS NULL")
 
+                # Add backup_location column if missing (for archive backup feature)
+                if 'backup_location' not in columns:
+                    logger.info("Upgrading database: adding backup_location column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN backup_location TEXT")
+
+                # Add last_backup_timestamp column if missing
+                if 'last_backup_timestamp' not in columns:
+                    logger.info("Upgrading database: adding last_backup_timestamp column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN last_backup_timestamp TEXT")
+
+                # Add last_backup_status column if missing
+                if 'last_backup_status' not in columns:
+                    logger.info("Upgrading database: adding last_backup_status column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN last_backup_status TEXT")
+
                 conn.commit()
                 logger.debug(f"Metadata table ensured in {self.database_path}")
 
@@ -2806,6 +2821,312 @@ class DatabaseMetadata:
         except Exception as e:
             logger.error(f"Failed to delete DeletedFiles record: {e}")
             return False
+
+    # ========== Archive Maintenance Methods ==========
+
+    def get_backup_location(self) -> Optional[str]:
+        """
+        Get the configured backup location.
+
+        Returns:
+            str: Path to backup location, or None if not configured
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT backup_location
+                    FROM DatabaseMetadata
+                    WHERE id = 1
+                """)
+                result = cursor.fetchone()
+                return result[0] if result and result[0] else None
+        except Exception as e:
+            logger.error(f"Failed to get backup location: {e}")
+            return None
+
+    def set_backup_location(self, path: Optional[str]) -> bool:
+        """
+        Set the backup location.
+
+        Args:
+            path: Path to backup directory, or None to clear
+
+        Returns:
+            bool: True if saved successfully, False otherwise
+        """
+        try:
+            # Validate path if provided
+            if path:
+                if not os.path.exists(path):
+                    logger.error(f"Backup path does not exist: {path}")
+                    return False
+                if not os.path.isdir(path):
+                    logger.error(f"Backup path is not a directory: {path}")
+                    return False
+                if not os.access(path, os.W_OK):
+                    logger.error(f"Backup path is not writable: {path}")
+                    return False
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET backup_location = ?
+                    WHERE id = 1
+                """, (path,))
+                conn.commit()
+
+            logger.info(f"Backup location {'set to: ' + path if path else 'cleared'}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to set backup location: {e}")
+            return False
+
+    def get_last_backup_info(self) -> Dict[str, Any]:
+        """
+        Get information about the last backup.
+
+        Returns:
+            Dictionary with 'timestamp' and 'status' keys
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT last_backup_timestamp, last_backup_status
+                    FROM DatabaseMetadata
+                    WHERE id = 1
+                """)
+                result = cursor.fetchone()
+                if result:
+                    return {
+                        'timestamp': result[0],
+                        'status': result[1]
+                    }
+                return {'timestamp': None, 'status': None}
+        except Exception as e:
+            logger.error(f"Failed to get last backup info: {e}")
+            return {'timestamp': None, 'status': None}
+
+    def update_last_backup(self, timestamp: str, status: str) -> bool:
+        """
+        Update the last backup timestamp and status.
+
+        Args:
+            timestamp: ISO timestamp of backup
+            status: 'success', 'failed', or 'cancelled'
+
+        Returns:
+            bool: True if updated successfully, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET last_backup_timestamp = ?,
+                        last_backup_status = ?
+                    WHERE id = 1
+                """, (timestamp, status))
+                conn.commit()
+            logger.info(f"Updated last backup: {timestamp}, status: {status}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update last backup: {e}")
+            return False
+
+    def get_database_stats(self) -> Dict[str, Any]:
+        """
+        Get database statistics including file sizes and record counts.
+
+        Returns:
+            Dictionary with database_size, wal_size, shm_size, total_records, schema_version
+        """
+        stats = {
+            'database_size': 0,
+            'wal_size': 0,
+            'shm_size': 0,
+            'total_records': 0,
+            'schema_version': None
+        }
+
+        try:
+            # File sizes
+            if os.path.exists(self.database_path):
+                stats['database_size'] = os.path.getsize(self.database_path)
+
+            wal_path = self.database_path + '-wal'
+            if os.path.exists(wal_path):
+                stats['wal_size'] = os.path.getsize(wal_path)
+
+            shm_path = self.database_path + '-shm'
+            if os.path.exists(shm_path):
+                stats['shm_size'] = os.path.getsize(shm_path)
+
+            # Database stats
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Total records in UniquePhotos
+                cursor.execute("SELECT COUNT(*) FROM UniquePhotos")
+                stats['total_records'] = cursor.fetchone()[0]
+
+                # Schema version
+                cursor.execute("SELECT schema_version FROM DatabaseMetadata WHERE id = 1")
+                result = cursor.fetchone()
+                stats['schema_version'] = result[0] if result else None
+
+        except Exception as e:
+            logger.error(f"Failed to get database stats: {e}")
+
+        return stats
+
+    def run_integrity_check(self) -> tuple:
+        """
+        Run SQLite integrity check on the database.
+
+        Returns:
+            Tuple of (passed: bool, message: str)
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA integrity_check")
+                results = cursor.fetchall()
+
+                if len(results) == 1 and results[0][0] == 'ok':
+                    return (True, "ok")
+                else:
+                    # Collect all issues
+                    issues = [row[0] for row in results]
+                    return (False, "; ".join(issues[:10]))  # Limit to first 10 issues
+
+        except Exception as e:
+            logger.error(f"Integrity check failed: {e}")
+            return (False, str(e))
+
+    def vacuum_database(self) -> tuple:
+        """
+        Run VACUUM on the database to reclaim space and optimize.
+
+        Returns:
+            Tuple of (success: bool, bytes_reclaimed: int)
+        """
+        try:
+            # Get size before
+            size_before = os.path.getsize(self.database_path) if os.path.exists(self.database_path) else 0
+
+            with self._get_connection() as conn:
+                # Need to execute VACUUM outside a transaction
+                conn.execute("VACUUM")
+
+            # Get size after
+            size_after = os.path.getsize(self.database_path) if os.path.exists(self.database_path) else 0
+            bytes_reclaimed = max(0, size_before - size_after)
+
+            logger.info(f"Database vacuumed. Space reclaimed: {bytes_reclaimed} bytes")
+            return (True, bytes_reclaimed)
+
+        except Exception as e:
+            logger.error(f"Vacuum failed: {e}")
+            return (False, 0)
+
+    def get_all_archive_locations(self) -> Dict[str, Optional[str]]:
+        """
+        Get all archive locations configured for this database.
+
+        Returns:
+            Dictionary with keys: main_archive, video_archive, prior_revision_archive, delete_vault
+        """
+        locations = {
+            'main_archive': None,
+            'video_archive': None,
+            'prior_revision_archive': None,
+            'delete_vault': None
+        }
+
+        try:
+            metadata = self.get_metadata()
+            if metadata:
+                locations['main_archive'] = metadata.get('archive_location')
+                locations['video_archive'] = metadata.get('video_archive_location')
+                locations['prior_revision_archive'] = metadata.get('prior_revision_archive_location')
+
+            locations['delete_vault'] = self.get_delete_vault_location()
+
+        except Exception as e:
+            logger.error(f"Failed to get archive locations: {e}")
+
+        return locations
+
+    def get_delete_vault_stats(self) -> Dict[str, Any]:
+        """
+        Get statistics about the Delete Vault.
+
+        Returns:
+            Dictionary with file_count and total_size
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Count files in vault (not restored)
+                cursor.execute("""
+                    SELECT COUNT(*), COALESCE(SUM(file_size), 0)
+                    FROM DeletedFiles
+                    WHERE is_restored = 0
+                """)
+                result = cursor.fetchone()
+
+                return {
+                    'file_count': result[0] if result else 0,
+                    'total_size': result[1] if result else 0
+                }
+
+        except Exception as e:
+            logger.error(f"Failed to get delete vault stats: {e}")
+            return {'file_count': 0, 'total_size': 0}
+
+    def purge_delete_vault(self) -> tuple:
+        """
+        Permanently delete all files from the Delete Vault.
+
+        Returns:
+            Tuple of (files_deleted: int, bytes_freed: int)
+        """
+        files_deleted = 0
+        bytes_freed = 0
+
+        try:
+            # Get all non-restored files
+            deleted_files = self.get_deleted_files(include_restored=False)
+
+            for record in deleted_files:
+                vault_path = record.get('delete_vault_path')
+                file_hash = record.get('file_hash')
+                file_size = record.get('file_size', 0)
+
+                try:
+                    # Delete file from disk
+                    if vault_path and os.path.exists(vault_path):
+                        os.remove(vault_path)
+                        bytes_freed += file_size if file_size else 0
+
+                    # Delete database record
+                    self.delete_deleted_file_record(file_hash)
+                    files_deleted += 1
+
+                except Exception as e:
+                    logger.error(f"Failed to purge file {vault_path}: {e}")
+
+            logger.info(f"Purged Delete Vault: {files_deleted} files, {bytes_freed} bytes freed")
+            return (files_deleted, bytes_freed)
+
+        except Exception as e:
+            logger.error(f"Failed to purge delete vault: {e}")
+            return (files_deleted, bytes_freed)
 
     # ========== Static Methods ==========
 

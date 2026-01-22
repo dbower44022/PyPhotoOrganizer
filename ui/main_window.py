@@ -17,6 +17,7 @@ from ui.system_settings_tab import SystemSettingsTab
 from ui.progress_tab import ProgressTab
 from ui.logs_tab import LogsTab
 from ui.import_history_tab import ImportHistoryTab
+from ui.archive_maintenance_tab import ArchiveMaintenanceTab
 from ui.database_selector_dialog import DatabaseSelectorDialog
 from ui.worker import ProcessingWorker
 from database_metadata import DatabaseMetadata
@@ -78,6 +79,7 @@ class MainWindow(QMainWindow):
         self.progress_tab = ProgressTab()
         self.logs_tab = LogsTab()
         self.import_history_tab = ImportHistoryTab()
+        self.archive_maintenance_tab = ArchiveMaintenanceTab()
 
         # Add tabs in workflow order
         # Tab 0: Import Settings (source folders, filtering, Start/Stop buttons)
@@ -103,6 +105,10 @@ class MainWindow(QMainWindow):
         # Tab 5: Logs (troubleshooting)
         self.tabs.addTab(self.logs_tab, "📋 Logs")
         self.tabs.setTabToolTip(5, "View detailed application logs for troubleshooting")
+
+        # Tab 6: Archive Maintenance (backup, verify, maintain)
+        self.tabs.addTab(self.archive_maintenance_tab, "🔧 Archive Maintenance")
+        self.tabs.setTabToolTip(6, "Backup, verify, and maintain your archive")
 
         # Connect signals
         self.import_settings_tab.start_clicked.connect(self.start_processing)
@@ -384,6 +390,9 @@ class MainWindow(QMainWindow):
         # Update import history tab with database
         self.import_history_tab.set_database(database_path)
 
+        # Update archive maintenance tab with database and album manager
+        self.archive_maintenance_tab.set_database(self.database_metadata, self.album_manager)
+
         # Update window title
         metadata = self.database_metadata.get_metadata()
         if metadata:
@@ -498,3 +507,7 @@ class MainWindow(QMainWindow):
         # Clean up Import History tab workers (reprocess, override skip)
         if hasattr(self.import_history_tab, 'cleanup_workers'):
             self.import_history_tab.cleanup_workers()
+
+        # Clean up Archive Maintenance tab workers (backup, verification, storage stats)
+        if hasattr(self.archive_maintenance_tab, 'cleanup_workers'):
+            self.archive_maintenance_tab.cleanup_workers()
