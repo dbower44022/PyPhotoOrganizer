@@ -183,7 +183,7 @@ class PhotoFilter:
     def _check_exif(self, img: Image.Image, file_path: str) -> bool:
         """Check if image has EXIF data (camera metadata)."""
         try:
-            exif_data = img._getexif()
+            exif_data = img.getexif()
             if exif_data is None or len(exif_data) == 0:
                 logger.debug(f"No EXIF data found: {file_path}")
                 return False

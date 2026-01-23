@@ -699,7 +699,7 @@ class FileDetailsPanel(QWidget):
             from PIL.ExifTags import TAGS, GPSTAGS
 
             with Image.open(file_path) as img:
-                exif_data = img._getexif()
+                exif_data = img.getexif()
                 if not exif_data:
                     self.exif_section.add_row("Info", "No EXIF data found")
                     return

@@ -24,7 +24,7 @@ class ProcessingWorker(QThread):
     # Progress signals
     scanning_progress = Signal(int, int, str)  # dirs_scanned, total_dirs, current_dir
     processing_progress = Signal(int, int, str, dict)  # processed, total, current_file, stats
-    organizing_progress = Signal(int, int, str, int, int)  # organized, total, current_file, bytes_copied, total_bytes
+    organizing_progress = Signal(int, int, str, object, object)  # organized, total, current_file, bytes_copied, total_bytes (object to handle >2GB)
 
     # Status signals
     status_update = Signal(str, str)  # level, message

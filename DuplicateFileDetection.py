@@ -444,6 +444,88 @@ class PhotoDatabase:
             logger.exception(f"Failed to count files without content hash: {e}")
             raise
 
+    def get_archive_files_for_change_scan(self, scan_path: str, limit: int = 100, offset: int = 0):
+        """
+        Get files for change scanning that have content hashes.
+
+        Used by the Archive Change Scanner to detect external modifications.
+        Only returns files within the specified path that have content hashes.
+
+        Parameters:
+            scan_path (str): Path to scan (archive root or specific subfolder)
+            limit (int): Maximum number of records to return (batch size)
+            offset (int): Starting position for pagination
+
+        Returns:
+            list: List of dicts with file info including:
+                  file_hash, file_name, content_hash, source_path,
+                  create_datetime, create_year, create_month, create_day
+        """
+        try:
+            # Ensure scan_path ends with separator for proper LIKE matching
+            if not scan_path.endswith(os.sep):
+                scan_path = scan_path + os.sep
+
+            self.cursor.execute(
+                """SELECT file_hash, file_name, content_hash, source_path,
+                          create_datetime, create_year, create_month, create_day,
+                          file_size
+                   FROM UniquePhotos
+                   WHERE file_name LIKE ? || '%'
+                     AND content_hash IS NOT NULL
+                   ORDER BY file_name
+                   LIMIT ? OFFSET ?""",
+                (scan_path, limit, offset)
+            )
+            results = self.cursor.fetchall()
+            return [
+                {
+                    "file_hash": row[0],
+                    "file_name": row[1],
+                    "content_hash": row[2],
+                    "source_path": row[3],
+                    "create_datetime": row[4],
+                    "create_year": row[5],
+                    "create_month": row[6],
+                    "create_day": row[7],
+                    "file_size": row[8]
+                }
+                for row in results
+            ]
+        except Exception as e:
+            logger.exception(f"Failed to get archive files for change scan: {e}")
+            raise
+
+    def count_archive_files_for_change_scan(self, scan_path: str) -> int:
+        """
+        Count files in the scan path that have content hashes.
+
+        Used for progress display during archive change scanning.
+
+        Parameters:
+            scan_path (str): Path to scan (archive root or specific subfolder)
+
+        Returns:
+            int: Count of files with content_hash in the specified path
+        """
+        try:
+            # Ensure scan_path ends with separator for proper LIKE matching
+            if not scan_path.endswith(os.sep):
+                scan_path = scan_path + os.sep
+
+            self.cursor.execute(
+                """SELECT COUNT(*)
+                   FROM UniquePhotos
+                   WHERE file_name LIKE ? || '%'
+                     AND content_hash IS NOT NULL""",
+                (scan_path,)
+            )
+            result = self.cursor.fetchone()
+            return result[0] if result else 0
+        except Exception as e:
+            logger.exception(f"Failed to count archive files for change scan: {e}")
+            raise
+
     def create_revision(self, new_file_hash, parent_hash, revision_reason, file_path, file_size,
                        create_datetime, create_year, create_month, create_day,
                        partial_hash=None, partial_hash_bytes=None):
@@ -1283,7 +1365,7 @@ def get_creation_date(file_path, database_path=None):
 
                 with Image.open(file_path) as im:
                     try:
-                        exif_data_PIL = im._getexif()
+                        exif_data_PIL = im.getexif()
                         #logger.info(f"exif_data_PIL = {exif_data_PIL}")
                         '''
                         EXIF contains at least four dates:
@@ -1736,7 +1818,7 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
 
                                         # Check for EXIF data
                                         try:
-                                            exif_data = img._getexif()
+                                            exif_data = img.getexif()
                                             filtered_file["has_exif"] = exif_data is not None and len(exif_data) > 0
                                         except Exception as exif_e:
                                             logger.debug(f"Failed to read EXIF from {filename}: {exif_e}")

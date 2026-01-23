@@ -12,7 +12,7 @@ This tab contains archive maintenance features:
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QPushButton, QLabel, QMessageBox, QScrollArea,
                                QFormLayout, QLineEdit, QFileDialog, QProgressBar,
-                               QGridLayout, QTextEdit)
+                               QGridLayout, QTextEdit, QRadioButton, QButtonGroup)
 from PySide6.QtCore import Qt
 import os
 import logging
@@ -33,6 +33,7 @@ class ArchiveMaintenanceTab(QWidget):
         self._backup_worker = None
         self._verification_worker = None
         self._storage_stats_worker = None
+        self._change_scanner_worker = None
 
         # Stylesheet for bold GroupBox titles
         self.groupbox_style = """
@@ -256,6 +257,88 @@ class ArchiveMaintenanceTab(QWidget):
 
         verify_group.setLayout(verify_layout)
         layout.addWidget(verify_group)
+
+        # ========== Archive Change Detection Group ==========
+        change_group = QGroupBox("Archive Change Detection")
+        change_group.setStyleSheet(self.groupbox_style)
+        change_layout = QVBoxLayout()
+
+        change_desc = QLabel(
+            "Scan archive files to detect external modifications (e.g., edits made outside this app). "
+            "When modifications are detected, the system preserves original versions and creates revision records."
+        )
+        change_desc.setWordWrap(True)
+        change_desc.setStyleSheet("font-style: italic; color: gray; padding: 5px;")
+        change_layout.addWidget(change_desc)
+
+        # Scope selection row
+        scope_layout = QHBoxLayout()
+        scope_layout.addWidget(QLabel("Scan scope:"))
+
+        self._scan_scope_group = QButtonGroup(self)
+        self._scan_entire_radio = QRadioButton("Entire archive")
+        self._scan_entire_radio.setChecked(True)
+        self._scan_folder_radio = QRadioButton("Specific folder:")
+        self._scan_scope_group.addButton(self._scan_entire_radio)
+        self._scan_scope_group.addButton(self._scan_folder_radio)
+
+        scope_layout.addWidget(self._scan_entire_radio)
+        scope_layout.addWidget(self._scan_folder_radio)
+
+        self._scan_folder_edit = QLineEdit()
+        self._scan_folder_edit.setReadOnly(True)
+        self._scan_folder_edit.setPlaceholderText("Select folder within archive...")
+        self._scan_folder_edit.setEnabled(False)
+        scope_layout.addWidget(self._scan_folder_edit, stretch=1)
+
+        self._scan_browse_btn = QPushButton("Browse...")
+        self._scan_browse_btn.setEnabled(False)
+        self._scan_browse_btn.clicked.connect(self.on_browse_scan_folder)
+        scope_layout.addWidget(self._scan_browse_btn)
+
+        change_layout.addLayout(scope_layout)
+
+        # Connect radio button changes
+        self._scan_folder_radio.toggled.connect(self._on_scan_scope_changed)
+
+        # Buttons row
+        change_btn_layout = QHBoxLayout()
+        self._scan_changes_btn = QPushButton("Scan for External Changes")
+        self._scan_changes_btn.setToolTip(
+            "Scan archive files and detect any that have been modified externally"
+        )
+        self._scan_changes_btn.clicked.connect(self.on_scan_for_changes)
+        change_btn_layout.addWidget(self._scan_changes_btn)
+
+        self._cancel_scan_btn = QPushButton("Cancel")
+        self._cancel_scan_btn.clicked.connect(self.on_cancel_change_scanner)
+        self._cancel_scan_btn.hide()
+        change_btn_layout.addWidget(self._cancel_scan_btn)
+
+        change_btn_layout.addStretch()
+        change_layout.addLayout(change_btn_layout)
+
+        # Progress bar (hidden by default)
+        self._change_scan_progress = QProgressBar()
+        self._change_scan_progress.setRange(0, 100)
+        self._change_scan_progress.setValue(0)
+        self._change_scan_progress.hide()
+        change_layout.addWidget(self._change_scan_progress)
+
+        self._change_scan_progress_label = QLabel("")
+        self._change_scan_progress_label.setStyleSheet("color: #666;")
+        self._change_scan_progress_label.hide()
+        change_layout.addWidget(self._change_scan_progress_label)
+
+        # Results text area (hidden by default)
+        self._change_scan_results_text = QTextEdit()
+        self._change_scan_results_text.setReadOnly(True)
+        self._change_scan_results_text.setMaximumHeight(150)
+        self._change_scan_results_text.hide()
+        change_layout.addWidget(self._change_scan_results_text)
+
+        change_group.setLayout(change_layout)
+        layout.addWidget(change_group)
 
         # ========== Storage Statistics Group ==========
         storage_group = QGroupBox("Storage Statistics")
@@ -1337,6 +1420,326 @@ class ArchiveMaintenanceTab(QWidget):
         # Refresh stats
         self.refresh_vault_stats()
 
+    # ========== Archive Change Detection Methods ==========
+
+    def _on_scan_scope_changed(self, checked):
+        """Toggle folder selection UI based on radio button."""
+        folder_selected = self._scan_folder_radio.isChecked()
+        self._scan_folder_edit.setEnabled(folder_selected)
+        self._scan_browse_btn.setEnabled(folder_selected)
+
+        if not folder_selected:
+            self._scan_folder_edit.clear()
+
+    def on_browse_scan_folder(self):
+        """Browse for folder to scan within archive."""
+        if not self.db_metadata:
+            QMessageBox.information(
+                self, "No Database",
+                "Please select a database first."
+            )
+            return
+
+        archive_location = self.db_metadata.get_archive_location()
+        if not archive_location:
+            QMessageBox.information(
+                self, "No Archive",
+                "Archive location is not configured."
+            )
+            return
+
+        # Start from archive location to constrain selection
+        start_path = self._scan_folder_edit.text() or archive_location
+
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder to Scan",
+            start_path,
+            QFileDialog.ShowDirsOnly
+        )
+
+        if directory:
+            # Validate that selected folder is within archive
+            archive_normalized = os.path.realpath(archive_location)
+            directory_normalized = os.path.realpath(directory)
+
+            if not directory_normalized.startswith(archive_normalized):
+                QMessageBox.warning(
+                    self, "Invalid Selection",
+                    f"Selected folder must be within the archive location:\n{archive_location}"
+                )
+                return
+
+            self._scan_folder_edit.setText(directory)
+
+    def on_scan_for_changes(self):
+        """Start scanning archive for external changes."""
+        if not self.db_metadata:
+            QMessageBox.information(
+                self, "No Database",
+                "Please select a database first."
+            )
+            return
+
+        # Check if already running
+        if self._change_scanner_worker and self._change_scanner_worker.isRunning():
+            QMessageBox.information(
+                self, "Scan Running",
+                "An archive change scan is already in progress."
+            )
+            return
+
+        archive_location = self.db_metadata.get_archive_location()
+        if not archive_location:
+            QMessageBox.information(
+                self, "No Archive",
+                "Archive location is not configured."
+            )
+            return
+
+        # Check prerequisites
+        backup_location = self.db_metadata.get_backup_location()
+        if not backup_location:
+            reply = QMessageBox.warning(
+                self, "Backup Location Not Configured",
+                "No backup location is configured. Without a backup, original versions "
+                "may not be preserved when external modifications are detected.\n\n"
+                "You can configure a backup location in the Archive Backup section above.\n\n"
+                "Continue anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        prior_revision_archive = self.db_metadata.get_prior_revision_archive_location()
+        if not prior_revision_archive:
+            QMessageBox.information(
+                self, "Prior Revision Archive Not Configured",
+                "No Prior Revision Archive location is configured.\n\n"
+                "This is required to store original versions when external "
+                "modifications are detected.\n\n"
+                "Please configure a Prior Revision Archive in the Archive Settings tab."
+            )
+            return
+
+        # Determine scan folder
+        if self._scan_folder_radio.isChecked():
+            scan_folder = self._scan_folder_edit.text()
+            if not scan_folder:
+                QMessageBox.information(
+                    self, "No Folder Selected",
+                    "Please select a folder to scan or choose 'Entire archive'."
+                )
+                return
+            if not os.path.exists(scan_folder):
+                QMessageBox.warning(
+                    self, "Folder Not Found",
+                    f"The selected folder does not exist:\n{scan_folder}"
+                )
+                return
+        else:
+            scan_folder = archive_location
+
+        # Check if files have content hashes
+        from DuplicateFileDetection import PhotoDatabase
+        with PhotoDatabase(self.db_metadata.database_path) as db:
+            files_without_hash = db.count_files_without_content_hash()
+            files_with_hash = db.count_archive_files_for_change_scan(scan_folder)
+
+        if files_with_hash == 0:
+            if files_without_hash > 0:
+                QMessageBox.information(
+                    self, "No Content Hashes",
+                    f"No files have content hashes calculated yet.\n\n"
+                    f"There are {files_without_hash:,} files that need content hash calculation.\n\n"
+                    f"Please run 'Calculate Content Hashes' in the System Settings tab first."
+                )
+            else:
+                QMessageBox.information(
+                    self, "No Files to Scan",
+                    "No files found in the specified location."
+                )
+            return
+
+        # Confirm scan
+        scope_text = scan_folder if self._scan_folder_radio.isChecked() else "entire archive"
+        reply = QMessageBox.question(
+            self, "Scan for External Changes?",
+            f"This will scan {files_with_hash:,} files for external modifications.\n\n"
+            f"Scan scope: {scope_text}\n\n"
+            f"When modifications are detected:\n"
+            f"• Original versions will be preserved (from backup or source)\n"
+            f"• Revision records will be created in the database\n"
+            f"• Operations will be logged to the audit trail\n\n"
+            f"Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Start the scanner
+        self._start_change_scanner(scan_folder, backup_location, prior_revision_archive)
+
+    def _start_change_scanner(self, scan_folder, backup_location, prior_revision_archive):
+        """Start the change scanner worker."""
+        from ui.archive_change_scanner_worker import ArchiveChangeScannerWorker
+
+        archive_location = self.db_metadata.get_archive_location()
+
+        self._change_scanner_worker = ArchiveChangeScannerWorker(
+            database_path=self.db_metadata.database_path,
+            archive_location=archive_location,
+            backup_location=backup_location,
+            prior_revision_archive=prior_revision_archive,
+            scan_folder=scan_folder
+        )
+
+        # Connect signals
+        self._change_scanner_worker.progress_update.connect(self._on_change_scanner_progress)
+        self._change_scanner_worker.status_update.connect(self._on_change_scanner_status)
+        self._change_scanner_worker.file_modified.connect(self._on_change_scanner_file_modified)
+        self._change_scanner_worker.completed.connect(self._on_change_scanner_completed)
+        self._change_scanner_worker.error_occurred.connect(self._on_change_scanner_error)
+
+        # Update UI
+        self._scan_changes_btn.setEnabled(False)
+        self._cancel_scan_btn.show()
+        self._change_scan_progress.show()
+        self._change_scan_progress.setValue(0)
+        self._change_scan_progress_label.show()
+        self._change_scan_progress_label.setText("Starting scan...")
+        self._change_scan_results_text.hide()
+
+        # Disable scope selection during scan
+        self._scan_entire_radio.setEnabled(False)
+        self._scan_folder_radio.setEnabled(False)
+        self._scan_browse_btn.setEnabled(False)
+
+        self._change_scanner_worker.start()
+
+    def on_cancel_change_scanner(self):
+        """Cancel running change scanner."""
+        if self._change_scanner_worker and self._change_scanner_worker.isRunning():
+            self._change_scanner_worker.stop()
+            self._change_scan_progress_label.setText("Cancelling...")
+
+    def _on_change_scanner_progress(self, current, total, filename):
+        """Handle change scanner progress update."""
+        if total > 0:
+            percent = int((current / total) * 100)
+            self._change_scan_progress.setValue(percent)
+            self._change_scan_progress_label.setText(f"Scanning {current}/{total}: {filename}")
+
+    def _on_change_scanner_status(self, message):
+        """Handle change scanner status update."""
+        self._change_scan_progress_label.setText(message)
+
+    def _on_change_scanner_file_modified(self, file_info):
+        """Handle per-file modification notification."""
+        filename = os.path.basename(file_info.get('file_path', 'Unknown'))
+        logger.info(f"External modification detected: {filename}")
+
+    def _on_change_scanner_completed(self, results):
+        """Handle change scanner completion."""
+        # Reset UI
+        self._scan_changes_btn.setEnabled(True)
+        self._cancel_scan_btn.hide()
+        self._change_scan_progress.hide()
+
+        # Re-enable scope selection
+        self._scan_entire_radio.setEnabled(True)
+        self._scan_folder_radio.setEnabled(True)
+        if self._scan_folder_radio.isChecked():
+            self._scan_browse_btn.setEnabled(True)
+
+        status = results.get('status', 'unknown')
+        total_scanned = results.get('total_scanned', 0)
+        unchanged = results.get('unchanged', 0)
+        modifications = results.get('modifications_detected', 0)
+        revisions_created = results.get('revisions_created', 0)
+        from_backup = results.get('originals_from_backup', 0)
+        from_source = results.get('originals_from_source', 0)
+        not_found = results.get('originals_not_found', 0)
+        errors = results.get('errors', 0)
+        skipped_videos = results.get('skipped_videos', 0)
+        skipped_missing = results.get('skipped_missing', 0)
+        skipped_no_hash = results.get('skipped_no_content_hash', 0)
+
+        # Build summary
+        summary = f"Archive Change Scan Results ({status}):\n\n"
+        summary += f"Total files scanned: {total_scanned:,}\n"
+        summary += f"Unchanged files: {unchanged:,}\n"
+        summary += f"External modifications detected: {modifications:,}\n\n"
+
+        if modifications > 0:
+            summary += f"Revisions created: {revisions_created:,}\n"
+            summary += f"  - Originals from backup: {from_backup:,}\n"
+            summary += f"  - Originals from source: {from_source:,}\n"
+            summary += f"  - Original not found: {not_found:,}\n\n"
+
+        if errors > 0:
+            summary += f"Errors: {errors:,}\n"
+            error_details = results.get('error_details', [])
+            if error_details:
+                summary += "Error details:\n"
+                for err in error_details[:5]:
+                    summary += f"  - {err}\n"
+                if len(error_details) > 5:
+                    summary += f"  ... and {len(error_details) - 5} more\n"
+            summary += "\n"
+
+        skipped_total = skipped_videos + skipped_missing + skipped_no_hash
+        if skipped_total > 0:
+            summary += f"Skipped: {skipped_total:,}\n"
+            if skipped_videos > 0:
+                summary += f"  - Videos: {skipped_videos:,}\n"
+            if skipped_missing > 0:
+                summary += f"  - Missing files: {skipped_missing:,}\n"
+            if skipped_no_hash > 0:
+                summary += f"  - No content hash: {skipped_no_hash:,}\n"
+
+        # Update UI
+        if modifications == 0 and errors == 0:
+            self._change_scan_progress_label.setText("Scan complete - no external modifications detected")
+            self._change_scan_progress_label.setStyleSheet("color: green;")
+        elif modifications > 0 and errors == 0:
+            self._change_scan_progress_label.setText(
+                f"Scan complete - {modifications} modifications detected, {revisions_created} revisions created"
+            )
+            self._change_scan_progress_label.setStyleSheet("color: orange;")
+        else:
+            self._change_scan_progress_label.setText(f"Scan complete with {errors} errors")
+            self._change_scan_progress_label.setStyleSheet("color: red;")
+
+        self._change_scan_results_text.setText(summary)
+        self._change_scan_results_text.show()
+        self._change_scanner_worker = None
+
+    def _on_change_scanner_error(self, error_msg):
+        """Handle change scanner error."""
+        # Reset UI
+        self._scan_changes_btn.setEnabled(True)
+        self._cancel_scan_btn.hide()
+        self._change_scan_progress.hide()
+        self._change_scan_progress_label.setText(f"Error: {error_msg}")
+        self._change_scan_progress_label.setStyleSheet("color: red;")
+
+        # Re-enable scope selection
+        self._scan_entire_radio.setEnabled(True)
+        self._scan_folder_radio.setEnabled(True)
+        if self._scan_folder_radio.isChecked():
+            self._scan_browse_btn.setEnabled(True)
+
+        QMessageBox.critical(
+            self, "Scan Error",
+            f"Archive change scan failed:\n\n{error_msg}"
+        )
+
+        self._change_scanner_worker = None
+
     # ========== Utility Methods ==========
 
     def _format_size(self, bytes):
@@ -1373,3 +1776,9 @@ class ArchiveMaintenanceTab(QWidget):
             self._storage_stats_worker.stop()
             self._storage_stats_worker.wait()
             logger.info("Storage stats worker stopped")
+
+        if self._change_scanner_worker and self._change_scanner_worker.isRunning():
+            logger.info("Stopping change scanner worker before close...")
+            self._change_scanner_worker.stop()
+            self._change_scanner_worker.wait()
+            logger.info("Change scanner worker stopped")

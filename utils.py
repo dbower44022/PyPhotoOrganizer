@@ -90,13 +90,9 @@ def ensure_directory_exists(folder_path):
         OSError: If directory creation fails due to permissions or other OS errors
     """
     try:
-        if not os.path.exists(folder_path):
-            os.makedirs(folder_path)
-            logging.info(f"Created missing directories for path: {folder_path}")
-            return True
-        else:
-            logging.debug(f"Directory already exists: {folder_path}")
-            return True
+        os.makedirs(folder_path, exist_ok=True)
+        logging.debug(f"Directory ensured: {folder_path}")
+        return True
     except OSError as e:
         logging.exception(f"Failed to create directory {folder_path}: {e}")
         raise
