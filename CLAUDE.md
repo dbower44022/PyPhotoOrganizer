@@ -67,6 +67,8 @@ python main.py              # CLI mode
 | `reprocess_worker.py` | `ReprocessWorker` for reprocessing/override skip with album support |
 | `content_hash_worker.py` | `ContentHashBackfillWorker` for backfilling content hashes |
 | `archive_change_scanner_worker.py` | `ArchiveChangeScannerWorker` for detecting external file modifications |
+| `bulk_delete_worker.py` | `BulkDeleteWorker` for bulk delete matching files operations |
+| `bulk_delete_preview_dialog.py` | `BulkDeletePreviewDialog` for previewing matched files before deletion |
 | `theme.py` | `ThemeManager`, light/dark mode support |
 
 ### Database Tables
@@ -513,6 +515,61 @@ class ArchiveChangeScannerWorker(QThread):
 - Operation: `'external_modification_detected'`
 - Status: `'revision_created'`, `'original_not_found'`, `'failed'`
 - Import History filter: "External Modifications"
+
+### Bulk Delete Matching Files
+
+Allows users to delete archive files that match files in a reference folder. Useful for removing files that exist in both the archive and an external source (e.g., synced to another device, already backed up elsewhere).
+
+**Two-phase operation:**
+1. **Scan phase**: Hash files in reference folder, match against archive database
+2. **Delete phase**: Perform soft-delete on confirmed matches (move to Delete Vault)
+
+**Worker (`ui/bulk_delete_worker.py`):**
+```python
+class BulkDeleteWorker(QThread):
+    progress_update = Signal(int, int, str)  # current, total, filename
+    status_update = Signal(str)              # status message
+    scan_completed = Signal(dict)            # scan results for preview
+    delete_completed = Signal(dict)          # final deletion results
+    error_occurred = Signal(str)             # error message
+```
+
+**Preview dialog (`ui/bulk_delete_preview_dialog.py`):**
+- Shows matched files (to be deleted) in first tab
+- Shows not-found files (not in archive) in second tab
+- Displays summary stats (matches, not found, total size)
+- Requires confirmation before proceeding with deletion
+
+**UI location:** Archive Maintenance tab → "Bulk Delete Matching Files" group box
+
+**Prerequisites checked at runtime:**
+- Database loaded
+- Reference folder selected and exists
+- Delete Vault configured (required)
+- Archive location configured
+
+**Deletion process (follows existing `ui/delete_worker.py` pattern):**
+1. Validate file is in archive (not source - source protection)
+2. Calculate vault path preserving relative structure
+3. Copy file to Delete Vault with `shutil.copy2()`
+4. Verify copy (exists + size matches)
+5. Delete from archive
+6. `mark_file_as_deleted()` - create DeletedFiles record
+7. `sync_deletion_to_albums()` - remove from albums with sync_deletions=1
+8. Remove from UnreliableDates table
+9. Clean up empty directories
+10. Log to audit trail
+
+**Audit logging:**
+- Session: `operation_mode='bulk_delete'`
+- Operations: `'bulk_delete_matched'` (success/failed), `'bulk_delete_not_found'` (skipped)
+- Import History filter: "Bulk Delete Operations"
+
+**Undo capability:**
+Files are soft-deleted to Delete Vault and can be restored via:
+1. Archive Maintenance tab → "View Vault Contents" button
+2. Find the deleted files in the DeletedFilesDialog
+3. Select files and click "Restore Selected"
 
 ### Hash History System (Schema v5)
 

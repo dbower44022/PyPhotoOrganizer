@@ -34,6 +34,7 @@ class ArchiveMaintenanceTab(QWidget):
         self._verification_worker = None
         self._storage_stats_worker = None
         self._change_scanner_worker = None
+        self._bulk_delete_worker = None
 
         # Stylesheet for bold GroupBox titles
         self.groupbox_style = """
@@ -509,6 +510,65 @@ class ArchiveMaintenanceTab(QWidget):
 
         vault_group.setLayout(vault_layout)
         layout.addWidget(vault_group)
+
+        # ========== Bulk Delete Matching Files Group ==========
+        bulk_delete_group = QGroupBox("Bulk Delete Matching Files")
+        bulk_delete_group.setStyleSheet(self.groupbox_style)
+        bulk_delete_layout = QVBoxLayout()
+
+        bulk_delete_desc = QLabel(
+            "Delete archive files that match files in a reference folder. "
+            "This is useful for removing files that exist in both your archive and "
+            "an external source (e.g., synced to another device). "
+            "Files are moved to the Delete Vault and can be restored if needed."
+        )
+        bulk_delete_desc.setWordWrap(True)
+        bulk_delete_desc.setStyleSheet("font-style: italic; color: gray; padding: 5px;")
+        bulk_delete_layout.addWidget(bulk_delete_desc)
+
+        # Reference folder row
+        bulk_folder_layout = QHBoxLayout()
+        bulk_folder_layout.addWidget(QLabel("Reference Folder:"))
+        self._bulk_delete_folder_edit = QLineEdit()
+        self._bulk_delete_folder_edit.setReadOnly(True)
+        self._bulk_delete_folder_edit.setPlaceholderText("Select folder containing files to match...")
+        bulk_folder_layout.addWidget(self._bulk_delete_folder_edit, stretch=1)
+
+        self._bulk_delete_browse_btn = QPushButton("Browse...")
+        self._bulk_delete_browse_btn.clicked.connect(self._on_browse_bulk_delete_folder)
+        bulk_folder_layout.addWidget(self._bulk_delete_browse_btn)
+
+        bulk_delete_layout.addLayout(bulk_folder_layout)
+
+        # Buttons row
+        bulk_btn_layout = QHBoxLayout()
+        self._bulk_delete_scan_btn = QPushButton("Scan for Matches")
+        self._bulk_delete_scan_btn.setToolTip("Scan reference folder and find matching files in archive")
+        self._bulk_delete_scan_btn.clicked.connect(self._on_bulk_delete_scan)
+        bulk_btn_layout.addWidget(self._bulk_delete_scan_btn)
+
+        self._bulk_delete_cancel_btn = QPushButton("Cancel")
+        self._bulk_delete_cancel_btn.clicked.connect(self._on_cancel_bulk_delete)
+        self._bulk_delete_cancel_btn.hide()
+        bulk_btn_layout.addWidget(self._bulk_delete_cancel_btn)
+
+        bulk_btn_layout.addStretch()
+        bulk_delete_layout.addLayout(bulk_btn_layout)
+
+        # Progress bar (hidden by default)
+        self._bulk_delete_progress = QProgressBar()
+        self._bulk_delete_progress.setRange(0, 100)
+        self._bulk_delete_progress.setValue(0)
+        self._bulk_delete_progress.hide()
+        bulk_delete_layout.addWidget(self._bulk_delete_progress)
+
+        self._bulk_delete_progress_label = QLabel("")
+        self._bulk_delete_progress_label.setStyleSheet("color: #666;")
+        self._bulk_delete_progress_label.hide()
+        bulk_delete_layout.addWidget(self._bulk_delete_progress_label)
+
+        bulk_delete_group.setLayout(bulk_delete_layout)
+        layout.addWidget(bulk_delete_group)
 
         # Add stretch at bottom
         layout.addStretch()
@@ -1745,6 +1805,307 @@ class ArchiveMaintenanceTab(QWidget):
 
         self._change_scanner_worker = None
 
+    # ========== Bulk Delete Matching Files Methods ==========
+
+    def _on_browse_bulk_delete_folder(self):
+        """Browse for reference folder containing files to match."""
+        if not self.db_metadata:
+            QMessageBox.information(
+                self, "No Database",
+                "Please select a database first."
+            )
+            return
+
+        current_path = self._bulk_delete_folder_edit.text()
+        if not current_path:
+            current_path = os.path.expanduser("~")
+
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Reference Folder",
+            current_path,
+            QFileDialog.ShowDirsOnly
+        )
+
+        if directory:
+            self._bulk_delete_folder_edit.setText(directory)
+
+    def _on_bulk_delete_scan(self):
+        """Start scanning reference folder for matches."""
+        if not self.db_metadata:
+            QMessageBox.information(
+                self, "No Database",
+                "Please select a database first."
+            )
+            return
+
+        reference_folder = self._bulk_delete_folder_edit.text()
+        if not reference_folder:
+            QMessageBox.information(
+                self, "No Reference Folder",
+                "Please select a reference folder by clicking 'Browse...'."
+            )
+            return
+
+        if not os.path.exists(reference_folder):
+            QMessageBox.warning(
+                self, "Folder Not Found",
+                f"The selected folder does not exist:\n{reference_folder}"
+            )
+            return
+
+        # Check if already running
+        if self._bulk_delete_worker and self._bulk_delete_worker.isRunning():
+            QMessageBox.information(
+                self, "Scan Running",
+                "A bulk delete scan is already in progress."
+            )
+            return
+
+        # Check delete vault is configured
+        delete_vault = self.db_metadata.get_delete_vault_location()
+        if not delete_vault:
+            QMessageBox.information(
+                self, "Delete Vault Not Configured",
+                "Please configure a Delete Vault in System Settings before using this feature."
+            )
+            return
+
+        archive_location = self.db_metadata.get_archive_location()
+        if not archive_location:
+            QMessageBox.information(
+                self, "No Archive",
+                "Archive location is not configured."
+            )
+            return
+
+        # Start scan
+        self._start_bulk_delete_scan(reference_folder, delete_vault, archive_location)
+
+    def _start_bulk_delete_scan(self, reference_folder, delete_vault, archive_location):
+        """Create and start the bulk delete scan worker."""
+        from ui.bulk_delete_worker import BulkDeleteWorker
+
+        self._bulk_delete_worker = BulkDeleteWorker(
+            database_path=self.db_metadata.database_path,
+            reference_folder=reference_folder,
+            delete_vault_path=delete_vault,
+            archive_location=archive_location,
+            execute_delete=False  # Scan phase only
+        )
+
+        # Connect signals
+        self._bulk_delete_worker.progress_update.connect(self._on_bulk_delete_progress)
+        self._bulk_delete_worker.status_update.connect(self._on_bulk_delete_status)
+        self._bulk_delete_worker.scan_completed.connect(self._on_bulk_delete_scan_completed)
+        self._bulk_delete_worker.error_occurred.connect(self._on_bulk_delete_error)
+
+        # Update UI
+        self._bulk_delete_scan_btn.setEnabled(False)
+        self._bulk_delete_browse_btn.setEnabled(False)
+        self._bulk_delete_cancel_btn.show()
+        self._bulk_delete_progress.show()
+        self._bulk_delete_progress.setValue(0)
+        self._bulk_delete_progress_label.show()
+        self._bulk_delete_progress_label.setText("Starting scan...")
+        self._bulk_delete_progress_label.setStyleSheet("color: #666;")
+
+        self._bulk_delete_worker.start()
+
+    def _on_cancel_bulk_delete(self):
+        """Cancel running bulk delete operation."""
+        if self._bulk_delete_worker and self._bulk_delete_worker.isRunning():
+            self._bulk_delete_worker.cancel()
+            self._bulk_delete_progress_label.setText("Cancelling...")
+
+    def _on_bulk_delete_progress(self, current, total, filename):
+        """Handle bulk delete progress update."""
+        if total > 0:
+            percent = int((current / total) * 100)
+            self._bulk_delete_progress.setValue(percent)
+            self._bulk_delete_progress_label.setText(f"Scanning {current}/{total}: {filename}")
+
+    def _on_bulk_delete_status(self, message):
+        """Handle bulk delete status update."""
+        self._bulk_delete_progress_label.setText(message)
+
+    def _on_bulk_delete_scan_completed(self, results):
+        """Handle scan completion - show preview dialog."""
+        # Reset UI
+        self._bulk_delete_scan_btn.setEnabled(True)
+        self._bulk_delete_browse_btn.setEnabled(True)
+        self._bulk_delete_cancel_btn.hide()
+        self._bulk_delete_progress.hide()
+
+        status = results.get('status', 'unknown')
+        total_matched = results.get('total_matched', 0)
+        total_not_found = results.get('total_not_found', 0)
+
+        if status == 'cancelled':
+            self._bulk_delete_progress_label.setText("Scan cancelled")
+            self._bulk_delete_progress_label.setStyleSheet("color: orange;")
+            self._bulk_delete_worker = None
+            return
+
+        if total_matched == 0:
+            self._bulk_delete_progress_label.setText(
+                f"No matches found. {total_not_found} files in reference folder not in archive."
+            )
+            self._bulk_delete_progress_label.setStyleSheet("color: gray;")
+
+            if total_not_found > 0:
+                QMessageBox.information(
+                    self, "No Matches Found",
+                    f"None of the {total_not_found} files in the reference folder "
+                    f"were found in the archive.\n\n"
+                    f"No files will be deleted."
+                )
+            else:
+                QMessageBox.information(
+                    self, "Empty Folder",
+                    "The reference folder is empty or contains no files."
+                )
+            self._bulk_delete_worker = None
+            return
+
+        self._bulk_delete_progress_label.setText(
+            f"Found {total_matched} matches. Opening preview..."
+        )
+        self._bulk_delete_progress_label.setStyleSheet("color: green;")
+
+        # Store not found files for audit logging
+        self._bulk_delete_not_found = results.get('not_found_files', [])
+
+        # Show preview dialog
+        from ui.bulk_delete_preview_dialog import BulkDeletePreviewDialog
+
+        reference_folder = self._bulk_delete_folder_edit.text()
+        dialog = BulkDeletePreviewDialog(
+            parent=self,
+            reference_folder=reference_folder,
+            scan_results=results
+        )
+
+        # Connect delete confirmation
+        dialog.delete_confirmed.connect(self._on_bulk_delete_confirmed)
+        dialog.exec()
+
+        self._bulk_delete_progress_label.hide()
+        self._bulk_delete_worker = None
+
+    def _on_bulk_delete_confirmed(self, files_to_delete):
+        """Handle confirmation from preview dialog - start delete phase."""
+        if not files_to_delete:
+            return
+
+        delete_vault = self.db_metadata.get_delete_vault_location()
+        archive_location = self.db_metadata.get_archive_location()
+        reference_folder = self._bulk_delete_folder_edit.text()
+
+        from ui.bulk_delete_worker import BulkDeleteWorker
+
+        self._bulk_delete_worker = BulkDeleteWorker(
+            database_path=self.db_metadata.database_path,
+            reference_folder=reference_folder,
+            delete_vault_path=delete_vault,
+            archive_location=archive_location,
+            execute_delete=True,
+            files_to_delete=files_to_delete
+        )
+
+        # Pass not found files for audit logging
+        if hasattr(self, '_bulk_delete_not_found'):
+            self._bulk_delete_worker._not_found_files = self._bulk_delete_not_found
+
+        # Connect signals
+        self._bulk_delete_worker.progress_update.connect(self._on_bulk_delete_progress)
+        self._bulk_delete_worker.status_update.connect(self._on_bulk_delete_status)
+        self._bulk_delete_worker.delete_completed.connect(self._on_bulk_delete_completed)
+        self._bulk_delete_worker.error_occurred.connect(self._on_bulk_delete_error)
+
+        # Update UI
+        self._bulk_delete_scan_btn.setEnabled(False)
+        self._bulk_delete_browse_btn.setEnabled(False)
+        self._bulk_delete_cancel_btn.show()
+        self._bulk_delete_progress.show()
+        self._bulk_delete_progress.setValue(0)
+        self._bulk_delete_progress_label.show()
+        self._bulk_delete_progress_label.setText("Deleting files...")
+        self._bulk_delete_progress_label.setStyleSheet("color: #666;")
+
+        self._bulk_delete_worker.start()
+
+    def _on_bulk_delete_completed(self, results):
+        """Handle delete phase completion."""
+        # Reset UI
+        self._bulk_delete_scan_btn.setEnabled(True)
+        self._bulk_delete_browse_btn.setEnabled(True)
+        self._bulk_delete_cancel_btn.hide()
+        self._bulk_delete_progress.hide()
+
+        status = results.get('status', 'unknown')
+        success_count = results.get('success_count', 0)
+        error_count = results.get('error_count', 0)
+        errors = results.get('errors', [])
+
+        if status == 'cancelled':
+            self._bulk_delete_progress_label.setText(
+                f"Delete cancelled. {success_count} files deleted before cancellation."
+            )
+            self._bulk_delete_progress_label.setStyleSheet("color: orange;")
+        elif error_count == 0:
+            self._bulk_delete_progress_label.setText(
+                f"Delete complete. {success_count} files moved to Delete Vault."
+            )
+            self._bulk_delete_progress_label.setStyleSheet("color: green;")
+
+            QMessageBox.information(
+                self, "Bulk Delete Complete",
+                f"Successfully deleted {success_count} files.\n\n"
+                f"Files have been moved to the Delete Vault and can be restored if needed.\n\n"
+                f"Check Import History (Bulk Delete Operations filter) for details."
+            )
+        else:
+            self._bulk_delete_progress_label.setText(
+                f"Delete completed with errors. {success_count} deleted, {error_count} failed."
+            )
+            self._bulk_delete_progress_label.setStyleSheet("color: red;")
+
+            error_summary = "\n".join(errors[:5])
+            if len(errors) > 5:
+                error_summary += f"\n... and {len(errors) - 5} more"
+
+            QMessageBox.warning(
+                self, "Bulk Delete Completed with Errors",
+                f"Deleted {success_count} files with {error_count} errors.\n\n"
+                f"Errors:\n{error_summary}"
+            )
+
+        # Refresh vault stats
+        self.refresh_vault_stats()
+
+        # Clean up
+        if hasattr(self, '_bulk_delete_not_found'):
+            del self._bulk_delete_not_found
+        self._bulk_delete_worker = None
+
+    def _on_bulk_delete_error(self, error_msg):
+        """Handle bulk delete error."""
+        # Reset UI
+        self._bulk_delete_scan_btn.setEnabled(True)
+        self._bulk_delete_browse_btn.setEnabled(True)
+        self._bulk_delete_cancel_btn.hide()
+        self._bulk_delete_progress.hide()
+        self._bulk_delete_progress_label.setText(f"Error: {error_msg}")
+        self._bulk_delete_progress_label.setStyleSheet("color: red;")
+
+        QMessageBox.critical(
+            self, "Bulk Delete Error",
+            f"Bulk delete operation failed:\n\n{error_msg}"
+        )
+
+        self._bulk_delete_worker = None
+
     # ========== Utility Methods ==========
 
     def _format_size(self, bytes):
@@ -1787,3 +2148,9 @@ class ArchiveMaintenanceTab(QWidget):
             self._change_scanner_worker.stop()
             self._change_scanner_worker.wait()
             logger.info("Change scanner worker stopped")
+
+        if self._bulk_delete_worker and self._bulk_delete_worker.isRunning():
+            logger.info("Stopping bulk delete worker before close...")
+            self._bulk_delete_worker.cancel()
+            self._bulk_delete_worker.wait()
+            logger.info("Bulk delete worker stopped")

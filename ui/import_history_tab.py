@@ -868,6 +868,7 @@ class ImportHistoryTab(QWidget):
             "Filtered (Icons/Thumbnails)",
             "Recently Overridden",
             "External Modifications",
+            "Bulk Delete Operations",
             "Errors"
         ])
         self._show_combo.currentTextChanged.connect(self._on_show_filter_changed)
@@ -1330,6 +1331,7 @@ class ImportHistoryTab(QWidget):
                 self._content_duplicate_logs = []
                 self._filtered_logs = []
                 self._external_modification_logs = []
+                self._bulk_delete_logs = []
                 self._error_logs = []
 
                 # Single-pass filtering (much faster than 4 separate list comprehensions)
@@ -1348,12 +1350,14 @@ class ImportHistoryTab(QWidget):
                         self._filtered_logs.append(log)
                     elif op == 'external_modification_detected':
                         self._external_modification_logs.append(log)
+                    elif op in ('bulk_delete_matched', 'bulk_delete_not_found'):
+                        self._bulk_delete_logs.append(log)
 
                     # Check for errors (can overlap with other categories)
                     if status == 'failed':
                         self._error_logs.append(log)
 
-            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Content Duplicates: {len(self._content_duplicate_logs)}, Filtered: {len(self._filtered_logs)}, External Mods: {len(self._external_modification_logs)}, Errors: {len(self._error_logs)}")
+            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Content Duplicates: {len(self._content_duplicate_logs)}, Filtered: {len(self._filtered_logs)}, External Mods: {len(self._external_modification_logs)}, Bulk Delete: {len(self._bulk_delete_logs)}, Errors: {len(self._error_logs)}")
 
             # Enrich duplicate logs with archive file paths
             with profile_block("Enrich duplicate logs with archive paths", logger):
@@ -1393,6 +1397,7 @@ class ImportHistoryTab(QWidget):
                 self._content_duplicate_logs = []
                 self._filtered_logs = []
                 self._external_modification_logs = []
+                self._bulk_delete_logs = []
                 self._error_logs = []
 
                 # Single-pass filtering (much faster than 4 separate list comprehensions)
@@ -1411,12 +1416,14 @@ class ImportHistoryTab(QWidget):
                         self._filtered_logs.append(log)
                     elif op == 'external_modification_detected':
                         self._external_modification_logs.append(log)
+                    elif op in ('bulk_delete_matched', 'bulk_delete_not_found'):
+                        self._bulk_delete_logs.append(log)
 
                     # Check for errors (can overlap with other categories)
                     if status == 'failed':
                         self._error_logs.append(log)
 
-            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Content Duplicates: {len(self._content_duplicate_logs)}, Filtered: {len(self._filtered_logs)}, External Mods: {len(self._external_modification_logs)}, Errors: {len(self._error_logs)}")
+            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Content Duplicates: {len(self._content_duplicate_logs)}, Filtered: {len(self._filtered_logs)}, External Mods: {len(self._external_modification_logs)}, Bulk Delete: {len(self._bulk_delete_logs)}, Errors: {len(self._error_logs)}")
 
             # Enrich duplicate logs with archive file paths
             with profile_block("Enrich duplicate logs with archive paths", logger):
@@ -1455,6 +1462,8 @@ class ImportHistoryTab(QWidget):
             self._model.setData(getattr(self, '_recently_overridden_logs', []))
         elif show == "External Modifications":
             self._model.setData(getattr(self, '_external_modification_logs', []))
+        elif show == "Bulk Delete Operations":
+            self._model.setData(getattr(self, '_bulk_delete_logs', []))
         elif show == "Errors":
             self._model.setData(self._error_logs)
         else:  # "All Files"

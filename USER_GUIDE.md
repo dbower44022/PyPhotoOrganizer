@@ -17,9 +17,11 @@
 13. [File Version Management](#file-version-management)
 14. [Prior Revision Archive System](#prior-revision-archive-system)
 15. [Archive Change Detection](#archive-change-detection)
-16. [Settings](#settings)
-17. [Troubleshooting](#troubleshooting)
-18. [FAQ](#faq)
+16. [Bulk Delete Matching Files](#bulk-delete-matching-files)
+17. [Delete Vault and File Recovery](#delete-vault-and-file-recovery)
+18. [Settings](#settings)
+19. [Troubleshooting](#troubleshooting)
+20. [FAQ](#faq)
 
 ---
 
@@ -640,6 +642,10 @@ Use the "Show" dropdown to filter the file list:
   - Small square images (likely icons)
 - **Recently Overridden**: Files imported via Override Skip feature
 - **External Modifications**: Files detected as externally modified by Archive Change Detection
+- **Bulk Delete Operations**: Files processed by bulk delete matching:
+  - `bulk_delete_matched` (success): Archive file deleted successfully
+  - `bulk_delete_matched` (failed): Deletion failed
+  - `bulk_delete_not_found` (skipped): Reference file not in archive
 - **Errors**: Files that failed processing
 
 ### Preview and Details
@@ -1561,6 +1567,240 @@ After a scan, view detected modifications in **Import History**:
 
 ---
 
+## Bulk Delete Matching Files
+
+PyPhotoOrganizer can bulk delete archive files that match files in a reference folder. This is useful when you want to remove photos that:
+- Are already backed up elsewhere (cloud storage, external drive)
+- Are synced to another device and no longer needed in the main archive
+- Match a "delete manifest" folder you've prepared
+
+### Prerequisites
+
+Before using Bulk Delete, ensure:
+1. **Delete Vault is configured**: Go to System Settings → Delete Vault Location
+2. **Database is loaded**: Select your database in the main window
+
+### How It Works
+
+The bulk delete operation has two phases:
+
+**Phase 1 - Scan:**
+1. Scans all files in the reference folder
+2. Calculates SHA-256 hash of each file
+3. Checks if hash exists in your archive database
+4. Reports matches and non-matches
+
+**Phase 2 - Delete:**
+1. Shows preview dialog with matched files
+2. Requires explicit confirmation before proceeding
+3. Moves matched archive files to Delete Vault (soft-delete)
+4. Removes from albums (if configured)
+5. Logs all operations to audit trail
+
+### Step-by-Step Instructions
+
+1. Open the **Import GUI** (`python main_gui.py`)
+
+2. Go to the **Archive Maintenance** tab
+
+3. Find the **"Bulk Delete Matching Files"** section
+
+4. Click **"Browse..."** to select your reference folder
+   - This folder contains files you want to match against the archive
+   - All files in this folder (and subfolders) will be scanned
+
+5. Click **"Scan for Matches"**
+   - Progress bar shows scanning progress
+   - Wait for scan to complete
+
+6. Review the **Preview Dialog** that appears:
+   - **"To Delete" tab**: Files that match (will be deleted from archive)
+   - **"Not in Archive" tab**: Files that weren't found in archive
+   - Check the summary stats (matches, not found, total size)
+
+7. If satisfied, click **"Delete Matched Files"**
+   - A confirmation dialog appears
+   - Click "Yes" to proceed with deletion
+
+8. Wait for deletion to complete
+   - Files are moved to Delete Vault
+   - Progress is shown in the UI
+
+9. Review results in **Import History** tab
+   - Use "Show: Bulk Delete Operations" filter to see all operations
+
+### Viewing Bulk Delete History
+
+1. Go to **Import History** tab
+2. Use the **Show** dropdown
+3. Select **"Bulk Delete Operations"**
+4. View all files processed by bulk delete:
+   - **bulk_delete_matched** with status **success**: File deleted successfully
+   - **bulk_delete_matched** with status **failed**: Deletion failed (see Details)
+   - **bulk_delete_not_found** with status **skipped**: File not in archive
+
+### Use Cases
+
+**1. Cleaning up after cloud sync:**
+```
+You've synced photos to Google Photos. Now you want to remove those
+exact files from your local archive to save space.
+
+Steps:
+1. Download/export the synced photos to a reference folder
+2. Use Bulk Delete to match and remove from archive
+3. Delete the reference folder after verifying
+```
+
+**2. Removing duplicates from another backup:**
+```
+You have photos on an external drive that are also in your archive.
+You want to keep only the archive copies.
+
+Steps:
+1. Point Bulk Delete to the external drive folder
+2. Scan to see what matches
+3. Delete matches from archive (or keep archive, delete external)
+```
+
+**3. Using a "delete manifest":**
+```
+You've prepared a folder of photos you want to remove from the archive.
+
+Steps:
+1. Copy/move the unwanted photos to a "to_delete" folder
+2. Use Bulk Delete with that folder as reference
+3. All matching archive files are removed
+```
+
+---
+
+## Delete Vault and File Recovery
+
+The **Delete Vault** provides a safety net for all deleted files. When you delete photos from the archive (whether individually, via bulk delete, or through Photo Review), files are moved to the Delete Vault rather than permanently deleted.
+
+### Why a Delete Vault?
+
+- **Accidental deletion protection**: Recover files deleted by mistake
+- **Audit trail**: Track what was deleted and when
+- **Delayed permanent deletion**: Review before final purge
+- **Preserves folder structure**: Easy to find and restore specific files
+
+### Configuring the Delete Vault
+
+1. Go to **System Settings** tab
+2. Find **"Delete Vault Location"**
+3. Click **"Browse..."** to select a folder
+4. Recommended: Use a separate drive or clearly labeled folder
+
+**Important**: The Delete Vault should have sufficient space to hold deleted files until you're ready to purge them.
+
+### Viewing Deleted Files
+
+1. Go to **Archive Maintenance** tab
+2. Find **"Delete Vault Management"** section
+3. Click **"View Vault Contents"**
+
+The Deleted Files dialog shows:
+- Original archive path
+- Vault path (where file is now)
+- Deletion timestamp
+- Deletion reason
+- File hash
+
+### Restoring Deleted Files
+
+**To restore accidentally deleted files:**
+
+1. Open **Archive Maintenance** tab
+2. Click **"View Vault Contents"**
+3. Find the file(s) you want to restore
+4. Select the file(s) in the list
+5. Click **"Restore Selected"**
+
+The restore operation:
+- Copies file back to original archive location
+- Recreates folder structure if needed
+- Updates database to mark file as restored
+- Removes file from Delete Vault
+
+### Recovering from a Bad Bulk Delete
+
+If you accidentally deleted the wrong files with Bulk Delete:
+
+**Immediate Recovery (files still in vault):**
+
+1. Go to **Archive Maintenance** tab
+2. Click **"View Vault Contents"**
+3. Sort by **"Deleted Date"** (newest first)
+4. Select all files from the incorrect deletion session
+5. Click **"Restore Selected"**
+6. Verify files are back in archive
+
+**Identifying the Wrong Files:**
+
+If you're not sure which files were incorrect:
+
+1. Go to **Import History** tab
+2. Find the bulk delete session (look for recent sessions with `operation_mode='bulk_delete'`)
+3. Click on the session to view file details
+4. Use "Show: Bulk Delete Operations" filter
+5. Review the **source_path** column to see which reference files matched
+6. Cross-reference with vault contents to select correct files for restore
+
+**Partial Recovery:**
+
+If only some files were incorrectly deleted:
+
+1. Open Delete Vault contents
+2. Use search/filter to find specific files
+3. Restore only those files
+4. Leave correctly deleted files in vault
+
+### Permanently Purging the Delete Vault
+
+**Warning**: This action is irreversible!
+
+To permanently delete all files in the vault:
+
+1. Go to **Archive Maintenance** tab
+2. Find **"Delete Vault Management"** section
+3. Click **"Permanently Purge Vault"** (red button)
+4. Read the warning carefully
+5. Click "Yes" to confirm
+6. Click "Yes" again to double-confirm
+7. Files are permanently deleted
+
+**Best Practice**: Only purge after:
+- Verifying no files need to be restored
+- Checking recent bulk delete operations were correct
+- Allowing a "cooling off" period (days or weeks)
+
+### Delete Vault Storage Structure
+
+Files in the Delete Vault maintain their relative paths:
+
+```
+Delete Vault/
+├── 2024/
+│   ├── 01/
+│   │   └── 15/
+│   │       └── IMG_1234.jpg
+│   └── 03/
+│       └── 20/
+│           └── photo.png
+└── prior_revisions/
+    └── 2024/
+        └── IMG_1234_abc123.jpg
+```
+
+This structure makes it easy to:
+- Browse deleted files by date
+- Find specific files quickly
+- Understand what was in the archive
+
+---
+
 **Problem**: Versions created but duplicates not detected
 
 **Solution**: Run sync to add version hashes to history:
@@ -1710,7 +1950,7 @@ The **Import History** tab provides a complete audit trail of all processing ses
 ### File-Level Details
 
 The file grid shows all operations with filtering options:
-- **Show dropdown**: Filter by All Files, New Files, Duplicates, Filtered, or Errors
+- **Show dropdown**: Filter by All Files, New Files, Duplicates, Content Duplicates, Filtered, Recently Overridden, External Modifications, Bulk Delete Operations, or Errors
 - **Search box**: Text search across all columns
 - Columns: Source Folder, Filename, Destination, Operation, Status, Hash, Details
 
@@ -2009,6 +2249,7 @@ rm *.log *.log.*
 | 3.3 | Content-based duplicate detection |
 | 3.4 | Archive Change Detection for external modifications |
 | 3.5 | Database health checks, automatic backups, crash recovery, copy verification |
+| 3.6 | Bulk Delete Matching Files for removing archive files that match a reference folder |
 
 ---
 
