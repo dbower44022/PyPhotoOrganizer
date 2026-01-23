@@ -176,6 +176,42 @@ class DatabaseMetadata:
         );
     """
 
+    PENDING_OPERATIONS_TABLE_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS PendingOperations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operation_id TEXT UNIQUE NOT NULL,
+            operation_type TEXT NOT NULL,
+            source_path TEXT NOT NULL,
+            target_path TEXT NOT NULL,
+            file_hash TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_timestamp TEXT NOT NULL,
+            error_message TEXT
+        );
+    """
+
+    AUDIT_QUEUE_TABLE_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS AuditQueue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            queue_timestamp TEXT NOT NULL,
+            log_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            retry_count INTEGER DEFAULT 0,
+            last_error TEXT
+        );
+    """
+
+    QUICK_BACKUPS_TABLE_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS QuickBackups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            backup_path TEXT NOT NULL,
+            backup_reason TEXT NOT NULL,
+            created_timestamp TEXT NOT NULL,
+            database_size_bytes INTEGER,
+            is_valid INTEGER DEFAULT 1
+        );
+    """
+
     def __init__(self, database_path: str):
         """
         Initialize database metadata manager.
@@ -193,6 +229,9 @@ class DatabaseMetadata:
         self._ensure_saved_queries_table()
         self._ensure_albums_table()
         self._ensure_source_directory_sub_albums_table()
+        self._ensure_pending_operations_table()
+        self._ensure_audit_queue_table()
+        self._ensure_quick_backups_table()
 
     def _get_connection(self) -> sqlite3.Connection:
         """
@@ -393,6 +432,76 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to create SourceDirectorySubAlbums table: {e}")
+            raise
+
+    def _ensure_pending_operations_table(self):
+        """Ensure the PendingOperations table exists for crash recovery tracking."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Create table if it doesn't exist
+                cursor.execute(self.PENDING_OPERATIONS_TABLE_SCHEMA)
+
+                # Create indexes for performance
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_pending_ops_status
+                    ON PendingOperations(status)
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_pending_ops_created
+                    ON PendingOperations(created_timestamp)
+                """)
+
+                conn.commit()
+                logger.debug(f"PendingOperations table ensured in {self.database_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to create PendingOperations table: {e}")
+            raise
+
+    def _ensure_audit_queue_table(self):
+        """Ensure the AuditQueue table exists for failed audit retries."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Create table if it doesn't exist
+                cursor.execute(self.AUDIT_QUEUE_TABLE_SCHEMA)
+
+                # Create index for retry processing
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_audit_queue_retry
+                    ON AuditQueue(retry_count, queue_timestamp)
+                """)
+
+                conn.commit()
+                logger.debug(f"AuditQueue table ensured in {self.database_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to create AuditQueue table: {e}")
+            raise
+
+    def _ensure_quick_backups_table(self):
+        """Ensure the QuickBackups table exists for tracking database snapshots."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Create table if it doesn't exist
+                cursor.execute(self.QUICK_BACKUPS_TABLE_SCHEMA)
+
+                # Create index for timestamp lookups
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_quick_backups_created
+                    ON QuickBackups(created_timestamp)
+                """)
+
+                conn.commit()
+                logger.debug(f"QuickBackups table ensured in {self.database_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to create QuickBackups table: {e}")
             raise
 
     def _ensure_unreliable_dates_table(self):
@@ -3624,3 +3733,721 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to initialize system queries: {e}")
+
+    # ========== Pending Operations Management (Crash Recovery) ==========
+
+    def create_pending_operation(self, operation_id: str, operation_type: str,
+                                  source_path: str, target_path: str,
+                                  file_hash: str) -> bool:
+        """
+        Create a pending operation record for crash recovery tracking.
+
+        Args:
+            operation_id: Unique ID for this operation (usually UUID)
+            operation_type: Type of operation ('copy' or 'move')
+            source_path: Source file path
+            target_path: Target file path in archive
+            file_hash: SHA-256 hash of the source file
+
+        Returns:
+            True if created successfully, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    INSERT INTO PendingOperations
+                    (operation_id, operation_type, source_path, target_path,
+                     file_hash, status, created_timestamp)
+                    VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                """, (operation_id, operation_type, source_path, target_path,
+                      file_hash, datetime.now().isoformat()))
+
+                conn.commit()
+                logger.debug(f"Created pending operation: {operation_id}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to create pending operation: {e}")
+            return False
+
+    def update_pending_status(self, operation_id: str, status: str,
+                               error_message: Optional[str] = None) -> bool:
+        """
+        Update the status of a pending operation.
+
+        Args:
+            operation_id: Unique operation ID
+            status: New status ('pending', 'copied', 'verified', 'committed')
+            error_message: Optional error message if operation failed
+
+        Returns:
+            True if updated successfully, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    UPDATE PendingOperations
+                    SET status = ?, error_message = ?
+                    WHERE operation_id = ?
+                """, (status, error_message, operation_id))
+
+                conn.commit()
+                return cursor.rowcount > 0
+
+        except Exception as e:
+            logger.error(f"Failed to update pending status: {e}")
+            return False
+
+    def get_incomplete_operations(self) -> List[Dict[str, Any]]:
+        """
+        Get all operations that are not marked as 'committed'.
+
+        Used for recovery on startup to find interrupted operations.
+
+        Returns:
+            List of pending operation records
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    SELECT id, operation_id, operation_type, source_path,
+                           target_path, file_hash, status, created_timestamp,
+                           error_message
+                    FROM PendingOperations
+                    WHERE status != 'committed'
+                    ORDER BY created_timestamp
+                """)
+
+                return [
+                    {
+                        'id': row[0],
+                        'operation_id': row[1],
+                        'operation_type': row[2],
+                        'source_path': row[3],
+                        'target_path': row[4],
+                        'file_hash': row[5],
+                        'status': row[6],
+                        'created_timestamp': row[7],
+                        'error_message': row[8]
+                    }
+                    for row in cursor.fetchall()
+                ]
+
+        except Exception as e:
+            logger.error(f"Failed to get incomplete operations: {e}")
+            return []
+
+    def delete_pending_operation(self, operation_id: str) -> bool:
+        """
+        Delete a pending operation after successful completion.
+
+        Args:
+            operation_id: Unique operation ID to delete
+
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    DELETE FROM PendingOperations
+                    WHERE operation_id = ?
+                """, (operation_id,))
+
+                conn.commit()
+                return cursor.rowcount > 0
+
+        except Exception as e:
+            logger.error(f"Failed to delete pending operation: {e}")
+            return False
+
+    def cleanup_old_pending_operations(self, days_old: int = 7) -> int:
+        """
+        Clean up old pending operations that are no longer relevant.
+
+        Args:
+            days_old: Delete operations older than this many days
+
+        Returns:
+            Number of records deleted
+        """
+        try:
+            from datetime import timedelta
+
+            cutoff = (datetime.now() - timedelta(days=days_old)).isoformat()
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    DELETE FROM PendingOperations
+                    WHERE created_timestamp < ?
+                """, (cutoff,))
+
+                deleted = cursor.rowcount
+                conn.commit()
+
+                if deleted > 0:
+                    logger.info(f"Cleaned up {deleted} old pending operations")
+
+                return deleted
+
+        except Exception as e:
+            logger.error(f"Failed to cleanup old pending operations: {e}")
+            return 0
+
+    # ========== Database Health Check Methods ==========
+
+    def check_database_health(self) -> Dict[str, Any]:
+        """
+        Run comprehensive health checks on the database.
+
+        Checks:
+        1. SQLite integrity check
+        2. Pending operations needing recovery
+        3. WAL file size (large WAL may indicate issues)
+        4. Database accessibility
+
+        Returns:
+            Dictionary with health status:
+            {
+                'healthy': bool,      # Overall health status
+                'issues': [...],      # Critical problems
+                'warnings': [...],    # Non-critical warnings
+                'pending_ops': int,   # Operations needing recovery
+                'wal_size_mb': float, # WAL file size in MB
+                'integrity_ok': bool  # Integrity check passed
+            }
+        """
+        result = {
+            'healthy': True,
+            'issues': [],
+            'warnings': [],
+            'pending_ops': 0,
+            'wal_size_mb': 0.0,
+            'integrity_ok': True
+        }
+
+        try:
+            # 1. Run PRAGMA integrity_check
+            passed, msg = self.run_integrity_check()
+            result['integrity_ok'] = passed
+            if not passed:
+                result['healthy'] = False
+                result['issues'].append(f"Integrity check failed: {msg}")
+
+            # 2. Check for pending operations
+            pending = self.get_incomplete_operations()
+            result['pending_ops'] = len(pending)
+            if pending:
+                result['warnings'].append(
+                    f"{len(pending)} operations need recovery"
+                )
+
+            # 3. Check WAL file size
+            wal_size = self._get_wal_size()
+            result['wal_size_mb'] = wal_size / (1024 * 1024)
+            if wal_size > 50_000_000:  # 50MB
+                result['warnings'].append(
+                    f"Large WAL file ({result['wal_size_mb']:.1f}MB) - "
+                    "consider running VACUUM or checkpoint"
+                )
+
+            # 4. Check for audit queue items
+            queued_audits = self.get_audit_queue_count()
+            if queued_audits > 0:
+                result['warnings'].append(
+                    f"{queued_audits} failed audit entries pending retry"
+                )
+
+        except Exception as e:
+            result['healthy'] = False
+            result['issues'].append(f"Health check error: {str(e)}")
+            logger.error(f"Database health check failed: {e}", exc_info=True)
+
+        return result
+
+    def _get_wal_size(self) -> int:
+        """
+        Get the size of the WAL (Write-Ahead Log) file.
+
+        Returns:
+            Size in bytes, or 0 if no WAL file exists
+        """
+        try:
+            wal_path = f"{self.database_path}-wal"
+            if os.path.exists(wal_path):
+                return os.path.getsize(wal_path)
+            return 0
+        except Exception as e:
+            logger.debug(f"Could not get WAL size: {e}")
+            return 0
+
+    def checkpoint_wal(self, mode: str = "TRUNCATE") -> bool:
+        """
+        Run WAL checkpoint to consolidate changes.
+
+        Args:
+            mode: Checkpoint mode ('PASSIVE', 'FULL', 'RESTART', 'TRUNCATE')
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(f"PRAGMA wal_checkpoint({mode})")
+                result = cursor.fetchone()
+                logger.debug(f"WAL checkpoint ({mode}): {result}")
+                return True
+        except Exception as e:
+            logger.error(f"WAL checkpoint failed: {e}")
+            return False
+
+    # ========== Quick Backup Methods ==========
+
+    def create_quick_backup(self, reason: str = "auto") -> tuple:
+        """
+        Create a fast database-only backup before major operations.
+
+        Maintains a rolling window of the last 5 snapshots.
+
+        Args:
+            reason: Tag like 'pre_import', 'pre_batch_edit', 'auto'
+
+        Returns:
+            Tuple of (success: bool, backup_path: str or error message)
+        """
+        import shutil
+        import uuid
+
+        try:
+            # Determine backup location
+            backup_dir = self._get_quick_backup_directory()
+            if not backup_dir:
+                return (False, "Backup directory not configured")
+
+            # Ensure backup directory exists
+            os.makedirs(backup_dir, exist_ok=True)
+
+            # 1. Checkpoint WAL for consistency before backup
+            self.checkpoint_wal("TRUNCATE")
+
+            # 2. Generate backup filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_filename = f"db_snapshot_{timestamp}_{reason}_{uuid.uuid4().hex[:8]}.db"
+            backup_path = os.path.join(backup_dir, backup_filename)
+
+            # 3. Copy database file
+            db_size = os.path.getsize(self.database_path)
+            shutil.copy2(self.database_path, backup_path)
+
+            # 4. Record backup in QuickBackups table
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    INSERT INTO QuickBackups
+                    (backup_path, backup_reason, created_timestamp, database_size_bytes)
+                    VALUES (?, ?, ?, ?)
+                """, (backup_path, reason, datetime.now().isoformat(), db_size))
+
+                conn.commit()
+
+            # 5. Maintain rolling limit (keep last 5)
+            self._cleanup_old_quick_backups(keep_count=5)
+
+            logger.info(f"Created quick backup: {backup_path} ({db_size / 1024:.1f}KB)")
+            return (True, backup_path)
+
+        except Exception as e:
+            error_msg = f"Quick backup failed: {e}"
+            logger.error(error_msg, exc_info=True)
+            return (False, error_msg)
+
+    def _get_quick_backup_directory(self) -> Optional[str]:
+        """
+        Get the directory for quick backups.
+
+        Uses a 'snapshots' subdirectory in the database directory.
+
+        Returns:
+            Path to backup directory, or None if not determinable
+        """
+        try:
+            db_dir = os.path.dirname(os.path.abspath(self.database_path))
+            return os.path.join(db_dir, "db_snapshots")
+        except Exception:
+            return None
+
+    def _cleanup_old_quick_backups(self, keep_count: int = 5) -> int:
+        """
+        Remove old quick backups beyond the retention count.
+
+        Args:
+            keep_count: Number of backups to keep
+
+        Returns:
+            Number of backups removed
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Get backups ordered by creation time (newest first)
+                cursor.execute("""
+                    SELECT id, backup_path
+                    FROM QuickBackups
+                    ORDER BY created_timestamp DESC
+                """)
+
+                all_backups = cursor.fetchall()
+                removed = 0
+
+                # Keep the first 'keep_count', delete the rest
+                for backup_id, backup_path in all_backups[keep_count:]:
+                    # Delete file if it exists
+                    try:
+                        if os.path.exists(backup_path):
+                            os.remove(backup_path)
+                            logger.debug(f"Removed old backup: {backup_path}")
+                    except Exception as e:
+                        logger.warning(f"Could not delete backup file: {e}")
+
+                    # Remove from database
+                    cursor.execute("DELETE FROM QuickBackups WHERE id = ?", (backup_id,))
+                    removed += 1
+
+                conn.commit()
+                return removed
+
+        except Exception as e:
+            logger.error(f"Failed to cleanup old backups: {e}")
+            return 0
+
+    def get_quick_backups(self) -> List[Dict[str, Any]]:
+        """
+        Get list of available quick backups.
+
+        Returns:
+            List of backup records with path, reason, timestamp, size
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    SELECT id, backup_path, backup_reason, created_timestamp,
+                           database_size_bytes, is_valid
+                    FROM QuickBackups
+                    ORDER BY created_timestamp DESC
+                """)
+
+                return [
+                    {
+                        'id': row[0],
+                        'backup_path': row[1],
+                        'backup_reason': row[2],
+                        'created_timestamp': row[3],
+                        'database_size_bytes': row[4],
+                        'is_valid': bool(row[5])
+                    }
+                    for row in cursor.fetchall()
+                ]
+
+        except Exception as e:
+            logger.error(f"Failed to get quick backups: {e}")
+            return []
+
+    def restore_quick_backup(self, backup_id: int) -> tuple:
+        """
+        Restore database from a quick backup.
+
+        Args:
+            backup_id: ID of the backup to restore
+
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        import shutil
+
+        try:
+            # Get backup info
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    SELECT backup_path FROM QuickBackups WHERE id = ?
+                """, (backup_id,))
+
+                result = cursor.fetchone()
+                if not result:
+                    return (False, "Backup not found")
+
+                backup_path = result[0]
+
+            if not os.path.exists(backup_path):
+                return (False, f"Backup file not found: {backup_path}")
+
+            # Create a safety backup of current database
+            safety_backup = f"{self.database_path}.pre_restore"
+            shutil.copy2(self.database_path, safety_backup)
+
+            # Restore from backup
+            shutil.copy2(backup_path, self.database_path)
+
+            logger.info(f"Restored database from backup: {backup_path}")
+            return (True, f"Restored from {os.path.basename(backup_path)}")
+
+        except Exception as e:
+            error_msg = f"Restore failed: {e}"
+            logger.error(error_msg, exc_info=True)
+            return (False, error_msg)
+
+    # ========== Audit Queue Methods (Retry System) ==========
+
+    def queue_failed_audit(self, log_type: str, payload: Dict[str, Any],
+                            error_message: str) -> bool:
+        """
+        Queue a failed audit log entry for retry.
+
+        Args:
+            log_type: Type of audit entry ('file_operation', 'session', etc.)
+            payload: Dictionary containing the audit data
+            error_message: Error that caused the failure
+
+        Returns:
+            True if queued successfully, False otherwise
+        """
+        import json
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    INSERT INTO AuditQueue
+                    (queue_timestamp, log_type, payload_json, retry_count, last_error)
+                    VALUES (?, ?, ?, 0, ?)
+                """, (
+                    datetime.now().isoformat(),
+                    log_type,
+                    json.dumps(payload),
+                    error_message
+                ))
+
+                conn.commit()
+                logger.debug(f"Queued failed audit: {log_type}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to queue audit entry: {e}")
+            return False
+
+    def get_queued_audits(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Get queued audit entries for retry processing.
+
+        Args:
+            limit: Maximum number of entries to return
+
+        Returns:
+            List of queued audit records
+        """
+        import json
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    SELECT id, queue_timestamp, log_type, payload_json,
+                           retry_count, last_error
+                    FROM AuditQueue
+                    WHERE retry_count < 5
+                    ORDER BY queue_timestamp ASC
+                    LIMIT ?
+                """, (limit,))
+
+                return [
+                    {
+                        'id': row[0],
+                        'queue_timestamp': row[1],
+                        'log_type': row[2],
+                        'payload': json.loads(row[3]),
+                        'retry_count': row[4],
+                        'last_error': row[5]
+                    }
+                    for row in cursor.fetchall()
+                ]
+
+        except Exception as e:
+            logger.error(f"Failed to get queued audits: {e}")
+            return []
+
+    def update_audit_queue_retry(self, queue_id: int, error_message: str) -> bool:
+        """
+        Update retry count for a queued audit entry.
+
+        Args:
+            queue_id: ID of the queue entry
+            error_message: New error message
+
+        Returns:
+            True if updated successfully, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    UPDATE AuditQueue
+                    SET retry_count = retry_count + 1, last_error = ?
+                    WHERE id = ?
+                """, (error_message, queue_id))
+
+                conn.commit()
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to update audit queue retry: {e}")
+            return False
+
+    def delete_from_audit_queue(self, queue_id: int) -> bool:
+        """
+        Remove an entry from the audit queue after successful processing.
+
+        Args:
+            queue_id: ID of the queue entry to remove
+
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    DELETE FROM AuditQueue WHERE id = ?
+                """, (queue_id,))
+
+                conn.commit()
+                return cursor.rowcount > 0
+
+        except Exception as e:
+            logger.error(f"Failed to delete from audit queue: {e}")
+            return False
+
+    def get_audit_queue_count(self) -> int:
+        """
+        Get count of entries in the audit queue.
+
+        Returns:
+            Number of queued audit entries
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("SELECT COUNT(*) FROM AuditQueue")
+                result = cursor.fetchone()
+                return result[0] if result else 0
+
+        except Exception as e:
+            logger.debug(f"Failed to get audit queue count: {e}")
+            return 0
+
+    def cleanup_audit_queue(self, max_retries: int = 5, days_old: int = 30) -> int:
+        """
+        Clean up old or exhausted audit queue entries.
+
+        Args:
+            max_retries: Remove entries that have exceeded this retry count
+            days_old: Remove entries older than this many days
+
+        Returns:
+            Number of entries removed
+        """
+        try:
+            from datetime import timedelta
+
+            cutoff = (datetime.now() - timedelta(days=days_old)).isoformat()
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    DELETE FROM AuditQueue
+                    WHERE retry_count >= ? OR queue_timestamp < ?
+                """, (max_retries, cutoff))
+
+                removed = cursor.rowcount
+                conn.commit()
+
+                if removed > 0:
+                    logger.info(f"Cleaned up {removed} audit queue entries")
+
+                return removed
+
+        except Exception as e:
+            logger.error(f"Failed to cleanup audit queue: {e}")
+            return 0
+
+    def process_queued_unreliable_dates(self) -> Dict[str, int]:
+        """
+        Process queued unreliable date entries that failed during import.
+
+        Attempts to insert each queued entry, updating retry count on failure
+        and removing successful entries from the queue.
+
+        Returns:
+            Dictionary with 'processed', 'failed', 'remaining' counts
+        """
+        results = {'processed': 0, 'failed': 0, 'remaining': 0}
+
+        try:
+            queued = self.get_queued_audits(limit=100)
+            unreliable_entries = [q for q in queued if q['log_type'] == 'unreliable_date']
+
+            for entry in unreliable_entries:
+                queue_id = entry['id']
+                payload = entry['payload']
+
+                try:
+                    # Try to insert the unreliable date record
+                    self.insert_unreliable_date(
+                        file_hash=payload.get('file_hash'),
+                        source_path=payload.get('source_path'),
+                        archive_path=payload.get('archive_path'),
+                        original_date=payload.get('original_date'),
+                        date_source=payload.get('date_source'),
+                        flag_reason=payload.get('flag_reason')
+                    )
+
+                    # Success - remove from queue
+                    self.delete_from_audit_queue(queue_id)
+                    results['processed'] += 1
+
+                except Exception as e:
+                    # Update retry count
+                    self.update_audit_queue_retry(queue_id, str(e))
+                    results['failed'] += 1
+
+            # Get remaining count
+            results['remaining'] = self.get_audit_queue_count()
+
+            if results['processed'] > 0:
+                logger.info(f"Processed {results['processed']} queued unreliable date entries")
+
+        except Exception as e:
+            logger.error(f"Failed to process queued unreliable dates: {e}")
+
+        return results

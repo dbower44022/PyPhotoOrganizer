@@ -538,6 +538,8 @@ class ArchiveMaintenanceTab(QWidget):
             self.load_backup_info()
             self.refresh_database_stats()
             self.refresh_vault_stats()
+            # Automatically calculate storage statistics when database is loaded
+            self._start_storage_stats()
 
     # ========== Archive Backup Methods ==========
 
@@ -1187,6 +1189,9 @@ class ArchiveMaintenanceTab(QWidget):
 
     def _start_storage_stats(self):
         """Start storage stats worker."""
+        if not self.db_metadata:
+            return
+
         from ui.storage_stats_worker import StorageStatsWorker
 
         # Gather all locations to scan

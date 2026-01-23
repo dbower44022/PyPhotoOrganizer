@@ -1544,6 +1544,61 @@ def hash_file_partial(filename, num_bytes=constants.PARTIAL_HASH_BYTES):
         raise
 
 
+def verify_copy_integrity(dest_path: str, expected_hash: str, retry_count: int = 1) -> tuple:
+    """
+    Verify that a copied file matches the expected hash.
+
+    This function is used after copying a file to ensure no corruption
+    occurred during the copy operation.
+
+    Parameters:
+        dest_path (str): Path to the destination file to verify
+        expected_hash (str): Expected SHA-256 hash of the file
+        retry_count (int): Number of times to retry on failure (default: 1)
+
+    Returns:
+        tuple: (verified: bool, actual_hash: str, error_message: str or None)
+            - verified: True if hash matches, False otherwise
+            - actual_hash: The actual hash of the destination file
+            - error_message: Error description if verification failed, None on success
+    """
+    for attempt in range(retry_count + 1):
+        try:
+            if not os.path.exists(dest_path):
+                error_msg = f"Destination file does not exist: {dest_path}"
+                logger.warning(error_msg)
+                return (False, None, error_msg)
+
+            actual_hash = hash_file(dest_path)
+
+            if actual_hash == expected_hash:
+                logger.debug(f"Copy verified: {dest_path}")
+                return (True, actual_hash, None)
+            else:
+                error_msg = (
+                    f"Hash mismatch after copy: expected {expected_hash[:16]}..., "
+                    f"got {actual_hash[:16]}..."
+                )
+                if attempt < retry_count:
+                    logger.warning(f"{error_msg} - Retrying (attempt {attempt + 1}/{retry_count})")
+                    continue
+                else:
+                    logger.error(error_msg)
+                    return (False, actual_hash, error_msg)
+
+        except Exception as e:
+            error_msg = f"Verification error: {str(e)}"
+            if attempt < retry_count:
+                logger.warning(f"{error_msg} - Retrying (attempt {attempt + 1}/{retry_count})")
+                continue
+            else:
+                logger.exception(f"Copy verification failed for {dest_path}")
+                return (False, None, error_msg)
+
+    # Should not reach here, but safety fallback
+    return (False, None, "Verification failed after all retries")
+
+
 def hash_image_content(file_path):
     """
     Calculate SHA-256 hash of the normalized pixel content of an image.
@@ -2201,11 +2256,17 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                 logger.info(f"Files filtered (non-photos): {len(filtered_files)}")
                 photo_filter.print_statistics()
 
-        # Batch insert unreliable date records (after PhotoDatabase context closed to avoid lock)
+        # Batch insert unreliable date records with retry and queuing for failures
+        # This runs after PhotoDatabase context to avoid database lock contention
         if unreliable_dates_to_insert and database_path:
+            inserted_count = 0
+            queued_count = 0
+            failed_count = 0
+
             try:
                 logger.info(f"Batch inserting {len(unreliable_dates_to_insert)} unreliable date records...")
                 db_meta = DatabaseMetadata(database_path)
+
                 for record in unreliable_dates_to_insert:
                     try:
                         db_meta.insert_unreliable_date(
@@ -2216,11 +2277,39 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                             date_source=record['date_source'],
                             flag_reason=record['flag_reason']
                         )
+                        inserted_count += 1
                     except Exception as e:
-                        logger.error(f"Failed to insert unreliable date for {record['source_path']}: {e}")
-                logger.info(f"Successfully inserted {len(unreliable_dates_to_insert)} unreliable date records")
+                        # Queue failed insert for later retry
+                        try:
+                            db_meta.queue_failed_audit(
+                                log_type='unreliable_date',
+                                payload=record,
+                                error_message=str(e)
+                            )
+                            queued_count += 1
+                            logger.warning(f"Queued unreliable date for retry: {record['source_path']}")
+                        except Exception as queue_err:
+                            failed_count += 1
+                            logger.error(f"Failed to insert/queue unreliable date for {record['source_path']}: {e} (queue error: {queue_err})")
+
+                logger.info(f"Unreliable dates: {inserted_count} inserted, {queued_count} queued for retry, {failed_count} failed")
+
             except Exception as e:
-                logger.error(f"Failed to batch insert unreliable dates: {e}")
+                logger.error(f"Failed to process unreliable dates batch: {e}")
+                # Try to queue all remaining records for later retry
+                try:
+                    db_meta = DatabaseMetadata(database_path)
+                    for record in unreliable_dates_to_insert:
+                        try:
+                            db_meta.queue_failed_audit(
+                                log_type='unreliable_date',
+                                payload=record,
+                                error_message=f"Batch failure: {str(e)}"
+                            )
+                        except Exception:
+                            pass  # Best effort
+                except Exception:
+                    logger.error("Could not queue unreliable dates for retry")
 
         # Return results
         results = {}

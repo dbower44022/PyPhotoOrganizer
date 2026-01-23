@@ -104,6 +104,224 @@ conn.execute("PRAGMA busy_timeout=30000")
 
 `DatabaseMetadata._ensure_metadata_table()` and similar methods automatically add missing columns/tables on first access using `ALTER TABLE ... ADD COLUMN`. No manual migrations needed.
 
+### Database Health, Backup, and Recovery System
+
+The application includes comprehensive data integrity features for crash recovery, automatic backups, and health monitoring.
+
+#### New Database Tables
+
+| Table | Purpose |
+|-------|---------|
+| `PendingOperations` | Tracks in-flight copy/move operations for crash recovery |
+| `AuditQueue` | Queues failed audit log entries for retry |
+| `QuickBackups` | Tracks rolling database snapshots |
+
+**PendingOperations Schema:**
+```sql
+CREATE TABLE PendingOperations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation_id TEXT UNIQUE NOT NULL,  -- UUID for this operation
+    operation_type TEXT NOT NULL,        -- 'copy' or 'move'
+    source_path TEXT NOT NULL,
+    target_path TEXT NOT NULL,
+    file_hash TEXT NOT NULL,
+    status TEXT NOT NULL,                -- 'pending', 'copied', 'verified', 'committed', 'failed'
+    created_timestamp TEXT NOT NULL,
+    error_message TEXT
+);
+```
+
+**AuditQueue Schema:**
+```sql
+CREATE TABLE AuditQueue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    queue_timestamp TEXT NOT NULL,
+    log_type TEXT NOT NULL,              -- 'unreliable_date', 'file_operation', etc.
+    payload_json TEXT NOT NULL,          -- JSON-serialized audit data
+    retry_count INTEGER DEFAULT 0,
+    last_error TEXT
+);
+```
+
+**QuickBackups Schema:**
+```sql
+CREATE TABLE QuickBackups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    backup_path TEXT NOT NULL,
+    backup_reason TEXT NOT NULL,         -- 'pre_import', 'pre_batch_edit', 'auto'
+    created_timestamp TEXT NOT NULL,
+    database_size_bytes INTEGER,
+    is_valid INTEGER DEFAULT 1
+);
+```
+
+#### Copy Verification
+
+After copy/move operations, file integrity is verified by re-hashing:
+
+```python
+def verify_copy_integrity(dest_path: str, expected_hash: str, retry_count: int = 1) -> tuple:
+    """
+    Verify that a copied file matches the expected hash.
+
+    Returns:
+        tuple: (verified: bool, actual_hash: str, error_message: str or None)
+    """
+```
+
+**Integration in `organize_files()`:**
+1. Create pending operation record BEFORE copy
+2. Perform copy/move operation
+3. Update status to 'copied'
+4. Verify hash matches expected
+5. Update status to 'verified' or 'failed'
+6. On database commit success, delete pending operation
+
+#### Pending Operations (Crash Recovery)
+
+**Purpose:** Track operations that span multiple steps (copy → verify → database commit) so interrupted operations can be recovered.
+
+**Status Flow:**
+```
+pending → copied → verified → (database commit) → delete record
+                           ↘ failed (on verification failure)
+```
+
+**Key Methods (DatabaseMetadata class):**
+- `create_pending_operation()` - Record operation before starting
+- `update_pending_status()` - Update status as operation progresses
+- `get_incomplete_operations()` - Find operations needing recovery
+- `delete_pending_operation()` - Remove after successful completion
+- `cleanup_old_pending_operations(days_old)` - Remove stale records
+
+**Recovery on Startup:**
+```python
+def _recover_pending_operations(self):
+    """Recover incomplete operations from previous session."""
+    pending = self.database_metadata.get_incomplete_operations()
+    for op in pending:
+        if op['status'] == 'verified':
+            # Just needs database commit - mark recovered
+            pass
+        elif op['status'] == 'copied':
+            # Verify the copy, clean up if corrupt
+            verified, _, _ = verify_copy_integrity(op['target_path'], op['file_hash'])
+            if not verified:
+                os.remove(op['target_path'])  # Remove corrupt copy
+        elif op['status'] in ('pending', 'failed'):
+            # Clean up orphaned files
+            if os.path.exists(op['target_path']):
+                os.remove(op['target_path'])
+        self.database_metadata.delete_pending_operation(op['operation_id'])
+```
+
+#### Quick Database Backups
+
+**Purpose:** Create fast database-only snapshots before major operations.
+
+**Key Methods (DatabaseMetadata class):**
+- `create_quick_backup(reason)` - Create snapshot with reason tag
+- `get_quick_backups()` - List available backups
+- `restore_quick_backup(backup_id)` - Restore from a backup
+- `_cleanup_old_quick_backups(keep_count)` - Maintain rolling window
+
+**Backup Location:** `<database_directory>/db_snapshots/`
+
+**Filename Format:** `db_snapshot_YYYYMMDD_HHMMSS_<reason>_<uuid8>.db`
+
+**Rolling Retention:** Keeps last 5 snapshots, automatically deletes older ones.
+
+**Pre-Import Backup:**
+```python
+def _create_pre_import_backup(self):
+    """Create backup before starting import."""
+    success, result = self.database_metadata.create_quick_backup(reason="pre_import")
+```
+
+#### Audit Queue (Retry System)
+
+**Purpose:** Queue failed audit log entries for later retry instead of losing data.
+
+**Key Methods (DatabaseMetadata class):**
+- `queue_failed_audit(log_type, payload, error_message)` - Add to retry queue
+- `get_queued_audits(limit)` - Get entries for processing
+- `update_audit_queue_retry(queue_id, error_message)` - Increment retry count
+- `delete_from_audit_queue(queue_id)` - Remove after success
+- `get_audit_queue_count()` - Count pending entries
+- `cleanup_audit_queue(max_retries, days_old)` - Remove exhausted/old entries
+- `process_queued_unreliable_dates()` - Process queued unreliable date entries
+
+**Retry Logic:**
+- Max 5 retry attempts
+- Entries older than 30 days are cleaned up
+- Processed silently on startup
+
+#### Database Health Check
+
+**Purpose:** Detect and report database issues on startup.
+
+```python
+def check_database_health(self) -> Dict[str, Any]:
+    """
+    Run comprehensive health checks.
+
+    Returns:
+        {
+            'healthy': bool,       # Overall health status
+            'issues': [...],       # Critical problems
+            'warnings': [...],     # Non-critical warnings
+            'pending_ops': int,    # Operations needing recovery
+            'wal_size_mb': float,  # WAL file size in MB
+            'integrity_ok': bool   # PRAGMA integrity_check passed
+        }
+    """
+```
+
+**Checks Performed:**
+1. SQLite `PRAGMA integrity_check` - Database corruption
+2. Pending operations count - Crash recovery needed
+3. WAL file size - Large WAL may indicate issues (warns >50MB)
+4. Audit queue count - Failed entries awaiting retry
+
+**WAL Management:**
+- `_get_wal_size()` - Get WAL file size in bytes
+- `checkpoint_wal(mode)` - Force WAL checkpoint (PASSIVE, FULL, RESTART, TRUNCATE)
+
+#### Startup Health Check Flow
+
+```python
+def _run_startup_health_check(self):
+    """Run on application startup."""
+    health = self.database_metadata.check_database_health()
+
+    # Critical issues - show error dialog
+    if not health['healthy']:
+        self._show_database_error_dialog(health['issues'])
+        return
+
+    # Pending operations - offer recovery
+    if health['pending_ops'] > 0:
+        self._offer_pending_recovery(health['pending_ops'])
+
+    # Process queued audits silently
+    self.database_metadata.process_queued_unreliable_dates()
+
+    # Show warnings if any
+    if health['warnings']:
+        self._show_database_warning_dialog(health['warnings'])
+```
+
+#### UI Integration
+
+**MainWindow (`ui/main_window.py`):**
+- `_run_startup_health_check()` - Called when database is loaded
+- `_show_database_error_dialog()` - Critical issue notification
+- `_show_database_warning_dialog()` - Warning notification
+- `_offer_pending_recovery()` - Recovery confirmation dialog
+- `_recover_pending_operations()` - Perform recovery
+- `_discard_pending_operations()` - Discard incomplete operations
+- `_create_pre_import_backup()` - Create backup before import
+
 ## Key Implementation Details
 
 ### Processing Flow

@@ -7,18 +7,19 @@
 3. [Getting Started](#getting-started)
 4. [Understanding the Interface](#understanding-the-interface)
 5. [Database Management](#database-management)
-6. [Source Folders](#source-folders)
-7. [Album Association for Source Folders](#album-association-for-source-folders)
-8. [Processing Photos](#processing-photos)
-9. [Import History](#import-history)
-10. [Photo Review App](#photo-review-app)
-11. [Date Corrections (in Photo Review App)](#date-corrections)
-12. [File Version Management](#file-version-management)
-13. [Prior Revision Archive System](#prior-revision-archive-system)
-14. [Archive Change Detection](#archive-change-detection)
-15. [Settings](#settings)
-16. [Troubleshooting](#troubleshooting)
-17. [FAQ](#faq)
+6. [Database Health and Recovery](#database-health-and-recovery)
+7. [Source Folders](#source-folders)
+8. [Album Association for Source Folders](#album-association-for-source-folders)
+9. [Processing Photos](#processing-photos)
+10. [Import History](#import-history)
+11. [Photo Review App](#photo-review-app)
+12. [Date Corrections (in Photo Review App)](#date-corrections)
+13. [File Version Management](#file-version-management)
+14. [Prior Revision Archive System](#prior-revision-archive-system)
+15. [Archive Change Detection](#archive-change-detection)
+16. [Settings](#settings)
+17. [Troubleshooting](#troubleshooting)
+18. [FAQ](#faq)
 
 ---
 
@@ -167,6 +168,209 @@ The Database tab shows:
 - Archive location
 - Total photos in archive
 - Last used date
+
+---
+
+## Database Health and Recovery
+
+PyPhotoOrganizer includes comprehensive data protection features to safeguard your photo database against corruption, crashes, and other issues.
+
+### Automatic Health Checks
+
+When you open a database, the application automatically runs health checks to detect potential problems:
+
+| Check | What It Detects |
+|-------|-----------------|
+| **Integrity Check** | Database file corruption |
+| **Pending Operations** | Interrupted imports from crashes |
+| **WAL Size** | Large write-ahead log files |
+| **Queued Audits** | Failed audit entries awaiting retry |
+
+**What Happens:**
+- **Critical Issues**: If database corruption is detected, you'll see an error dialog with recovery options
+- **Pending Operations**: If a previous import was interrupted, you'll be offered the chance to recover
+- **Warnings**: Non-critical issues (like large WAL files) are shown as warnings
+
+### Automatic Backups (Quick Snapshots)
+
+The application automatically creates database backups before major operations:
+
+**When Backups Are Created:**
+- Before starting an import
+- Before batch operations (future enhancement)
+
+**Backup Location:** `<database_directory>/db_snapshots/`
+
+**Retention:** The last 5 snapshots are kept automatically. Older backups are deleted to save space.
+
+**Backup Files:** Named like `db_snapshot_20240115_143022_pre_import_a1b2c3d4.db`
+
+### Crash Recovery
+
+If the application crashes or loses power during an import, PyPhotoOrganizer can recover:
+
+**On Next Startup:**
+1. System detects incomplete operations
+2. You're shown a recovery dialog:
+   - **Recover**: Attempt to complete or clean up interrupted operations
+   - **Discard**: Remove all pending operation records
+
+**What Recovery Does:**
+- **Verified copies**: Files that were copied and verified are marked complete
+- **Unverified copies**: Files are re-verified; corrupt copies are deleted
+- **Partial operations**: Incomplete files are cleaned up
+- **Database records**: All tracking records are properly resolved
+
+**After Recovery:**
+- You can re-run the import to process any files that were skipped
+- Already-processed files are detected as duplicates and skipped automatically
+
+### Copy Verification
+
+Every file copied to your archive is verified after the copy operation:
+
+1. **File is copied** from source to archive
+2. **Hash is recalculated** on the destination file
+3. **Hashes are compared** to detect corruption
+4. **Corrupt copies are removed** automatically
+
+This ensures that network glitches, disk errors, or other issues don't result in corrupted photos in your archive.
+
+### Restoring a Corrupt Database
+
+If your database becomes corrupted or you need to restore from a backup:
+
+#### Method 1: Restore from Quick Snapshot (Recommended)
+
+Quick snapshots are stored in the `db_snapshots` folder next to your database.
+
+**Steps:**
+
+1. **Close PyPhotoOrganizer** completely
+
+2. **Find your database location**:
+   - Open the application's settings or check where your `.db` file is stored
+   - Look for a folder called `db_snapshots` in the same directory
+
+3. **List available snapshots**:
+   ```
+   db_snapshots/
+   ├── db_snapshot_20240115_143022_pre_import_a1b2c3d4.db
+   ├── db_snapshot_20240114_091533_pre_import_e5f6g7h8.db
+   └── db_snapshot_20240113_162045_pre_import_i9j0k1l2.db
+   ```
+   Files are named by date/time, so choose the most recent one from before the corruption.
+
+4. **Backup your current (corrupted) database**:
+   ```bash
+   # Linux/macOS
+   cp PhotoDB.db PhotoDB_corrupted_backup.db
+
+   # Windows (Command Prompt)
+   copy PhotoDB.db PhotoDB_corrupted_backup.db
+   ```
+
+5. **Restore from snapshot**:
+   ```bash
+   # Linux/macOS
+   cp db_snapshots/db_snapshot_20240115_143022_pre_import_a1b2c3d4.db PhotoDB.db
+
+   # Windows (Command Prompt)
+   copy db_snapshots\db_snapshot_20240115_143022_pre_import_a1b2c3d4.db PhotoDB.db
+   ```
+
+6. **Restart PyPhotoOrganizer** and verify the database loads correctly
+
+7. **Re-run import** if needed - any files imported after the snapshot will be detected and re-imported
+
+#### Method 2: Restore from External Backup
+
+If you've created manual backups of your database file:
+
+1. **Close PyPhotoOrganizer**
+2. **Replace the database file** with your backup copy
+3. **Also restore associated files** if present:
+   - `PhotoDB.db-wal` (Write-Ahead Log)
+   - `PhotoDB.db-shm` (Shared Memory file)
+4. **Restart the application**
+
+#### Method 3: Create a New Database
+
+If no backup is available and the database is unrecoverable:
+
+1. **Close PyPhotoOrganizer**
+2. **Rename the corrupted database** (don't delete it yet):
+   ```bash
+   mv PhotoDB.db PhotoDB_corrupted.db
+   ```
+3. **Start PyPhotoOrganizer** - it will prompt you to create or select a database
+4. **Create a new database** with the same archive location
+5. **Re-scan your archive** to rebuild the database:
+   - The application will hash all existing archive files
+   - File metadata will be rebuilt from EXIF data
+   - Duplicate detection will resume working
+
+**What You Lose:**
+- Import history and audit trails
+- Unreliable date flags (you'll need to re-identify them)
+- Album associations and configurations
+- Source directory settings
+
+**What You Keep:**
+- All photos in your archive (files are not affected)
+- Folder organization
+- File content (EXIF data, pixel content)
+
+### Preventing Database Corruption
+
+**Best Practices:**
+
+1. **Don't force-quit** the application during imports - use the Stop button instead
+2. **Use reliable storage** - avoid network drives with poor connections
+3. **Keep backups** - periodically copy your `.db` file to a safe location
+4. **Monitor disk space** - full disks can cause corruption
+5. **Use UPS** - power loss during writes can corrupt databases
+
+**The application helps by:**
+- Checkpointing the WAL file before backups
+- Using SQLite's WAL mode for crash resilience
+- Verifying copies after every file transfer
+- Creating automatic snapshots before imports
+
+### Viewing Database Health Status
+
+Currently, health checks run automatically on startup. You can see:
+- **Startup dialogs** for any detected issues
+- **Log files** for detailed health check results
+
+Future versions will include a dedicated Database Health panel in the UI.
+
+### Understanding Health Warnings
+
+| Warning | Meaning | Action |
+|---------|---------|--------|
+| "X operations need recovery" | Previous import was interrupted | Choose Recover or Discard |
+| "Large WAL file (X MB)" | Write-ahead log is unusually large | Usually resolves automatically; restart app if persistent |
+| "X failed audit entries pending" | Some tracking records couldn't be saved | Processed automatically on startup |
+
+### Technical Details
+
+**Quick Backup Process:**
+1. WAL checkpoint is performed (consolidates pending writes)
+2. Database file is copied to snapshots directory
+3. Backup is recorded in QuickBackups table
+4. Old backups beyond retention limit are deleted
+
+**Crash Recovery Process:**
+1. PendingOperations table is scanned for incomplete operations
+2. Each operation is evaluated based on its status:
+   - `pending`: Operation never started - clean up record
+   - `copied`: File was copied - verify integrity
+   - `verified`: Copy verified - ready for database commit
+   - `failed`: Operation failed - clean up orphaned files
+3. Corrupt or orphaned files in archive are removed
+4. Database records are cleaned up
+5. User is informed of recovery results
 
 ---
 
@@ -1665,6 +1869,17 @@ For Import History cleanup:
 
 ### Common Issues
 
+#### "Database Error" dialog on startup
+- The database file may be corrupted
+- Check the `db_snapshots/` folder for automatic backups
+- See [Restoring a Corrupt Database](#restoring-a-corrupt-database) for recovery steps
+
+#### "Pending Operations Found" dialog on startup
+- A previous import was interrupted (crash, power loss, force quit)
+- Click **Yes** to recover: verified files are kept, incomplete files are cleaned up
+- Click **No** then **Yes** to discard: all pending operations are removed
+- After recovery, re-run your import to process remaining files
+
 #### "No database selected"
 - Go to Database tab and select or create a database
 
@@ -1741,7 +1956,16 @@ rm *.log *.log.*
 **A:** Progress is saved. Simply run again - already processed files are skipped automatically.
 
 ### Q: How do I back up my database?
-**A:** Copy the `.db` file to a safe location. The archive folder should also be backed up separately.
+**A:** The application creates automatic snapshots in `db_snapshots/` before each import. For additional safety, copy the `.db` file to a safe location periodically. The archive folder should also be backed up separately.
+
+### Q: My database is corrupted. How do I recover?
+**A:** See the [Database Health and Recovery](#database-health-and-recovery) section. You have three options:
+1. **Restore from quick snapshot** (recommended) - Check the `db_snapshots/` folder for automatic backups
+2. **Restore from external backup** - If you have manual backups
+3. **Create new database** - Re-scan your archive to rebuild (loses history but preserves photos)
+
+### Q: The application crashed during an import. Did I lose data?
+**A:** No. On next startup, the application detects incomplete operations and offers to recover them. Files that were successfully copied are preserved, and partially-copied files are cleaned up. You can then re-run the import to continue where it left off.
 
 ### Q: Can I change the archive location?
 **A:** Each database is bound to its archive location. Create a new database for a different location, or manually move files and update paths.
@@ -1784,6 +2008,7 @@ rm *.log *.log.*
 | 3.0.3 | Prior Revision Archive system |
 | 3.3 | Content-based duplicate detection |
 | 3.4 | Archive Change Detection for external modifications |
+| 3.5 | Database health checks, automatic backups, crash recovery, copy verification |
 
 ---
 

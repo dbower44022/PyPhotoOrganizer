@@ -60,6 +60,7 @@ import json
 import logging
 import os
 import sqlite3
+import uuid
 
 from PIL import Image
 from PIL.ExifTags import TAGS
@@ -426,27 +427,88 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                         operation_start = time_module.time()
                         operation_type = 'copy' if copy_files else 'move'
                         operation_success = False
+                        copy_verified = False
 
                         # Initialize album tracking variables (will be populated if file is added to album)
                         audit_album_name = None
                         audit_album_path = None
                         audit_sub_album_name = None
 
+                        # Get file hash for pending operation tracking
+                        file_hash = original_file.get("file_hash")
+                        pending_op_id = str(uuid.uuid4())
+
+                        # Create pending operation BEFORE the copy/move for crash recovery
+                        if file_hash:
+                            db_metadata.create_pending_operation(
+                                operation_id=pending_op_id,
+                                operation_type=operation_type,
+                                source_path=file_path,
+                                target_path=target_path,
+                                file_hash=file_hash
+                            )
+
                         if copy_files and not move_files:
                             # use the copyfile not copy or copy2 in order to maintain the existing hash code of the original file!
                             shutil.copyfile(file_path, target_path)
                             logger.info(f"Copied {file_path} to {target_path}")
-                            operation_success = True
+
+                            # Update pending status to 'copied'
+                            if file_hash:
+                                db_metadata.update_pending_status(pending_op_id, 'copied')
+
+                            # Verify hash after copy to detect corruption
+                            verified, actual_hash, verify_error = DuplicateFileDetection.verify_copy_integrity(
+                                target_path, file_hash, retry_count=1
+                            )
+                            if verified:
+                                copy_verified = True
+                                operation_success = True
+                                db_metadata.update_pending_status(pending_op_id, 'verified')
+                            else:
+                                # Hash mismatch - log error and skip this file
+                                logger.error(f"Copy verification failed for {file_path}: {verify_error}")
+                                # Clean up corrupt copy
+                                try:
+                                    if os.path.exists(target_path):
+                                        os.remove(target_path)
+                                        logger.info(f"Removed unverified copy: {target_path}")
+                                except Exception as cleanup_err:
+                                    logger.warning(f"Failed to clean up unverified copy: {cleanup_err}")
+                                # Update pending status with error
+                                db_metadata.update_pending_status(pending_op_id, 'failed', verify_error)
+                                pbar.update(1)
+                                continue  # Skip to next file
+
                         elif move_files and not copy_files:
                             shutil.move(file_path, target_path)
                             logger.info(f"Moved {file_path} to {target_path}")
-                            operation_success = True
+
+                            # Update pending status
+                            if file_hash:
+                                db_metadata.update_pending_status(pending_op_id, 'copied')
+
+                            # Verify hash after move
+                            verified, actual_hash, verify_error = DuplicateFileDetection.verify_copy_integrity(
+                                target_path, file_hash, retry_count=1
+                            )
+                            if verified:
+                                copy_verified = True
+                                operation_success = True
+                                db_metadata.update_pending_status(pending_op_id, 'verified')
+                            else:
+                                # Hash mismatch after move - this is serious, can't easily recover
+                                logger.error(f"Move verification failed for {file_path}: {verify_error}")
+                                db_metadata.update_pending_status(pending_op_id, 'failed', verify_error)
+                                # Continue processing but don't update database
+                                pbar.update(1)
+                                continue
                         else:
                             logger.info("ERROR - Move and Copy files are not supported simultaneously")
 
                         # Update database with archive path after successful organization
+                        # Note: file_hash is already set above for pending operation tracking
                         try:
-                            file_hash = original_file.get("file_hash")
                             logger.debug(f"Updating database with archive path for file_hash: {file_hash}")
 
                             if file_hash:
@@ -502,6 +564,10 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                                             logger.info(f"✓ Updated UnreliableDates.archive_path: {file_hash[:16]}... -> {target_path}")
 
                                     conn.commit()
+
+                                    # Database commit successful - remove pending operation
+                                    db_metadata.delete_pending_operation(pending_op_id)
+                                    logger.debug(f"Pending operation completed: {pending_op_id}")
                             else:
                                 logger.warning(f"No file_hash found in original_file dict for: {file_path}")
 
