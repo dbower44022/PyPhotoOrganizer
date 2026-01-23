@@ -14,9 +14,11 @@
 10. [Photo Review App](#photo-review-app)
 11. [Date Corrections (in Photo Review App)](#date-corrections)
 12. [File Version Management](#file-version-management)
-13. [Settings](#settings)
-14. [Troubleshooting](#troubleshooting)
-15. [FAQ](#faq)
+13. [Prior Revision Archive System](#prior-revision-archive-system)
+14. [Archive Change Detection](#archive-change-detection)
+15. [Settings](#settings)
+16. [Troubleshooting](#troubleshooting)
+17. [FAQ](#faq)
 
 ---
 
@@ -426,11 +428,14 @@ Use the "Show" dropdown to filter the file list:
 - **All Files**: Complete list of all operations
 - **New Files (Added to Archive)**: Successfully imported photos
 - **Duplicates**: Files that matched existing archive photos
+- **Content Duplicates**: Files with matching pixel content (different metadata)
 - **Filtered (Icons/Thumbnails)**: Files skipped by photo filter with reasons:
   - Too small (under 50KB)
   - Too small dimensions (under 800x600)
   - Icon/thumbnail patterns in filename
   - Small square images (likely icons)
+- **Recently Overridden**: Files imported via Override Skip feature
+- **External Modifications**: Files detected as externally modified by Archive Change Detection
 - **Errors**: Files that failed processing
 
 ### Preview and Details
@@ -1264,6 +1269,94 @@ WHERE original_hash = 'abc123...def'
 
 ---
 
+## Archive Change Detection
+
+**NEW** - PyPhotoOrganizer can now detect when archive files have been modified externally (e.g., edited in Photoshop, Lightroom, or other photo software). When external modifications are detected, the system preserves original versions and creates revision records.
+
+### Why Use Archive Change Detection?
+
+If you edit photos in external software:
+- The file's content changes, but PyPhotoOrganizer doesn't know about it
+- The original version might be lost
+- Duplicate detection could be affected
+
+With Archive Change Detection:
+- ✅ External modifications are **automatically detected**
+- ✅ Original versions are **preserved** in Prior Revision Archive
+- ✅ Revision records are **created** for tracking
+- ✅ All versions are **tracked** for duplicate detection
+
+### How It Works
+
+The scanner compares the current pixel content of each archive file against the stored content hash:
+
+1. **Unchanged files**: Content hash matches → no action needed
+2. **Modified files**: Content hash differs → external modification detected
+   - Original version located (from backup or source)
+   - Original copied to Prior Revision Archive
+   - Revision record created in database
+   - Operation logged to audit trail
+
+### Running a Change Scan
+
+1. Open the **Archive Maintenance** tab
+2. Find the **"Archive Change Detection"** section
+3. Choose scan scope:
+   - **Scan entire archive**: Check all files
+   - **Scan specific folder**: Check only files in a selected folder
+4. Click **"Scan for External Changes"**
+5. Review results when complete
+
+### Prerequisites
+
+Before scanning, ensure:
+
+- **Content hashes calculated**: Files need content hashes to detect changes. Run "Calculate Content Hashes" in System Settings if needed.
+- **Prior Revision Archive configured**: Required to store original versions. Configure in Archive Settings tab.
+- **Backup location (optional)**: If configured, originals are first sought here.
+
+### Understanding Results
+
+| Metric | Meaning |
+|--------|---------|
+| Files scanned | Total files checked |
+| Unchanged | Files with matching content hashes |
+| Modifications detected | Files that differ from stored content |
+| Revisions created | Successful revision records made |
+| Originals from backup | Originals found in backup location |
+| Originals from source | Originals found at original source path |
+| Originals not found | Revisions created without preserving original |
+| Errors | Files that encountered processing errors |
+| Skipped (videos) | Videos don't have content hashes |
+| Skipped (no content hash) | Files needing content hash backfill |
+
+### Viewing External Modifications
+
+After a scan, view detected modifications in **Import History**:
+
+1. Go to the **Import History** tab
+2. Use the **Show** dropdown
+3. Select **"External Modifications"**
+4. View all files flagged as externally modified
+
+### Best Practices
+
+1. **Run content hash backfill first**: Ensure all files have content hashes before scanning
+2. **Configure backup location**: Increases chance of preserving originals
+3. **Scan periodically**: Run after known external editing sessions
+4. **Review results**: Check what was modified and why
+
+### Example Workflow
+
+1. Import photos into archive
+2. Edit some photos in Lightroom (externally)
+3. Run "Scan for External Changes"
+4. System detects modified files
+5. Originals preserved in Prior Revision Archive
+6. Continue working with confidence that history is tracked
+
+---
+
 **Problem**: Versions created but duplicates not detected
 
 **Solution**: Run sync to add version hashes to history:
@@ -1688,6 +1781,9 @@ rm *.log *.log.*
 | 2.2.3 | Hash history for EXIF edits |
 | 2.3 | Import audit system |
 | 2.3.1 | Log rotation |
+| 3.0.3 | Prior Revision Archive system |
+| 3.3 | Content-based duplicate detection |
+| 3.4 | Archive Change Detection for external modifications |
 
 ---
 

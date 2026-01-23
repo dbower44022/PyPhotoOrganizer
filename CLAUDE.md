@@ -66,6 +66,7 @@ python main.py              # CLI mode
 | `worker.py` | `ProcessingWorker` background thread |
 | `reprocess_worker.py` | `ReprocessWorker` for reprocessing/override skip with album support |
 | `content_hash_worker.py` | `ContentHashBackfillWorker` for backfilling content hashes |
+| `archive_change_scanner_worker.py` | `ArchiveChangeScannerWorker` for detecting external file modifications |
 | `theme.py` | `ThemeManager`, light/dark mode support |
 
 ### Database Tables
@@ -173,6 +174,7 @@ Tabs and main windows with background workers provide a `cleanup_workers()` meth
 | `MainWindow` | `self.worker` (ProcessingWorker) | `ui/main_window.py` |
 | `SystemSettingsTab` | `self._backfill_worker` | `ui/system_settings_tab.py` |
 | `ImportHistoryTab` | `self.reprocess_worker`, `self.override_skip_worker` | `ui/import_history_tab.py` |
+| `ArchiveMaintenanceTab` | `self._backup_worker`, `self._verification_worker`, `self._storage_stats_worker`, `self._change_scanner_worker` | `ui/archive_maintenance_tab.py` |
 | `PhotoReviewWindow` | `self.delete_worker` | `photo_review/review_window.py` |
 
 Main window calls `_cleanup_tab_workers()` in `closeEvent` which calls each tab's `cleanup_workers()` method.
@@ -253,6 +255,46 @@ class ContentHashBackfillWorker(QThread):
 - System Settings tab: Enable checkbox + "Calculate Content Hashes" button
 - Import History: "Content Duplicates" filter option (purple #9966CC)
 - Photo Review: "Content Duplicates" view filter
+
+### Archive Change Detection
+
+Detects when archive files have been modified externally (e.g., edited in photo software outside PyPhotoOrganizer) by comparing current content hashes against stored values.
+
+**How it works:**
+1. User selects scope: entire archive or specific folder
+2. Scanner compares current content hash vs. stored content hash for each file
+3. On mismatch (external modification detected):
+   - Original version located from backup or source_path
+   - Original copied to Prior Revision Archive
+   - Revision record created linking new hash to old hash
+   - Operation logged as `'external_modification_detected'`
+
+**Worker (`ui/archive_change_scanner_worker.py`):**
+```python
+class ArchiveChangeScannerWorker(QThread):
+    progress_update = Signal(int, int, str)  # current, total, filename
+    status_update = Signal(str)               # status message
+    file_modified = Signal(dict)              # per-file modification notification
+    completed = Signal(dict)                  # final results
+    error_occurred = Signal(str)              # error message
+```
+
+**Database methods (PhotoDatabase class):**
+- `get_archive_files_for_change_scan(scan_path, limit, offset)` - Get files with content hashes for scanning
+- `count_archive_files_for_change_scan(scan_path)` - Count files for progress display
+
+**UI location:** Archive Maintenance tab → "Archive Change Detection" group box
+
+**Prerequisites checked at runtime:**
+- Database loaded
+- Backup location configured (warning if not)
+- Prior Revision Archive configured (required)
+- Files have content hashes (suggests backfill if many are NULL)
+
+**Audit logging:**
+- Operation: `'external_modification_detected'`
+- Status: `'revision_created'`, `'original_not_found'`, `'failed'`
+- Import History filter: "External Modifications"
 
 ### Hash History System (Schema v5)
 
@@ -587,6 +629,7 @@ with profile_block("Database query", logger):
 9. **Config passed to worker** - database-bound settings must be explicitly added to config dict
 10. **Content hashing for images only** - `hash_image_content()` returns `None` for videos
 11. **Dialog worker cleanup** - dialogs with QThread workers must implement `closeEvent` with `worker.wait()`
+12. **Large byte values in signals** - use `object` type instead of `int` for byte counts >2GB to avoid 32-bit overflow
 
 ## Known Issues
 
