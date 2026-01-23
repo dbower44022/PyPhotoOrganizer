@@ -653,13 +653,115 @@ class DatabaseMetadata:
             logger.error(f"Failed to create Albums tables: {e}")
             raise
 
+    def _check_schema_upgrades_needed(self) -> list:
+        """
+        Check if any schema upgrades are needed without applying them.
+
+        Returns:
+            List of upgrade descriptions that would be applied, empty if none needed.
+        """
+        upgrades_needed = []
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Check DatabaseMetadata table columns
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='DatabaseMetadata'")
+                if cursor.fetchone():
+                    cursor.execute("PRAGMA table_info(DatabaseMetadata)")
+                    metadata_columns = {row[1] for row in cursor.fetchall()}
+
+                    # List of columns that should exist in DatabaseMetadata
+                    expected_metadata_columns = {
+                        'video_archive_location', 'prior_revision_archive_location',
+                        'separate_video_archive', 'organization_template',
+                        'file_type_organization', 'user_specified_unreliable_paths',
+                        'filename_template', 'enable_file_rename', 'ignored_directories',
+                        'thumbnail_size', 'thumbnail_cache_dir', 'preview_window_geometry',
+                        'preview_window_visible', 'cache_memory_mb', 'cache_worker_threads',
+                        'delete_vault_location', 'photo_review_state', 'content_hash_enabled',
+                        'backup_location', 'last_backup_timestamp', 'last_backup_status'
+                    }
+
+                    missing_metadata = expected_metadata_columns - metadata_columns
+                    if missing_metadata:
+                        upgrades_needed.append(f"DatabaseMetadata: add columns {', '.join(sorted(missing_metadata))}")
+
+                # Check SourceDirectories table columns
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='SourceDirectories'")
+                if cursor.fetchone():
+                    cursor.execute("PRAGMA table_info(SourceDirectories)")
+                    source_columns = {row[1] for row in cursor.fetchall()}
+
+                    expected_source_columns = {'album_id', 'enable_sub_albums'}
+                    missing_source = expected_source_columns - source_columns
+                    if missing_source:
+                        upgrades_needed.append(f"SourceDirectories: add columns {', '.join(sorted(missing_source))}")
+
+                # Check UnreliableDates table columns
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='UnreliableDates'")
+                if cursor.fetchone():
+                    cursor.execute("PRAGMA table_info(UnreliableDates)")
+                    unreliable_columns = {row[1] for row in cursor.fetchall()}
+
+                    expected_unreliable_columns = {'original_archive_path'}
+                    missing_unreliable = expected_unreliable_columns - unreliable_columns
+                    if missing_unreliable:
+                        upgrades_needed.append(f"UnreliableDates: add columns {', '.join(sorted(missing_unreliable))}")
+
+                # Check ThumbnailCache table for old schema
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ThumbnailCache'")
+                if cursor.fetchone():
+                    cursor.execute("PRAGMA table_info(ThumbnailCache)")
+                    cache_columns = {row[1] for row in cursor.fetchall()}
+
+                    if 'size' in cache_columns and 'thumbnail_size' not in cache_columns:
+                        upgrades_needed.append("ThumbnailCache: migrate to new schema")
+
+                # Check for missing tables
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                existing_tables = {row[0] for row in cursor.fetchall()}
+
+                expected_tables = {
+                    'DatabaseMetadata', 'SourceDirectories', 'SourceDirectorySubAlbums',
+                    'PendingOperations', 'AuditQueue', 'QuickBackups', 'UnreliableDates',
+                    'FileRenameHistory', 'ThumbnailCache', 'DeletedFiles', 'FileVersions',
+                    'SavedQueries', 'Albums', 'AlbumPhotos'
+                }
+
+                missing_tables = expected_tables - existing_tables
+                if missing_tables:
+                    upgrades_needed.append(f"Create tables: {', '.join(sorted(missing_tables))}")
+
+        except Exception as e:
+            logger.warning(f"Could not check schema upgrades: {e}")
+
+        return upgrades_needed
+
     def ensure_all_tables(self):
         """
         Ensure all required tables exist in the database.
         This includes both DatabaseMetadata and UniquePhotos tables.
         Useful for upgrading old databases.
+
+        Creates a backup before applying schema changes if any are needed.
         """
         try:
+            # Check if any schema upgrades are needed
+            upgrades_needed = self._check_schema_upgrades_needed()
+
+            if upgrades_needed:
+                logger.info(f"Schema upgrades needed: {upgrades_needed}")
+
+                # Create a backup before making schema changes
+                success, result = self.create_quick_backup(reason="pre_schema_upgrade")
+                if success:
+                    logger.info(f"Created pre-upgrade backup: {result}")
+                else:
+                    # Log warning but continue - backup failure shouldn't block upgrades
+                    logger.warning(f"Could not create pre-upgrade backup: {result}")
+
             # Ensure metadata table exists
             self._ensure_metadata_table()
 

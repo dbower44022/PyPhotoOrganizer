@@ -6,8 +6,9 @@ Launch the graphical user interface for PyPhotoOrganizer.
 """
 
 import sys
+import time
 from PySide6.QtWidgets import QApplication, QSplashScreen, QLabel
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QElapsedTimer
 from PySide6.QtGui import QPixmap, QPalette, QColor, QFont
 
 
@@ -65,8 +66,22 @@ def main():
     update_splash("Initializing user interface...")
     window = MainWindow(splash_callback=update_splash)
 
-    # Close splash and show main window
-    splash.finish(window)
+    # Show "Ready" message and keep splash visible for 3 seconds total
+    update_splash("Ready!")
+    elapsed = QElapsedTimer()
+    elapsed.start()
+    while elapsed.elapsed() < 3000:  # 3 seconds
+        app.processEvents()
+        time.sleep(0.05)  # Small sleep to avoid busy-waiting
+
+    # Close splash before showing database selector
+    splash.close()
+    app.processEvents()
+
+    # Show database selector (blocks until user selects or cancels)
+    window.select_database_on_startup()
+
+    # Show main window (only reached if database was selected)
     window.show()
 
     sys.exit(app.exec())

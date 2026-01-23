@@ -50,10 +50,6 @@ class MainWindow(QMainWindow):
         if self.splash_callback:
             self.splash_callback("Loading settings...")
 
-        # Show database selector - deferred until after splash closes
-        # Use QTimer to show it after the splash screen finishes
-        QTimer.singleShot(100, self.select_database_on_startup)
-
     def init_ui(self):
         """Initialize the user interface."""
         self.setWindowTitle("PyPhotoOrganizer")
@@ -363,7 +359,12 @@ class MainWindow(QMainWindow):
                 "• Create a new database\n\n"
                 "The application will now close."
             )
-            QApplication.quit()
+            # Close window and quit - use singleShot to ensure message box closes first
+            QTimer.singleShot(0, self._quit_application)
+
+    def _quit_application(self):
+        """Close the application after user cancelled database selection."""
+        sys.exit(0)
 
     def set_database(self, database_path):
         """
