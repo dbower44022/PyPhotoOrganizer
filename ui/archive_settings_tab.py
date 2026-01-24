@@ -2,7 +2,8 @@
 Archive Settings Tab for PyPhotoOrganizer GUI
 
 Manages archive-related settings including:
-- Archive Location (read-only display from database)
+- Archive Location (with file verification when changing locations)
+- Prior Revision Archive location
 - Organization Settings (folder structure presets + custom templates with preview)
 - File Type Organization (combined/subfolder/separate archive for videos)
 - File Renaming settings (enable checkbox, template editor, preview)
@@ -64,7 +65,7 @@ class ArchiveSettingsTab(QWidget):
 
         archive_info = QLabel(
             "The archive location is where your organized photos are stored.\n"
-            "This location is permanently bound to the database."
+            "You can change this if you've moved your archive to a new location."
         )
         archive_info.setWordWrap(True)
         archive_info.setStyleSheet("color: #666; font-size: 11px; margin-bottom: 5px;")
@@ -78,7 +79,7 @@ class ArchiveSettingsTab(QWidget):
         archive_path_layout.addWidget(self.archive_path_edit)
 
         self.browse_archive_btn = QPushButton("Browse...")
-        self.browse_archive_btn.setToolTip("Archive location is managed by the database")
+        self.browse_archive_btn.setToolTip("Select or change the archive location")
         self.browse_archive_btn.clicked.connect(self.on_browse_archive_clicked)
         archive_path_layout.addWidget(self.browse_archive_btn)
 
@@ -467,17 +468,297 @@ class ArchiveSettingsTab(QWidget):
 
     def on_browse_archive_clicked(self):
         """Handle browse button click for archive location."""
-        archive_location = self.archive_path_edit.text()
+        if self.db_metadata is None:
+            QMessageBox.information(
+                self,
+                "No Database Loaded",
+                "Please load or create a database first before setting an archive location."
+            )
+            return
 
-        QMessageBox.information(
+        current_location = self.archive_path_edit.text()
+        metadata = self.db_metadata.get_metadata()
+        total_photos = metadata.get('total_photos', 0) if metadata else 0
+
+        # Show dialog explaining what changing archive location does
+        if total_photos > 0:
+            reply = QMessageBox.question(
+                self,
+                "Change Archive Location",
+                f"This archive contains {total_photos} files.\n\n"
+                "Changing the archive location updates where the database expects to find files. "
+                "This is useful when:\n"
+                "• You've moved your archive to a new drive\n"
+                "• You want to point to a different existing archive\n\n"
+                "Note: This does NOT move files automatically. If you've moved files, "
+                "select the new location where they now reside.\n\n"
+                "Would you like to select a new archive location?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+        else:
+            # No files yet, simpler message
+            reply = QMessageBox.question(
+                self,
+                "Set Archive Location",
+                "This will set where your organized photos will be stored.\n\n"
+                "Select the folder you want to use as your photo archive.\n\n"
+                "Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        # Get starting directory for file dialog
+        start_dir = current_location if current_location and os.path.exists(current_location) else os.path.expanduser("~")
+
+        folder = QFileDialog.getExistingDirectory(
             self,
-            "Archive Location Managed by Database",
-            f"The archive location is controlled by the database you selected.\n\n"
-            f"Current archive: {archive_location if archive_location else 'Not set'}\n"
-            f"Database: {self.db_metadata.get_metadata().get('database_name', 'Unknown') if self.db_metadata else 'No database loaded'}\n\n"
-            f"To change the archive location, you would need to migrate your archive.\n"
-            f"This feature will be available in a future update."
+            "Select Archive Location",
+            start_dir
         )
+
+        # User cancelled
+        if not folder:
+            return
+
+        # Validate the selected path
+        if not os.path.exists(folder):
+            QMessageBox.warning(
+                self,
+                "Invalid Path",
+                f"The specified path does not exist:\n\n{folder}\n\nPlease create the directory first or select an existing one."
+            )
+            return
+
+        if not os.path.isdir(folder):
+            QMessageBox.warning(
+                self,
+                "Invalid Path",
+                f"The specified path is not a directory:\n\n{folder}"
+            )
+            return
+
+        if not os.access(folder, os.W_OK):
+            QMessageBox.warning(
+                self,
+                "Permission Error",
+                f"The specified path is not writable:\n\n{folder}\n\nPlease check permissions."
+            )
+            return
+
+        # Check for conflicts with Prior Revision Archive
+        prior_archive = self.db_metadata.get_prior_revision_archive_location()
+        if prior_archive:
+            prior_real = os.path.realpath(prior_archive)
+            folder_real = os.path.realpath(folder)
+
+            if folder_real == prior_real:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Configuration",
+                    "Archive location cannot be the same as the Prior Revision Archive.\n\n"
+                    "Please select a different location."
+                )
+                return
+
+            if prior_real.startswith(folder_real + os.sep):
+                QMessageBox.warning(
+                    self,
+                    "Invalid Configuration",
+                    "The Prior Revision Archive is inside this folder.\n\n"
+                    "This could cause issues. Please select a different location or "
+                    "change the Prior Revision Archive first."
+                )
+                return
+
+        # Check for conflicts with Video Archive
+        video_archive = self.db_metadata.get_video_archive_location()
+        if video_archive:
+            video_real = os.path.realpath(video_archive)
+            folder_real = os.path.realpath(folder)
+
+            if folder_real == video_real:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Configuration",
+                    "Archive location cannot be the same as the Video Archive.\n\n"
+                    "Please select a different location."
+                )
+                return
+
+        # Verify files exist at new location if there are files in the database
+        if total_photos > 0:
+            verification_result = self._verify_archive_files_at_location(
+                current_location, folder, sample_size=min(100, total_photos)
+            )
+
+            if verification_result['checked'] > 0:
+                found = verification_result['found']
+                missing = verification_result['missing']
+                checked = verification_result['checked']
+
+                if missing > 0:
+                    # Some files are missing - warn user
+                    percentage_found = (found / checked) * 100
+
+                    if found == 0:
+                        # No files found at new location
+                        reply = QMessageBox.warning(
+                            self,
+                            "No Files Found",
+                            f"None of the {checked} sampled files were found at the new location.\n\n"
+                            f"This suggests the files have not been moved to:\n{folder}\n\n"
+                            "Are you sure you want to change the archive location?\n"
+                            "This may make your existing photos inaccessible.",
+                            QMessageBox.Yes | QMessageBox.No,
+                            QMessageBox.No
+                        )
+                        if reply != QMessageBox.Yes:
+                            return
+                    else:
+                        # Partial files found
+                        reply = QMessageBox.warning(
+                            self,
+                            "Some Files Missing",
+                            f"Verification Results:\n"
+                            f"• Checked: {checked} files (sample)\n"
+                            f"• Found: {found} ({percentage_found:.1f}%)\n"
+                            f"• Missing: {missing}\n\n"
+                            f"Some files were not found at the new location.\n"
+                            f"Missing files will not be accessible until they are moved.\n\n"
+                            "Do you want to proceed anyway?",
+                            QMessageBox.Yes | QMessageBox.No,
+                            QMessageBox.No
+                        )
+                        if reply != QMessageBox.Yes:
+                            return
+                else:
+                    # All sampled files found - show confirmation
+                    logger.info(f"Archive verification: {found}/{checked} sampled files found at {folder}")
+
+        # All validation passed - save to database
+        success = self.db_metadata.update_archive_location(folder)
+
+        if success:
+            # Update UI
+            self.archive_path_edit.setText(folder)
+            if os.path.exists(folder):
+                self.archive_status_label.setText("✓ Archive folder exists")
+                self.archive_status_label.setStyleSheet("font-size: 10px; color: green; margin-top: 5px;")
+            else:
+                self.archive_status_label.setText("⚠ Warning: Archive folder does not exist!")
+                self.archive_status_label.setStyleSheet("font-size: 10px; color: red; margin-top: 5px;")
+
+            if total_photos > 0:
+                QMessageBox.information(
+                    self,
+                    "Archive Location Updated",
+                    f"Archive location has been updated to:\n\n{folder}\n\n"
+                    "If you moved your files to this location, they should now be accessible.\n"
+                    "If files are missing, use Photo Review to verify the archive contents."
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "Archive Location Set",
+                    f"Archive location has been set to:\n\n{folder}\n\n"
+                    "New photos will be organized into this folder during import."
+                )
+            logger.info(f"Archive location updated: {folder}")
+        else:
+            self.archive_status_label.setText("✗ Failed to save configuration")
+            self.archive_status_label.setStyleSheet("font-size: 10px; color: red; margin-top: 5px;")
+            QMessageBox.critical(
+                self,
+                "Error",
+                "Failed to save archive location.\n\nCheck the log for details."
+            )
+
+    def _verify_archive_files_at_location(self, old_location: str, new_location: str,
+                                          sample_size: int = 100) -> dict:
+        """
+        Verify that archive files exist at the new location.
+
+        Gets a sample of files from the database and checks if they exist
+        at the corresponding paths in the new location.
+
+        Args:
+            old_location: Current archive location stored in database
+            new_location: New location to verify files at
+            sample_size: Number of files to sample for verification
+
+        Returns:
+            dict with keys:
+                - checked: Number of files checked
+                - found: Number of files found at new location
+                - missing: Number of files not found
+                - missing_files: List of missing file paths (up to 10)
+        """
+        result = {
+            'checked': 0,
+            'found': 0,
+            'missing': 0,
+            'missing_files': []
+        }
+
+        if not old_location or not new_location:
+            return result
+
+        try:
+            from DuplicateFileDetection import PhotoDatabase
+
+            # Get sample of files from database
+            db = PhotoDatabase(self.db_metadata.db_path)
+
+            # Query for a sample of files
+            db.cursor.execute(
+                """SELECT file_name FROM UniquePhotos
+                   WHERE file_name LIKE ? || '%'
+                   AND revised_photo IS NULL
+                   LIMIT ?""",
+                (old_location + os.sep if not old_location.endswith(os.sep) else old_location,
+                 sample_size)
+            )
+            files = db.cursor.fetchall()
+            db.close()
+
+            # Normalize paths for comparison
+            old_location_normalized = os.path.normpath(old_location)
+            new_location_normalized = os.path.normpath(new_location)
+
+            for (file_path,) in files:
+                result['checked'] += 1
+
+                # Calculate expected path at new location
+                file_path_normalized = os.path.normpath(file_path)
+
+                if file_path_normalized.startswith(old_location_normalized):
+                    # Get relative path from old archive
+                    relative_path = file_path_normalized[len(old_location_normalized):].lstrip(os.sep)
+                    # Build expected path at new location
+                    expected_path = os.path.join(new_location_normalized, relative_path)
+
+                    if os.path.exists(expected_path):
+                        result['found'] += 1
+                    else:
+                        result['missing'] += 1
+                        if len(result['missing_files']) < 10:
+                            result['missing_files'].append(relative_path)
+                else:
+                    # File path doesn't match old location - skip it
+                    result['checked'] -= 1
+                    logger.warning(f"File path doesn't match old location: {file_path}")
+
+        except Exception as e:
+            logger.error(f"Error verifying archive files: {e}")
+            # Return empty result on error - don't block the operation
+            return result
+
+        return result
 
     # ========== Organization Template Methods ==========
 
