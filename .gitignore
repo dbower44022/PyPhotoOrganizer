@@ -190,3 +190,9 @@ main_app_error.log.1
 main_app_error.log.3
 
 main_app_error.log.2
+
+photo_filter.log.3
+
+*.2
+
+*.1

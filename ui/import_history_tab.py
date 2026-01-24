@@ -1383,9 +1383,9 @@ class ImportHistoryTab(QWidget):
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
 
-            # Get all file logs for this session
+            # Get all file logs for this session (use high limit to get all records)
             with profile_block(f"Database query - get_file_logs_for_session({self.current_session_id})", logger):
-                all_logs = self.audit_manager.get_file_logs_for_session(self.current_session_id)
+                all_logs = self.audit_manager.get_file_logs_for_session(self.current_session_id, limit=500000)
 
             logger.info(f"📊 Loaded {len(all_logs)} records for session {self.current_session_id}")
 
