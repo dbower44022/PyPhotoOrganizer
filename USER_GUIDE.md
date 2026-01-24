@@ -2208,7 +2208,16 @@ rm *.log *.log.*
 **A:** No. On next startup, the application detects incomplete operations and offers to recover them. Files that were successfully copied are preserved, and partially-copied files are cleaned up. You can then re-run the import to continue where it left off.
 
 ### Q: Can I change the archive location?
-**A:** Each database is bound to its archive location. Create a new database for a different location, or manually move files and update paths.
+**A:** Yes! Starting with version 3.4, the database stores relative paths which makes it portable. If you move your archive:
+1. Move the archive files to the new location
+2. Open the database in PyPhotoOrganizer
+3. Go to Archive Settings and update the archive location to the new path
+4. The database will automatically resolve all paths using the new location
+
+For databases created before v3.4, run the migration first:
+```bash
+python -m migrations.schema_v6_relative_paths /path/to/PhotoDB.db
+```
 
 ### Q: Why are some photos marked "suspicious date"?
 **A:** Dates before 1990, after next year, or exactly 1970-01-01 are flagged as likely incorrect.
@@ -2247,6 +2256,7 @@ rm *.log *.log.*
 | 2.3.1 | Log rotation |
 | 3.0.3 | Prior Revision Archive system |
 | 3.3 | Content-based duplicate detection |
+| 3.4 | Relative path storage for archive portability |
 | 3.4 | Archive Change Detection for external modifications |
 | 3.5 | Database health checks, automatic backups, crash recovery, copy verification |
 | 3.6 | Bulk Delete Matching Files for removing archive files that match a reference folder |

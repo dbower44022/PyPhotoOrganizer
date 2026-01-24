@@ -2,7 +2,7 @@
 
 > Code reference and API documentation for developers
 
-**Last Updated:** 2026-01-13
+**Last Updated:** 2026-01-23
 
 ---
 
@@ -15,6 +15,7 @@
 - [DuplicateFileDetection.py](#duplicatefiledetectionpy)
 - [photo_filter.py](#photo_filterpy)
 - [image_modifier.py (NEW v2.4)](#image_modifierpy)
+- [path_resolver.py (NEW v6)](#path_resolverpy-new-v6)
 - [database_metadata.py](#database_metadatapy)
 - [main.py](#mainpy)
 - [Usage Examples](#usage-examples)
@@ -30,6 +31,9 @@ PyPhotoOrganizer/
 ├── utils.py             # Shared utilities
 ├── DuplicateFileDetection.py  # Core duplicate detection
 ├── photo_filter.py      # Photo filtering logic
+├── path_resolver.py     # Relative path resolution (v6)
+├── database_metadata.py # Database metadata management
+├── album_manager.py     # Album management
 └── main.py              # Main orchestration
 ```
 
@@ -1373,6 +1377,178 @@ if success:
 
 ---
 
+## path_resolver.py (NEW v6)
+
+Resolves relative paths to absolute paths using base locations from DatabaseMetadata. Enables portable databases that work when archives are moved.
+
+### PathResolver Class
+
+Path resolution for portable database storage.
+
+#### Constructor
+
+```python
+PathResolver(db_metadata: DatabaseMetadata)
+```
+
+**Parameters:**
+- `db_metadata` (DatabaseMetadata): DatabaseMetadata instance for accessing base locations
+
+**Example:**
+```python
+from path_resolver import PathResolver
+from database_metadata import DatabaseMetadata
+
+db_metadata = DatabaseMetadata('PhotoDB.db')
+resolver = PathResolver(db_metadata)
+```
+
+---
+
+#### resolve()
+
+```python
+def resolve(self, relative_path: str, storage_type: str) -> Optional[str]
+```
+
+**Purpose**: Convert relative path to absolute using appropriate base.
+
+**Parameters:**
+- `relative_path` (str): Path relative to storage base (e.g., `'2024/01/15/photo.jpg'`)
+- `storage_type` (str): One of `'archive'`, `'video_archive'`, `'prior_revision'`
+
+**Returns:**
+- Absolute path, or None if base is not configured
+
+**Example:**
+```python
+# Resolve archive path
+abs_path = resolver.resolve('2024/01/15/photo.jpg', 'archive')
+# Result: '/mnt/photos/archive/2024/01/15/photo.jpg'
+
+# Resolve video archive path
+video_path = resolver.resolve('2024/01/vacation.mp4', 'video_archive')
+```
+
+---
+
+#### make_relative()
+
+```python
+def make_relative(self, absolute_path: str) -> Tuple[Optional[str], str]
+```
+
+**Purpose**: Convert absolute path to (relative_path, storage_type) tuple.
+
+**Parameters:**
+- `absolute_path` (str): Full path to file
+
+**Returns:**
+- Tuple of (relative_path, storage_type)
+- Returns (None, 'unknown') if no matching base found
+
+**Storage type detection priority:**
+1. `prior_revision` (checked first - may be subdirectory)
+2. `video_archive`
+3. `archive`
+4. `unknown` (fallback)
+
+**Example:**
+```python
+rel_path, storage_type = resolver.make_relative('/mnt/photos/archive/2024/01/15/photo.jpg')
+# Result: ('2024/01/15/photo.jpg', 'archive')
+```
+
+---
+
+#### resolve_album()
+
+```python
+def resolve_album(self, relative_path: str, album_id: int) -> Optional[str]
+```
+
+**Purpose**: Resolve relative path using album's storage_location.
+
+**Parameters:**
+- `relative_path` (str): Path relative to album storage
+- `album_id` (int): Album ID
+
+**Returns:**
+- Absolute path, or None if album not found
+
+**Example:**
+```python
+album_file = resolver.resolve_album('photo.jpg', album_id=5)
+```
+
+---
+
+#### resolve_vault()
+
+```python
+def resolve_vault(self, relative_path: str) -> Optional[str]
+```
+
+**Purpose**: Resolve relative path using delete vault location.
+
+**Parameters:**
+- `relative_path` (str): Path relative to delete vault
+
+**Returns:**
+- Absolute path, or None if vault not configured
+
+---
+
+#### invalidate_cache()
+
+```python
+def invalidate_cache(self) -> None
+```
+
+**Purpose**: Clear cached base locations.
+
+**When to call:** After archive locations are changed in settings.
+
+---
+
+#### get_storage_type_for_path()
+
+```python
+def get_storage_type_for_path(self, absolute_path: str) -> str
+```
+
+**Purpose**: Determine storage type for an absolute path.
+
+**Returns:**
+- Storage type string: `'archive'`, `'video_archive'`, `'prior_revision'`, or `'unknown'`
+
+---
+
+#### is_path_in_archive()
+
+```python
+def is_path_in_archive(self, absolute_path: str) -> bool
+```
+
+**Purpose**: Check if path is within managed archive locations.
+
+**Returns:**
+- True if path is in archive, video_archive, or prior_revision
+
+---
+
+### Constants
+
+```python
+PathResolver.STORAGE_ARCHIVE = 'archive'
+PathResolver.STORAGE_VIDEO_ARCHIVE = 'video_archive'
+PathResolver.STORAGE_PRIOR_REVISION = 'prior_revision'
+PathResolver.STORAGE_UNKNOWN = 'unknown'
+PathResolver.VALID_STORAGE_TYPES = {'archive', 'video_archive', 'prior_revision'}
+```
+
+---
+
 ## database_metadata.py
 
 Database metadata and configuration management, including version synchronization (v2.4+).
@@ -1432,6 +1608,74 @@ if synced > 0:
     print("Duplicate detection now works for all versions")
 else:
     print("All versions already synced")
+```
+
+---
+
+#### needs_relative_path_migration() (NEW v6)
+
+```python
+def needs_relative_path_migration(self) -> bool
+```
+
+**Purpose**: Check if the database needs Schema v6 relative path migration.
+
+**Returns:**
+- `bool`: True if there are records with NULL relative_path that need migration
+
+**Example:**
+```python
+from database_metadata import DatabaseMetadata
+
+db = DatabaseMetadata('PhotoDB.db')
+if db.needs_relative_path_migration():
+    print("Database needs migration to relative paths")
+```
+
+---
+
+#### run_relative_path_migration() (NEW v6)
+
+```python
+def run_relative_path_migration(
+    self,
+    dry_run: bool = False,
+    progress_callback: callable = None
+) -> Tuple[bool, str]
+```
+
+**Purpose**: Run the Schema v6 relative path migration.
+
+**Parameters:**
+- `dry_run` (bool): If True, analyze but don't make changes
+- `progress_callback` (callable): Optional callback(current, total, message) for progress updates
+
+**Returns:**
+- Tuple of (success: bool, message: str)
+
+**Migration Process:**
+1. Creates pre-migration backup
+2. Reads archive locations from DatabaseMetadata
+3. Converts absolute paths to relative paths
+4. Detects storage type for each path
+5. Updates all affected tables (UniquePhotos, UnreliableDates, AlbumPhotos, DeletedFiles)
+
+**Example:**
+```python
+from database_metadata import DatabaseMetadata
+
+db = DatabaseMetadata('PhotoDB.db')
+
+# Dry run first
+success, message = db.run_relative_path_migration(dry_run=True)
+print(message)
+
+# Actual migration
+success, message = db.run_relative_path_migration(dry_run=False)
+if success:
+    print("Migration completed successfully")
+else:
+    print(f"Migration failed: {message}")
 ```
 
 ---

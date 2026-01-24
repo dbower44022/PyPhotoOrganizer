@@ -5,6 +5,76 @@ All notable changes to PyPhotoOrganizer will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] - 2026-01-23
+
+### Added
+
+**Schema v6: Relative Path Storage for Archive Portability**
+
+Database paths are now stored as relative paths, enabling archives to be moved or accessed from different mount points without breaking the database.
+
+**Core Feature:**
+- **Relative Paths**: Files stored as `2024/01/15/photo.jpg` instead of `/mnt/nas/photos/2024/01/15/photo.jpg`
+- **Storage Types**: Each file tagged as 'archive', 'video_archive', or 'prior_revision'
+- **Runtime Resolution**: `PathResolver` class reconstructs full paths at runtime using current base locations
+- **Backward Compatible**: Existing absolute paths preserved; new code reads relative paths when available
+
+**Database Changes (Schema v6):**
+- Added `relative_path` and `storage_type` columns to `UniquePhotos` table
+- Added `relative_album_path` column to `AlbumPhotos` table
+- Added `relative_archive_path`, `relative_vault_path`, `archive_storage_type` columns to `DeletedFiles` table
+- Added `relative_archive_path` column to `UnreliableDates` table
+- Auto-migration for column creation on database open
+
+**New Module (`path_resolver.py`):**
+- `PathResolver` class for resolving relative paths to absolute
+- `resolve(relative_path, storage_type)` - Convert relative to absolute
+- `make_relative(absolute_path)` - Convert absolute to (relative, storage_type) tuple
+- `resolve_album(relative_path, album_id)` - Resolve album paths
+- `resolve_vault(relative_path)` - Resolve delete vault paths
+- Base location caching for performance
+
+**Migration Support:**
+- New `migrations/` package with `schema_v6_relative_paths.py`
+- `DatabaseMetadata.needs_relative_path_migration()` - Check if migration needed
+- `DatabaseMetadata.run_relative_path_migration()` - Run migration programmatically
+- Command-line migration: `python -m migrations.schema_v6_relative_paths /path/to/db`
+- Automatic backup creation before migration
+- Dry-run mode for preview
+
+**Method Updates (DuplicateFileDetection.py):**
+- `insert_unique_photo()` - Added `relative_path`, `storage_type` parameters
+- `create_revision()` - Added `relative_path`, `storage_type` parameters
+- `get_file_path_for_hash()` - Added optional `path_resolver` parameter for resolution
+- `get_archive_files_for_change_scan()` - Added `storage_type` filter parameter
+- `count_archive_files_for_change_scan()` - Added `storage_type` filter parameter
+
+**Import Flow Updates (main.py):**
+- `organize_files()` now calculates and stores relative paths
+- Updates both absolute and relative paths in database
+- Syncs relative paths to `UnreliableDates` table
+
+**Use Cases:**
+- Moving archive to new drive or mount point
+- Accessing archive from different machines with different paths
+- NAS/network storage with changing mount points
+- Backup/restore of archive to different location
+
+**Files Created:**
+- `path_resolver.py` - PathResolver class
+- `migrations/__init__.py` - Migrations package
+- `migrations/schema_v6_relative_paths.py` - Migration script
+
+**Files Modified:**
+- `DuplicateFileDetection.py` - Schema v6 columns and methods
+- `database_metadata.py` - Schema v6 columns, migration methods, mark_file_as_deleted update
+- `main.py` - Relative path storage in organize_files()
+- `album_manager.py` - Store relative_album_path in add_photo_to_album()
+- `CLAUDE.md` - Documentation updates
+- `ARCHITECTURE.md` - Documentation updates
+
+---
+
 ## [3.3.0] - 2026-01-21
 
 ### Added

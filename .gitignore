@@ -180,3 +180,13 @@ PhotoDB_V3-1TestDB.db
 PhotoDB_TestDB_02.db
 
 PhotoDB_BowerFamilyPhotArchive.db
+
+db_snapshots/db_snapshot_20260123_132017_pre_schema_upgrade_7e5be021.db
+
+*.db
+
+main_app_error.log.1
+
+main_app_error.log.3
+
+main_app_error.log.2

@@ -427,15 +427,27 @@ class AlbumManager:
             # Insert database record
             with self._get_connection() as conn:
                 cursor = conn.cursor()
+
+                # Schema v6: Calculate relative path for portable storage
+                relative_album_path = None
+                try:
+                    relative_album_path = os.path.relpath(album_file_path, storage_location)
+                    # Normalize to forward slashes for cross-platform storage
+                    relative_album_path = relative_album_path.replace(os.sep, '/')
+                except ValueError:
+                    # Different drives on Windows - just store None
+                    pass
+
                 cursor.execute("""
                     INSERT INTO AlbumPhotos (
-                        album_id, file_hash, album_file_path, added_timestamp
-                    ) VALUES (?, ?, ?, ?)
+                        album_id, file_hash, album_file_path, added_timestamp, relative_album_path
+                    ) VALUES (?, ?, ?, ?, ?)
                 """, (
                     album_id,
                     file_hash,
                     album_file_path,
-                    datetime.now().isoformat()
+                    datetime.now().isoformat(),
+                    relative_album_path
                 ))
                 conn.commit()
 

@@ -2,8 +2,8 @@
 
 > Technical design, architecture, and implementation details
 
-**Last Updated:** 2026-01-14
-**Version:** 3.0.0
+**Last Updated:** 2026-01-23
+**Version:** 3.4.0
 
 ---
 
@@ -19,6 +19,7 @@
 - [Security Architecture](#security-architecture)
 - [Error Handling Strategy](#error-handling-strategy)
 - [Design Decisions](#design-decisions)
+- [Relative Path Storage (Schema v6)](#relative-path-storage-schema-v6)
 
 ---
 
@@ -328,6 +329,38 @@ safe_get_file_size(file_path)
   → Returns None on error (not 0)
 ```
 
+### path_resolver.py (v6)
+
+**Responsibility:** Resolve relative paths to absolute using archive base locations
+
+**Key Classes:**
+- `PathResolver` - Path resolution for portable database storage
+
+**Key Methods:**
+```python
+resolve(relative_path, storage_type)
+  → Converts relative path to absolute using appropriate base
+  → Storage types: 'archive', 'video_archive', 'prior_revision'
+
+make_relative(absolute_path)
+  → Converts absolute path to (relative_path, storage_type) tuple
+  → Checks bases in priority order: prior_revision > video_archive > archive
+
+resolve_album(relative_path, album_id)
+  → Resolves path using album's storage_location
+
+resolve_vault(relative_path)
+  → Resolves path using delete vault location
+
+invalidate_cache()
+  → Clears cached base locations (call when archive moves)
+```
+
+**Design:**
+- Caches base locations to avoid repeated database queries
+- Normalizes paths to forward slashes for cross-platform storage
+- Falls back gracefully when bases not configured
+
 ---
 
 ## Data Flow
@@ -493,18 +526,27 @@ CREATE TABLE SourceDirectories (
 );
 ```
 
-**Table: UniquePhotos** (v1.0+)
+**Table: UniquePhotos** (v1.0+, updated v6)
 ```sql
 CREATE TABLE UniquePhotos (
     file_hash TEXT PRIMARY KEY,           -- Full SHA-256 hash
     partial_hash TEXT,                    -- First 16KB SHA-256 hash
     partial_hash_bytes INTEGER,           -- Bytes used for partial hash
     file_size INTEGER,                    -- File size in bytes
-    file_name TEXT NOT NULL,              -- Full file path (archive location)
+    file_name TEXT NOT NULL,              -- Full file path (archive location) - kept for backward compatibility
+    source_path TEXT,                     -- Original import source location (remains absolute)
+    revised_photo TEXT,                   -- Parent file hash for revisions (NULL if original)
+    revision_reason TEXT,                 -- Why revision was created ('rotation', 'exif_edit', etc.)
+    revision_timestamp TEXT,              -- When revision was created
     create_datetime TEXT,                 -- ISO 8601 timestamp
     create_year TEXT,                     -- YYYY
     create_month TEXT,                    -- MM (zero-padded)
-    create_day TEXT                       -- DD (zero-padded)
+    create_day TEXT,                      -- DD (zero-padded)
+    content_hash TEXT,                    -- SHA-256 of normalized pixel content (Schema v5)
+    relative_path TEXT,                   -- Path relative to archive base (Schema v6)
+    storage_type TEXT,                    -- 'archive', 'video_archive', or 'prior_revision' (Schema v6)
+    FOREIGN KEY (revised_photo) REFERENCES UniquePhotos(file_hash),
+    CHECK (revised_photo IS NULL OR revision_reason IS NOT NULL)
 );
 
 -- Performance indexes
@@ -512,16 +554,21 @@ CREATE INDEX idx_partial_hash ON UniquePhotos(partial_hash);
 CREATE INDEX idx_file_size ON UniquePhotos(file_size);
 CREATE INDEX idx_date ON UniquePhotos(create_year, create_month, create_day);
 CREATE INDEX idx_file_name ON UniquePhotos(file_name);
+CREATE INDEX idx_content_hash ON UniquePhotos(content_hash);
+CREATE INDEX idx_storage_type ON UniquePhotos(storage_type);
+CREATE INDEX idx_revised ON UniquePhotos(revised_photo);
+CREATE INDEX idx_source ON UniquePhotos(source_path);
 ```
 
-**Table: UnreliableDates** (v2.2+)
+**Table: UnreliableDates** (v2.2+, updated v6)
 ```sql
 CREATE TABLE UnreliableDates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     file_hash TEXT NOT NULL,              -- Links to UniquePhotos
-    source_path TEXT NOT NULL,            -- Original source location
+    source_path TEXT NOT NULL,            -- Original source location (absolute, not portable)
     archive_path TEXT,                    -- Archive location (initially NULL, updated after organization)
     original_archive_path TEXT,           -- Path before reorganization (audit trail)
+    relative_archive_path TEXT,           -- Relative path for portability (Schema v6)
     original_date TEXT,                   -- YYYY-MM-DD originally detected
     date_source TEXT,                     -- 'exif', 'iptc', 'video_metadata', 'os_metadata', 'fallback'
     flag_reason TEXT NOT NULL,            -- 'no_exif', 'year_1000', 'suspicious', 'user_specified'
@@ -1853,6 +1900,196 @@ Existing databases automatically upgraded:
 1. FileHashHistory table created
 2. All existing UniquePhotos records copied with `reason='migration'`
 3. No manual action required
+
+---
+
+## Relative Path Storage (Schema v6)
+
+### Purpose
+
+Enable portable databases that work when archives are moved to different locations, mount points, or accessed from different machines.
+
+### Problem
+
+Schema v5 and earlier store absolute paths (e.g., `/mnt/nas/photos/2024/01/15/photo.jpg`). This causes problems when:
+- The archive is moved to a different location
+- Network drives have different mount points on reboot
+- The archive is accessed from different machines
+
+### Solution: Relative Paths + PathResolver
+
+Store **relative paths** (e.g., `2024/01/15/photo.jpg`) alongside absolute paths and construct full paths at runtime.
+
+### Schema Changes
+
+**UniquePhotos** (new columns):
+```sql
+relative_path TEXT,    -- Path relative to archive base: '2024/01/15/photo.jpg'
+storage_type TEXT      -- 'archive', 'video_archive', or 'prior_revision'
+```
+
+**AlbumPhotos** (new column):
+```sql
+relative_album_path TEXT  -- Path relative to album's storage_location
+```
+
+**DeletedFiles** (new columns):
+```sql
+relative_archive_path TEXT,    -- Original path relative to archive base
+relative_vault_path TEXT,      -- Path relative to delete vault
+archive_storage_type TEXT      -- Storage type of original file
+```
+
+**UnreliableDates** (new column):
+```sql
+relative_archive_path TEXT     -- Synced with UniquePhotos.relative_path
+```
+
+### PathResolver Module
+
+New module `path_resolver.py` provides the `PathResolver` class:
+
+```python
+from path_resolver import PathResolver
+from database_metadata import DatabaseMetadata
+
+db_metadata = DatabaseMetadata(database_path)
+resolver = PathResolver(db_metadata)
+
+# Resolve relative path to absolute
+abs_path = resolver.resolve('2024/01/15/photo.jpg', 'archive')
+# Result: '/mnt/photos/archive/2024/01/15/photo.jpg'
+
+# Convert absolute to relative
+rel_path, storage_type = resolver.make_relative('/mnt/photos/archive/2024/01/15/photo.jpg')
+# Result: ('2024/01/15/photo.jpg', 'archive')
+
+# Album paths
+album_path = resolver.resolve_album('photo.jpg', album_id=5)
+
+# Delete vault paths
+vault_path = resolver.resolve_vault('2024/01/15/photo.jpg')
+```
+
+**Key Methods:**
+| Method | Purpose |
+|--------|---------|
+| `resolve(relative_path, storage_type)` | Convert relative to absolute |
+| `make_relative(absolute_path)` | Convert absolute to (relative, type) tuple |
+| `resolve_album(relative_path, album_id)` | Resolve album relative path |
+| `resolve_vault(relative_path)` | Resolve vault relative path |
+| `invalidate_cache()` | Clear cached base locations |
+| `is_path_in_archive(path)` | Check if path is in managed locations |
+
+### Storage Type Detection
+
+When converting absolute paths, bases are checked in priority order:
+
+1. **prior_revision** (first - may be subdirectory of archive)
+2. **video_archive**
+3. **archive**
+4. **unknown** (fallback)
+
+### Dual-Column Strategy
+
+Both absolute and relative paths are stored for backward compatibility:
+
+```sql
+-- New code writes both columns
+UPDATE UniquePhotos
+SET file_name = '/mnt/photos/2024/01/15/photo.jpg',
+    relative_path = '2024/01/15/photo.jpg',
+    storage_type = 'archive'
+WHERE file_hash = ?;
+```
+
+**Reading Strategy:**
+1. If `relative_path` and `storage_type` exist AND PathResolver provided → resolve
+2. Otherwise → use `file_name` (absolute path) directly
+
+### Path Normalization
+
+All stored relative paths use forward slashes for cross-platform compatibility:
+```python
+relative_path = os.path.relpath(target_path, base)
+relative_path = relative_path.replace(os.sep, '/')  # Always use '/'
+```
+
+### Migration for Existing Databases
+
+**Automatic column creation:** Schema columns added via `ALTER TABLE` on database open.
+
+**Data migration script:** `migrations/schema_v6_relative_paths.py`
+
+```python
+# Check if migration needed
+from database_metadata import DatabaseMetadata
+db = DatabaseMetadata(database_path)
+if db.needs_relative_path_migration():
+    success, message = db.run_relative_path_migration()
+
+# Or via command line
+python -m migrations.schema_v6_relative_paths /path/to/PhotoDB.db --dry-run
+python -m migrations.schema_v6_relative_paths /path/to/PhotoDB.db
+```
+
+**Migration process:**
+1. Create pre-migration backup
+2. Read archive locations from DatabaseMetadata
+3. For each record in UniquePhotos:
+   - Detect storage type from absolute path
+   - Compute relative path using `os.path.relpath()`
+   - Update record with relative_path and storage_type
+4. Repeat for UnreliableDates, AlbumPhotos, DeletedFiles
+5. Report statistics
+
+### Query Pattern Changes
+
+**Before (Schema v5):** LIKE-based prefix matching
+```sql
+WHERE file_name LIKE '/mnt/photos/2024/' || '%'
+```
+
+**After (Schema v6):** Storage type filtering
+```sql
+WHERE storage_type = 'archive'
+  AND relative_path LIKE '2024/%'
+```
+
+### Error Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| `relative_path` is NULL | Fall back to `file_name` (absolute) |
+| `storage_type` is 'unknown' | Log warning, fall back to absolute |
+| Base location not configured | Return None from resolve(), use absolute |
+| Different drives (Windows) | `os.path.relpath()` raises ValueError → store NULL |
+
+### Integration Points
+
+**Import (`main.py:organize_files()`):**
+```python
+relative_path = os.path.relpath(target_path, base_destination)
+relative_path = relative_path.replace(os.sep, '/')
+storage_type = 'video_archive' if is_video_destination else 'archive'
+
+cursor.execute("""
+    UPDATE UniquePhotos
+    SET file_name = ?, relative_path = ?, storage_type = ?
+    WHERE file_hash = ?
+""", (target_path, relative_path, storage_type, file_hash))
+```
+
+**File operations (PhotoDatabase):**
+```python
+def get_file_path_for_hash(self, file_hash, path_resolver=None):
+    # Prefer resolved relative path, fall back to absolute
+    if relative_path and storage_type and path_resolver:
+        resolved = path_resolver.resolve(relative_path, storage_type)
+        if resolved:
+            return resolved
+    return file_name  # Fallback
+```
 
 ---
 

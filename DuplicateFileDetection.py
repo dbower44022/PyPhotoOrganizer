@@ -183,10 +183,25 @@ class PhotoDatabase:
                 logger.info("Upgrading database: adding content_hash column")
                 self.cursor.execute("ALTER TABLE UniquePhotos ADD COLUMN content_hash TEXT")
 
+            # Schema v6: Add relative_path and storage_type columns for portable paths
+            if 'relative_path' not in columns:
+                logger.info("Upgrading database to Schema v6: adding relative_path column")
+                self.cursor.execute("ALTER TABLE UniquePhotos ADD COLUMN relative_path TEXT")
+
+            if 'storage_type' not in columns:
+                logger.info("Upgrading database to Schema v6: adding storage_type column")
+                self.cursor.execute("ALTER TABLE UniquePhotos ADD COLUMN storage_type TEXT")
+
             # Create index for content hash lookups
             self.cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_unique_content_hash
                 ON UniquePhotos(content_hash)
+            ''')
+
+            # Schema v6: Create index for storage_type lookups
+            self.cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_unique_storage_type
+                ON UniquePhotos(storage_type)
             ''')
 
             self.conn.commit()
@@ -227,13 +242,13 @@ class PhotoDatabase:
 
     def insert_unique_photo(self, file_hash, file_path, create_datetime, create_year, create_month, create_day,
                            partial_hash=None, partial_hash_bytes=None, file_size=None, source_path=None,
-                           content_hash=None):
+                           content_hash=None, relative_path=None, storage_type=None):
         """
-        Insert a new unique photo record into the database (Schema v5).
+        Insert a new unique photo record into the database (Schema v6).
 
         Parameters:
             file_hash (str): SHA-256 hash of the full file
-            file_path (str): Full path to the file (archive location)
+            file_path (str): Full path to the file (archive location) - kept for backward compatibility
             create_datetime (str): Creation date in YYYY-MM-DD format
             create_year (str): Year as string
             create_month (str): Month as zero-padded string
@@ -243,21 +258,25 @@ class PhotoDatabase:
             file_size (int, optional): File size in bytes
             source_path (str, optional): Original import source location
             content_hash (str, optional): SHA-256 hash of normalized pixel content
+            relative_path (str, optional): Path relative to archive base (Schema v6)
+            storage_type (str, optional): Storage type: 'archive', 'video_archive', or 'prior_revision' (Schema v6)
         """
         try:
-            # Insert into UniquePhotos (v5 schema)
+            # Insert into UniquePhotos (v6 schema with relative paths)
             # revised_photo=NULL, revision_reason=NULL (this is an original import, not a revision)
             self.cursor.execute(
                 """INSERT INTO UniquePhotos
                    (file_hash, partial_hash, partial_hash_bytes, file_size, file_name, source_path,
                     revised_photo, revision_reason, revision_timestamp,
-                    create_datetime, create_year, create_month, create_day, content_hash)
-                   VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?)""",
+                    create_datetime, create_year, create_month, create_day, content_hash,
+                    relative_path, storage_type)
+                   VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)""",
                 (file_hash, partial_hash, partial_hash_bytes, file_size, file_path, source_path,
-                 create_datetime, create_year, create_month, create_day, content_hash)
+                 create_datetime, create_year, create_month, create_day, content_hash,
+                 relative_path, storage_type)
             )
 
-            logger.debug(f"Inserted unique photo: {file_path} (partial_hash: {partial_hash is not None}, source: {source_path}, content_hash: {content_hash is not None})")
+            logger.debug(f"Inserted unique photo: {file_path} (partial_hash: {partial_hash is not None}, source: {source_path}, content_hash: {content_hash is not None}, relative_path: {relative_path})")
         except sqlite3.IntegrityError:
             # Hash already exists (PRIMARY KEY constraint)
             logger.warning(f"Attempted to insert duplicate hash: {file_hash}")
@@ -285,20 +304,39 @@ class PhotoDatabase:
             logger.exception(f"Failed to check if hash exists: {e}")
             raise
 
-    def get_file_path_for_hash(self, file_hash):
+    def get_file_path_for_hash(self, file_hash, path_resolver=None):
         """
         Get the file path for a given hash.
 
+        Schema v6: If a path_resolver is provided and the record has relative_path/storage_type,
+        the path is resolved using the current archive location. Otherwise falls back to file_name.
+
         Parameters:
             file_hash (str): SHA-256 hash to look up
+            path_resolver (PathResolver, optional): PathResolver instance for resolving relative paths
 
         Returns:
             str or None: File path if found, None otherwise
         """
         try:
-            self.cursor.execute("SELECT file_name FROM UniquePhotos WHERE file_hash = ? LIMIT 1", (file_hash,))
+            self.cursor.execute(
+                "SELECT file_name, relative_path, storage_type FROM UniquePhotos WHERE file_hash = ? LIMIT 1",
+                (file_hash,)
+            )
             result = self.cursor.fetchone()
-            return result[0] if result else None
+            if not result:
+                return None
+
+            file_name, relative_path, storage_type = result
+
+            # Prefer relative path if available and resolver provided
+            if relative_path and storage_type and path_resolver:
+                resolved = path_resolver.resolve(relative_path, storage_type)
+                if resolved:
+                    return resolved
+
+            # Fall back to absolute path (file_name)
+            return file_name
         except Exception as e:
             logger.debug(f"Failed to get file path for hash: {e}")
             return None
@@ -444,39 +482,61 @@ class PhotoDatabase:
             logger.exception(f"Failed to count files without content hash: {e}")
             raise
 
-    def get_archive_files_for_change_scan(self, scan_path: str, limit: int = 100, offset: int = 0):
+    def get_archive_files_for_change_scan(self, scan_path: str, limit: int = 100, offset: int = 0,
+                                          storage_type: str = None):
         """
         Get files for change scanning that have content hashes.
 
         Used by the Archive Change Scanner to detect external modifications.
         Only returns files within the specified path that have content hashes.
 
+        Schema v6: Can filter by storage_type for better performance. If storage_type is provided,
+        uses relative_path matching instead of absolute file_name LIKE matching.
+
         Parameters:
             scan_path (str): Path to scan (archive root or specific subfolder)
             limit (int): Maximum number of records to return (batch size)
             offset (int): Starting position for pagination
+            storage_type (str, optional): Filter by storage type ('archive', 'video_archive', 'prior_revision')
 
         Returns:
             list: List of dicts with file info including:
                   file_hash, file_name, content_hash, source_path,
-                  create_datetime, create_year, create_month, create_day
+                  create_datetime, create_year, create_month, create_day,
+                  relative_path, storage_type
         """
         try:
             # Ensure scan_path ends with separator for proper LIKE matching
             if not scan_path.endswith(os.sep):
                 scan_path = scan_path + os.sep
 
-            self.cursor.execute(
-                """SELECT file_hash, file_name, content_hash, source_path,
-                          create_datetime, create_year, create_month, create_day,
-                          file_size
-                   FROM UniquePhotos
-                   WHERE file_name LIKE ? || '%'
-                     AND content_hash IS NOT NULL
-                   ORDER BY file_name
-                   LIMIT ? OFFSET ?""",
-                (scan_path, limit, offset)
-            )
+            # Schema v6: If storage_type is specified, we can use it for filtering
+            if storage_type:
+                self.cursor.execute(
+                    """SELECT file_hash, file_name, content_hash, source_path,
+                              create_datetime, create_year, create_month, create_day,
+                              file_size, relative_path, storage_type
+                       FROM UniquePhotos
+                       WHERE storage_type = ?
+                         AND content_hash IS NOT NULL
+                       ORDER BY file_name
+                       LIMIT ? OFFSET ?""",
+                    (storage_type, limit, offset)
+                )
+            else:
+                # Fallback to LIKE matching for backward compatibility
+                self.cursor.execute(
+                    """SELECT file_hash, file_name, content_hash, source_path,
+                              create_datetime, create_year, create_month, create_day,
+                              file_size, relative_path, storage_type
+                       FROM UniquePhotos
+                       WHERE file_name LIKE ? || '%'
+                         AND content_hash IS NOT NULL
+                       ORDER BY file_name
+                       LIMIT ? OFFSET ?""",
+                    (scan_path, limit, offset)
+                )
+
             results = self.cursor.fetchall()
             return [
                 {
@@ -488,7 +548,9 @@ class PhotoDatabase:
                     "create_year": row[5],
                     "create_month": row[6],
                     "create_day": row[7],
-                    "file_size": row[8]
+                    "file_size": row[8],
+                    "relative_path": row[9],
+                    "storage_type": row[10]
                 }
                 for row in results
             ]
@@ -496,30 +558,44 @@ class PhotoDatabase:
             logger.exception(f"Failed to get archive files for change scan: {e}")
             raise
 
-    def count_archive_files_for_change_scan(self, scan_path: str) -> int:
+    def count_archive_files_for_change_scan(self, scan_path: str, storage_type: str = None) -> int:
         """
         Count files in the scan path that have content hashes.
 
         Used for progress display during archive change scanning.
 
+        Schema v6: Can filter by storage_type for better performance.
+
         Parameters:
             scan_path (str): Path to scan (archive root or specific subfolder)
+            storage_type (str, optional): Filter by storage type ('archive', 'video_archive', 'prior_revision')
 
         Returns:
             int: Count of files with content_hash in the specified path
         """
         try:
-            # Ensure scan_path ends with separator for proper LIKE matching
-            if not scan_path.endswith(os.sep):
-                scan_path = scan_path + os.sep
+            # Schema v6: If storage_type is specified, we can use it for filtering
+            if storage_type:
+                self.cursor.execute(
+                    """SELECT COUNT(*)
+                       FROM UniquePhotos
+                       WHERE storage_type = ?
+                         AND content_hash IS NOT NULL""",
+                    (storage_type,)
+                )
+            else:
+                # Fallback to LIKE matching for backward compatibility
+                # Ensure scan_path ends with separator for proper LIKE matching
+                if not scan_path.endswith(os.sep):
+                    scan_path = scan_path + os.sep
 
-            self.cursor.execute(
-                """SELECT COUNT(*)
-                   FROM UniquePhotos
-                   WHERE file_name LIKE ? || '%'
-                     AND content_hash IS NOT NULL""",
-                (scan_path,)
-            )
+                self.cursor.execute(
+                    """SELECT COUNT(*)
+                       FROM UniquePhotos
+                       WHERE file_name LIKE ? || '%'
+                         AND content_hash IS NOT NULL""",
+                    (scan_path,)
+                )
             result = self.cursor.fetchone()
             return result[0] if result else 0
         except Exception as e:
@@ -528,9 +604,10 @@ class PhotoDatabase:
 
     def create_revision(self, new_file_hash, parent_hash, revision_reason, file_path, file_size,
                        create_datetime, create_year, create_month, create_day,
-                       partial_hash=None, partial_hash_bytes=None):
+                       partial_hash=None, partial_hash_bytes=None,
+                       relative_path=None, storage_type=None):
         """
-        Insert a new revision record into UniquePhotos (Schema v5).
+        Insert a new revision record into UniquePhotos (Schema v6).
 
         Used when creating rotated, cropped, or EXIF-edited versions of photos.
         The new file gets its own UniquePhotos record linked to parent via revised_photo.
@@ -547,6 +624,8 @@ class PhotoDatabase:
             create_day (str): Day as zero-padded string
             partial_hash (str, optional): SHA-256 hash of first N bytes
             partial_hash_bytes (int, optional): Number of bytes used for partial hash
+            relative_path (str, optional): Path relative to archive base (Schema v6)
+            storage_type (str, optional): Storage type: 'archive', 'video_archive', or 'prior_revision' (Schema v6)
 
         Returns:
             bool: True if successful, False otherwise
@@ -558,11 +637,13 @@ class PhotoDatabase:
                 """INSERT INTO UniquePhotos
                    (file_hash, partial_hash, partial_hash_bytes, file_size, file_name, source_path,
                     revised_photo, revision_reason, revision_timestamp,
-                    create_datetime, create_year, create_month, create_day)
-                   VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)""",
+                    create_datetime, create_year, create_month, create_day,
+                    relative_path, storage_type)
+                   VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (new_file_hash, partial_hash, partial_hash_bytes, file_size, file_path,
                  parent_hash, revision_reason, revision_timestamp,
-                 create_datetime, create_year, create_month, create_day)
+                 create_datetime, create_year, create_month, create_day,
+                 relative_path, storage_type)
             )
 
             logger.info(f"Created revision: {new_file_hash[:16]}... (parent: {parent_hash[:16]}..., reason: {revision_reason})")

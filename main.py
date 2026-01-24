@@ -515,15 +515,23 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                                 with sqlite3.connect(database_path) as conn:
                                     cursor = conn.cursor()
 
-                                    # Update UniquePhotos table with archive path
+                                    # Schema v6: Calculate relative path and storage type
+                                    relative_path = os.path.relpath(target_path, base_destination)
+                                    # Normalize to forward slashes for cross-platform storage
+                                    relative_path = relative_path.replace(os.sep, '/')
+                                    # Determine storage type based on which archive we're using
+                                    is_video_destination = (base_destination == video_archive_location) if video_archive_enabled and video_archive_location else False
+                                    storage_type = 'video_archive' if is_video_destination else 'archive'
+
+                                    # Update UniquePhotos table with archive path and relative path
                                     cursor.execute("""
                                         UPDATE UniquePhotos
-                                        SET file_name = ?
+                                        SET file_name = ?, relative_path = ?, storage_type = ?
                                         WHERE file_hash = ?
-                                    """, (target_path, file_hash))
+                                    """, (target_path, relative_path, storage_type, file_hash))
 
                                     if cursor.rowcount > 0:
-                                        logger.debug(f"✓ Updated UniquePhotos.file_name: {file_hash[:16]}... -> {target_path}")
+                                        logger.debug(f"✓ Updated UniquePhotos: {file_hash[:16]}... -> {target_path} (relative: {relative_path}, type: {storage_type})")
                                     else:
                                         logger.warning(f"File not found in UniquePhotos: {file_hash[:16]}...")
 
@@ -554,14 +562,15 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                                     if unreliable_record:
                                         logger.info(f"Found file in UnreliableDates: hash={file_hash[:16]}..., current archive_path={unreliable_record[1]}")
 
+                                        # Schema v6: Update both absolute and relative paths
                                         cursor.execute("""
                                             UPDATE UnreliableDates
-                                            SET archive_path = ?
+                                            SET archive_path = ?, relative_archive_path = ?
                                             WHERE file_hash = ?
-                                        """, (target_path, file_hash))
+                                        """, (target_path, relative_path, file_hash))
 
                                         if cursor.rowcount > 0:
-                                            logger.info(f"✓ Updated UnreliableDates.archive_path: {file_hash[:16]}... -> {target_path}")
+                                            logger.info(f"✓ Updated UnreliableDates: {file_hash[:16]}... -> {target_path} (relative: {relative_path})")
 
                                     conn.commit()
 

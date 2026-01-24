@@ -52,6 +52,7 @@ python main.py              # CLI mode
 | `exif_writer.py` | `write_exif_date()`, `read_exif_date()` |
 | `audit_manager.py` | `AuditManager`: session tracking, file operation logging |
 | `album_manager.py` | `AlbumManager`: album CRUD, photo-to-album operations |
+| `path_resolver.py` | `PathResolver`: resolves relative paths to absolute using archive base locations (Schema v6) |
 
 ### GUI Modules (ui/)
 
@@ -78,7 +79,7 @@ All tables in SQLite database (default: `PhotoDB.db`):
 | Table | Purpose |
 |-------|---------|
 | `DatabaseMetadata` | Archive location, settings, schema version |
-| `UniquePhotos` | File hashes, paths, creation dates, revision tracking, content_hash (Schema v5) |
+| `UniquePhotos` | File hashes, paths, creation dates, revision tracking, content_hash, relative_path, storage_type (Schema v6) |
 | `SourceDirectories` | Persistent source folder configs with album associations |
 | `SourceDirectorySubAlbums` | Tracks auto-created sub-albums for source subdirectories |
 | `UnreliableDates` | Files with questionable dates |
@@ -92,6 +93,8 @@ All tables in SQLite database (default: `PhotoDB.db`):
 | `DuplicateMapping` | Original-to-duplicate relationships |
 
 **Note (Schema v5):** The `FileHashHistory` table is no longer used. All hashes (including revision hashes) are stored directly in `UniquePhotos` with `file_hash` as the primary key. The `revised_photo` column links revisions to their parent file.
+
+**Note (Schema v6):** Added relative path storage for archive portability. New columns `relative_path` (path relative to archive base) and `storage_type` ('archive', 'video_archive', or 'prior_revision') enable databases to work when archives are moved. Related tables also have relative path columns: `AlbumPhotos.relative_album_path`, `DeletedFiles.relative_archive_path/relative_vault_path/archive_storage_type`, `UnreliableDates.relative_archive_path`.
 
 ### Database Connection Pattern
 
@@ -585,6 +588,50 @@ is_duplicate = db.has_hash(file_hash)
 ```
 
 The `get_all_historical_hashes()` method returns an empty set for backward compatibility, since all hashes are already in `get_all_hashes()`.
+
+### Relative Path Storage (Schema v6)
+
+Schema v6 stores relative paths alongside absolute paths for archive portability. This enables databases to work when archives are moved or accessed from different machines.
+
+**New columns in UniquePhotos:**
+- `relative_path`: Path relative to archive base (e.g., `2024/01/15/photo.jpg`)
+- `storage_type`: Which base the path is relative to: `'archive'`, `'video_archive'`, or `'prior_revision'`
+
+**PathResolver class (`path_resolver.py`):**
+```python
+from path_resolver import PathResolver
+from database_metadata import DatabaseMetadata
+
+db_metadata = DatabaseMetadata(database_path)
+resolver = PathResolver(db_metadata)
+
+# Convert relative to absolute
+abs_path = resolver.resolve('2024/01/15/photo.jpg', 'archive')
+
+# Convert absolute to relative
+rel_path, storage_type = resolver.make_relative('/mnt/photos/2024/01/15/photo.jpg')
+```
+
+**Storage type detection priority:**
+1. `prior_revision` (check first - may be subdirectory of archive)
+2. `video_archive`
+3. `archive`
+4. `unknown` (fallback if no base matches)
+
+**Migration for existing databases:**
+```python
+from database_metadata import DatabaseMetadata
+
+db = DatabaseMetadata(database_path)
+if db.needs_relative_path_migration():
+    success, message = db.run_relative_path_migration()
+```
+
+Or via command line:
+```bash
+python -m migrations.schema_v6_relative_paths /path/to/PhotoDB.db --dry-run
+python -m migrations.schema_v6_relative_paths /path/to/PhotoDB.db
+```
 
 ### Date Extraction Priority
 

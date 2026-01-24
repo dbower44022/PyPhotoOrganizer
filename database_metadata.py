@@ -522,6 +522,11 @@ class DatabaseMetadata:
                     logger.info("Upgrading database: adding original_archive_path column to UnreliableDates")
                     cursor.execute("ALTER TABLE UnreliableDates ADD COLUMN original_archive_path TEXT")
 
+                # Schema v6: Add relative_archive_path column for portable paths
+                if 'relative_archive_path' not in columns:
+                    logger.info("Upgrading database to Schema v6: adding relative_archive_path column to UnreliableDates")
+                    cursor.execute("ALTER TABLE UnreliableDates ADD COLUMN relative_archive_path TEXT")
+
                 # Create indexes for performance
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_unreliable_hash ON UnreliableDates(file_hash)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_unreliable_needs_reorg ON UnreliableDates(needs_reorganization)")
@@ -595,6 +600,22 @@ class DatabaseMetadata:
                 # Create table if it doesn't exist
                 cursor.execute(self.DELETED_FILES_TABLE_SCHEMA)
 
+                # Schema v6: Add relative path columns for portable paths
+                cursor.execute("PRAGMA table_info(DeletedFiles)")
+                deleted_columns = [row[1] for row in cursor.fetchall()]
+
+                if 'relative_archive_path' not in deleted_columns:
+                    logger.info("Upgrading database to Schema v6: adding relative_archive_path column to DeletedFiles")
+                    cursor.execute("ALTER TABLE DeletedFiles ADD COLUMN relative_archive_path TEXT")
+
+                if 'relative_vault_path' not in deleted_columns:
+                    logger.info("Upgrading database to Schema v6: adding relative_vault_path column to DeletedFiles")
+                    cursor.execute("ALTER TABLE DeletedFiles ADD COLUMN relative_vault_path TEXT")
+
+                if 'archive_storage_type' not in deleted_columns:
+                    logger.info("Upgrading database to Schema v6: adding archive_storage_type column to DeletedFiles")
+                    cursor.execute("ALTER TABLE DeletedFiles ADD COLUMN archive_storage_type TEXT")
+
                 # Create indexes for performance
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_deleted_hash ON DeletedFiles(file_hash)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_deleted_restored ON DeletedFiles(is_restored)")
@@ -638,6 +659,13 @@ class DatabaseMetadata:
 
                 # Create AlbumPhotos table if it doesn't exist
                 cursor.execute(self.ALBUM_PHOTOS_TABLE_SCHEMA)
+
+                # Schema v6: Add relative_album_path column to AlbumPhotos
+                cursor.execute("PRAGMA table_info(AlbumPhotos)")
+                album_photo_columns = [row[1] for row in cursor.fetchall()]
+                if 'relative_album_path' not in album_photo_columns:
+                    logger.info("Upgrading database to Schema v6: adding relative_album_path column to AlbumPhotos")
+                    cursor.execute("ALTER TABLE AlbumPhotos ADD COLUMN relative_album_path TEXT")
 
                 # Create indexes for performance
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_albums_name ON Albums(album_name)")
@@ -705,10 +733,32 @@ class DatabaseMetadata:
                     cursor.execute("PRAGMA table_info(UnreliableDates)")
                     unreliable_columns = {row[1] for row in cursor.fetchall()}
 
-                    expected_unreliable_columns = {'original_archive_path'}
+                    expected_unreliable_columns = {'original_archive_path', 'relative_archive_path'}
                     missing_unreliable = expected_unreliable_columns - unreliable_columns
                     if missing_unreliable:
                         upgrades_needed.append(f"UnreliableDates: add columns {', '.join(sorted(missing_unreliable))}")
+
+                # Check AlbumPhotos table columns (Schema v6)
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='AlbumPhotos'")
+                if cursor.fetchone():
+                    cursor.execute("PRAGMA table_info(AlbumPhotos)")
+                    album_photo_columns = {row[1] for row in cursor.fetchall()}
+
+                    expected_album_photo_columns = {'relative_album_path'}
+                    missing_album_photo = expected_album_photo_columns - album_photo_columns
+                    if missing_album_photo:
+                        upgrades_needed.append(f"AlbumPhotos: add columns {', '.join(sorted(missing_album_photo))}")
+
+                # Check DeletedFiles table columns (Schema v6)
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='DeletedFiles'")
+                if cursor.fetchone():
+                    cursor.execute("PRAGMA table_info(DeletedFiles)")
+                    deleted_columns = {row[1] for row in cursor.fetchall()}
+
+                    expected_deleted_columns = {'relative_archive_path', 'relative_vault_path', 'archive_storage_type'}
+                    missing_deleted = expected_deleted_columns - deleted_columns
+                    if missing_deleted:
+                        upgrades_needed.append(f"DeletedFiles: add columns {', '.join(sorted(missing_deleted))}")
 
                 # Check ThumbnailCache table for old schema
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='ThumbnailCache'")
@@ -776,6 +826,58 @@ class DatabaseMetadata:
         except Exception as e:
             logger.error(f"Failed to ensure all tables: {e}")
             return False
+
+    def needs_relative_path_migration(self) -> bool:
+        """
+        Check if the database needs Schema v6 relative path migration.
+
+        Returns:
+            True if there are records with NULL storage_type that need migration
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Check if UniquePhotos table exists and has records needing migration
+                # Use storage_type IS NULL as the indicator (not relative_path)
+                # because relative_path can legitimately be NULL for 'unknown' storage types
+                cursor.execute("""
+                    SELECT COUNT(*) FROM UniquePhotos
+                    WHERE storage_type IS NULL AND file_name IS NOT NULL
+                """)
+                count = cursor.fetchone()[0]
+                return count > 0
+
+        except Exception as e:
+            logger.warning(f"Could not check migration status: {e}")
+            return False
+
+    def run_relative_path_migration(self, dry_run: bool = False,
+                                    progress_callback: callable = None) -> tuple:
+        """
+        Run the Schema v6 relative path migration.
+
+        This populates relative_path and storage_type columns from existing absolute paths.
+
+        Args:
+            dry_run: If True, analyze but don't make changes
+            progress_callback: Optional callback(current, total, message) for progress updates
+
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        try:
+            from migrations.schema_v6_relative_paths import migrate_to_relative_paths
+
+            return migrate_to_relative_paths(
+                self.database_path,
+                dry_run=dry_run,
+                progress_callback=progress_callback
+            )
+        except ImportError as e:
+            return False, f"Migration module not found: {e}"
+        except Exception as e:
+            return False, f"Migration failed: {e}"
 
     def initialize_metadata(self, database_name: str, archive_location: str,
                           description: str = "") -> bool:
@@ -2927,7 +3029,7 @@ class DatabaseMetadata:
 
             # Get file info from UniquePhotos if available
             cursor.execute("""
-                SELECT file_size, create_year, create_month, create_day
+                SELECT file_size, create_year, create_month, create_day, relative_path, storage_type
                 FROM UniquePhotos
                 WHERE file_hash = ?
             """, (file_hash,))
@@ -2939,15 +3041,30 @@ class DatabaseMetadata:
                 # Convert month/day to int for formatting (they're stored as TEXT in database)
                 creation_date = f"{photo_info[1]}-{int(photo_info[2]):02d}-{int(photo_info[3]):02d}"
 
-            # Insert deletion record
+            # Schema v6: Get relative paths
+            relative_archive_path = photo_info[4] if photo_info else None
+            archive_storage_type = photo_info[5] if photo_info else None
+
+            # Calculate relative vault path
+            relative_vault_path = None
+            delete_vault = self.get_delete_vault_location()
+            if delete_vault and vault_path:
+                try:
+                    relative_vault_path = os.path.relpath(vault_path, delete_vault)
+                    relative_vault_path = relative_vault_path.replace(os.sep, '/')
+                except ValueError:
+                    pass  # Different drives on Windows
+
+            # Insert deletion record with relative paths
             now = datetime.now().isoformat()
             cursor.execute("""
                 INSERT INTO DeletedFiles
                     (file_hash, original_archive_path, delete_vault_path,
                      deletion_timestamp, deletion_reason, file_size, creation_date,
-                     is_restored)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-            """, (file_hash, original_path, vault_path, now, reason, file_size, creation_date))
+                     is_restored, relative_archive_path, relative_vault_path, archive_storage_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+            """, (file_hash, original_path, vault_path, now, reason, file_size, creation_date,
+                  relative_archive_path, relative_vault_path, archive_storage_type))
 
             conn.commit()
             conn.close()
