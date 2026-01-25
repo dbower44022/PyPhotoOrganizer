@@ -11,17 +11,19 @@
 7. [Source Folders](#source-folders)
 8. [Album Association for Source Folders](#album-association-for-source-folders)
 9. [Processing Photos](#processing-photos)
-10. [Import History](#import-history)
-11. [Photo Review App](#photo-review-app)
-12. [Date Corrections (in Photo Review App)](#date-corrections)
-13. [File Version Management](#file-version-management)
-14. [Prior Revision Archive System](#prior-revision-archive-system)
-15. [Archive Change Detection](#archive-change-detection)
-16. [Bulk Delete Matching Files](#bulk-delete-matching-files)
-17. [Delete Vault and File Recovery](#delete-vault-and-file-recovery)
-18. [Settings](#settings)
-19. [Troubleshooting](#troubleshooting)
-20. [FAQ](#faq)
+10. [How the System Determines Photo Date](#how-the-system-determines-photo-date)
+11. [Import History](#import-history)
+12. [Photo Review App](#photo-review-app)
+13. [Date Corrections (in Photo Review App)](#date-corrections)
+14. [File Version Management](#file-version-management)
+15. [Prior Revision Archive System](#prior-revision-archive-system)
+16. [Archive Change Detection](#archive-change-detection)
+17. [Bulk Delete Matching Files](#bulk-delete-matching-files)
+18. [Delete Vault and File Recovery](#delete-vault-and-file-recovery)
+19. [Settings](#settings)
+20. [Troubleshooting](#troubleshooting)
+21. [Recovering from Data or Storage Corruption](#recovering-from-data-or-storage-corruption)
+22. [FAQ](#faq)
 
 ---
 
@@ -611,7 +613,192 @@ Click "Stop" to halt processing. Progress is saved to the database, so you can r
 2. **Filtering**: Removes non-photos (icons, thumbnails, web graphics)
 3. **Hashing**: Calculates unique fingerprint for each file
 4. **Duplicate Detection**: Compares against database of known files
-5. **Organizing**: Copies unique files to archive in date-based folders
+5. **Date Extraction**: Determines when each photo was originally taken
+6. **Organizing**: Copies unique files to archive in date-based folders
+
+---
+
+## How the System Determines Photo Date
+
+One of PyPhotoOrganizer's most important functions is determining **when a photo was originally taken**. This date is used to organize your photos into Year/Month/Day folders. Getting this right is crucial for a well-organized archive.
+
+### Why Date Detection Matters
+
+When you copy photos from different sources (phones, cameras, cloud backups), the operating system often assigns new file dates:
+
+| Scenario | OS File Date | Actual Photo Date |
+|----------|--------------|-------------------|
+| Copy from phone to computer | Today's date | Date photo was taken |
+| Download from cloud backup | Download date | Original capture date |
+| Restore from backup | Restore date | Original capture date |
+| Receive via email/messaging | Date received | Date photo was taken |
+
+If we only used OS file dates, your photos would be organized by when you *copied* them, not when you *took* them. PyPhotoOrganizer solves this by reading the **embedded metadata** in each file.
+
+### Date Sources (In Priority Order)
+
+#### For Photos (Images)
+
+The system reads dates from multiple embedded metadata sources and uses an intelligent algorithm to select the most accurate one:
+
+| Priority | Source | Description | Reliability |
+|----------|--------|-------------|-------------|
+| 1 | **EXIF DateTimeOriginal** | When the camera shutter clicked | Highest |
+| 2 | **EXIF DateTimeDigitized** | When the image was digitized | High |
+| 3 | **EXIF GPS DateTime** | GPS timestamp (UTC) | High |
+| 4 | **EXIF DateTime** | File modification time in EXIF | Medium |
+| 5 | **EXIF PreviewDateTime** | When preview was generated | Low |
+| 6 | **IPTC Date Created** | Publishing/editorial date | Medium |
+| 7 | **OS File Metadata** | Operating system timestamps | Low |
+| 8 | **Year 1000 Fallback** | Indicates no date found | None |
+
+**The Selection Algorithm:**
+
+1. If **DateTimeOriginal** exists and is valid, use it (this is the most authoritative source - it's when the shutter actually clicked)
+
+2. If DateTimeOriginal is missing, the system uses the **earliest valid date** among the remaining EXIF fields
+
+   *Why earliest?* A photo can only be modified *after* it was created. If a file shows DateTime as 2021 but DateTimeDigitized as 2013, the 2013 date is more likely to be the original capture date.
+
+3. If no valid EXIF dates exist, try IPTC metadata
+
+4. If no embedded metadata exists, fall back to OS file timestamps
+
+#### For Videos
+
+Videos don't have EXIF data, so the system uses different sources:
+
+| Priority | Source | Description |
+|----------|--------|-------------|
+| 1 | **ffprobe** | `creation_time` tag from video metadata |
+| 2 | **mutagen** | `©day` tag for MP4/MOV files |
+| 3 | **QuickTime atoms** | Direct reading of `mvhd` atom |
+| 4 | **OS File Metadata** | Operating system timestamps |
+| 5 | **Year 1000 Fallback** | Indicates no date found |
+
+### Understanding EXIF Date Fields
+
+Digital cameras and phones store multiple date fields in EXIF metadata:
+
+| Field | What It Records | When It Changes |
+|-------|-----------------|-----------------|
+| **DateTimeOriginal** | When you pressed the shutter button | Never (unless EXIF is edited) |
+| **DateTimeDigitized** | When the image was digitized | Same as Original for digital cameras; different for scans |
+| **DateTime** | Last modification time | Updated when photo is edited |
+| **GPSDateTime** | GPS timestamp when photo was taken | Requires location services enabled |
+| **PreviewDateTime** | When thumbnail/preview was created | When software regenerates preview |
+
+**Example**: You take a photo on December 14, 2013, then edit it on June 15, 2021:
+- DateTimeOriginal: 2013-12-14 17:05:19 (unchanged)
+- DateTime: 2021-06-15 10:30:00 (updated by editing software)
+
+The system correctly identifies 2013-12-14 as the original date.
+
+### Date Validation
+
+Not all dates found in files are trustworthy. The system validates each date:
+
+| Check | Reason |
+|-------|--------|
+| **Year 1990-present** | Consumer digital cameras didn't exist before ~1990 |
+| **Not future dates** | Year > current+1 indicates clock error |
+| **Not Unix epoch** | 1970-01-01 00:00:00 indicates unset date |
+| **Not null date** | 0000-00-00 00:00:00 indicates missing data |
+| **Parseable format** | Must match `YYYY:MM:DD HH:MM:SS` format |
+
+### When Dates Are Flagged as Unreliable
+
+Some photos are flagged for manual review because their dates may be incorrect:
+
+| Flag Reason | What It Means | Common Causes |
+|-------------|---------------|---------------|
+| **no_exif** | No EXIF metadata found | Screenshots, web images, very old digital photos |
+| **suspicious** | Date fails validation | Camera clock was wrong, corrupted metadata |
+| **year_1000** | Complete failure to find date | Heavily processed images, unusual formats |
+| **user_specified** | File is in a path you marked as unreliable | Scanned photos, downloaded images |
+
+Flagged files appear in the **Photo Review** app where you can manually correct dates.
+
+### Common Scenarios
+
+#### Scenario 1: Photo with Complete Metadata
+```
+File: IMG_1234.jpg
+EXIF DateTimeOriginal: 2019-07-04 14:30:22
+EXIF DateTimeDigitized: 2019-07-04 14:30:22
+EXIF DateTime: 2019-07-04 14:30:22
+OS Modified: 2024-01-15 09:00:00
+
+Result: Uses 2019-07-04 (DateTimeOriginal)
+Archived to: 2019/07Jul/04/
+```
+
+#### Scenario 2: Edited Photo (DateTime Updated)
+```
+File: vacation_edited.jpg
+EXIF DateTimeOriginal: 2018-08-15 10:45:00
+EXIF DateTime: 2023-03-20 16:00:00 (when you edited it)
+OS Modified: 2024-01-15 09:00:00
+
+Result: Uses 2018-08-15 (DateTimeOriginal takes priority)
+Archived to: 2018/08Aug/15/
+```
+
+#### Scenario 3: No DateTimeOriginal
+```
+File: old_camera_photo.jpg
+EXIF DateTimeOriginal: (missing)
+EXIF DateTimeDigitized: 2005-12-25 08:30:00
+EXIF DateTime: 2010-06-01 12:00:00
+OS Modified: 2024-01-15 09:00:00
+
+Result: Uses 2005-12-25 (earliest EXIF date)
+Archived to: 2005/12Dec/25/
+```
+
+#### Scenario 4: No EXIF Data
+```
+File: screenshot.png
+EXIF: (none)
+IPTC: (none)
+OS Created: 2024-01-10 15:30:00
+OS Modified: 2024-01-10 15:30:00
+
+Result: Uses 2024-01-10 (OS metadata), flagged as unreliable
+Archived to: 2024/01Jan/10/
+Status: Flagged for review (no_exif)
+```
+
+#### Scenario 5: Scanned Photo
+```
+File: grandma_1965.jpg
+EXIF DateTimeOriginal: 2023-11-15 14:00:00 (scan date!)
+OS Modified: 2023-11-15 14:00:00
+
+Result: Uses 2023-11-15 (only date available)
+Archived to: 2023/11Nov/15/
+Recommendation: Manually correct to actual photo date
+```
+
+### Viewing Date Source Information
+
+After import, you can see which date source was used for each file:
+
+1. **Import History Tab**: Shows date source in file details
+2. **Photo Review App**: Preview panel shows "Detected Date" with source
+3. **Database**: `date_source` field records: `exif`, `exif_digitized`, `exif_gps`, `exif_datetime`, `iptc`, `video_metadata`, `os_metadata`, or `fallback`
+
+### Tips for Best Results
+
+1. **Preserve EXIF data**: When editing photos, use software that preserves original EXIF metadata
+
+2. **Set camera clocks correctly**: Ensure your camera/phone has the correct date and time
+
+3. **Review flagged files**: After import, check files flagged as unreliable in Photo Review
+
+4. **Mark known-unreliable folders**: Use the source folder settings to mark folders containing scans or downloads as "unreliable dates"
+
+5. **Don't strip metadata**: Avoid tools that remove EXIF data when sharing photos
 
 ---
 
@@ -2166,6 +2353,447 @@ rm *.log *.log.*
 
 ---
 
+## Recovering from Data or Storage Corruption
+
+This section provides comprehensive guidance for recovering from various corruption scenarios. While PyPhotoOrganizer includes multiple layers of protection, storage failures, power outages, and other issues can still cause problems. This guide covers detection, recovery, and prevention for all types of data corruption.
+
+### Quick Reference: What Was Corrupted?
+
+| Symptom | Likely Cause | Solution |
+|---------|--------------|----------|
+| "File is not a database" error | Database corruption | [Automatic Recovery](#database-corruption-automatic-recovery) |
+| "Disk I/O error" during import | Database or disk issue | [Database Corruption](#database-corruption-automatic-recovery) |
+| Photos missing from archive | Archive corruption or accidental deletion | [Archive Corruption](#archive-corruption) |
+| Backup operation fails | Backup location corruption | [Backup Location Corruption](#backup-location-corruption) |
+| Can't restore deleted files | Delete Vault corruption | [Delete Vault Corruption](#delete-vault-corruption) |
+| Original versions missing | Prior Revision Archive corruption | [Prior Revision Archive Corruption](#prior-revision-archive-corruption) |
+| Duplicate/conflicted files appear | Cloud sync conflict | [Cloud Sync Conflicts](#cloud-sync-conflicts) |
+
+---
+
+### Database Corruption (Automatic Recovery)
+
+PyPhotoOrganizer now includes **automatic database corruption recovery**. When you attempt to open a corrupted database, the system will detect the problem and offer to restore from the most recent valid backup.
+
+#### What Triggers Automatic Recovery
+
+The system detects corruption when it encounters these errors:
+- "File is not a database"
+- "Disk I/O error"
+- "Database disk image is malformed"
+- "Database or disk is full"
+- "Unable to open database"
+
+#### Automatic Recovery Process
+
+When corruption is detected, the following happens automatically:
+
+1. **Backup Detection**: The system scans the `db_snapshots/` directory for available backups
+2. **Backup Validation**: Each backup is tested with SQLite integrity checks until a valid one is found
+3. **User Confirmation**: A dialog shows:
+   - When the backup was created
+   - Why it was created (e.g., "pre import")
+   - How many photos are in the backup
+   - The backup file size
+
+4. **Restoration**: If you confirm:
+   - The corrupted database is renamed with `.corrupted_TIMESTAMP` suffix
+   - The backup is copied to the original location
+   - Any leftover WAL/SHM files are cleaned up
+
+5. **Orphaned File Recovery**: After restoration, you're offered an **archive scan** to recover files that were imported after the backup was created:
+   - The system scans your entire archive
+   - Files not in the restored database are identified as "orphaned"
+   - Orphaned files are added back to the database with recovery metadata
+   - You can view recovered files in Import History under "Archive Recovery" filter
+
+#### Example Recovery Dialog
+
+```
+Database Corruption Detected
+
+The database file is corrupted and cannot be opened.
+
+Error: Not a valid SQLite database: file is not a database
+
+A backup is available:
+  • Created: 2024-01-15 at 14:30:22
+  • Reason: pre import
+  • Photos: 66,709
+  • Size: 197.0 MB
+
+Would you like to restore from this backup?
+
+The corrupted file will be renamed with a .corrupted suffix.
+
+[Yes] [No]
+```
+
+#### After Recovery
+
+After the database is restored and the archive scan completes:
+
+- **Immediately Available**: All photos from the backup, plus any recovered orphaned files
+- **Lost Data**: Import history and audit logs from after the backup
+- **Preserved**: All photos in your archive (files are never deleted)
+- **Recoverable**: Files imported after the backup (via archive scan)
+
+#### Viewing Recovered Files
+
+To see files that were recovered during the archive scan:
+
+1. Open **Import History** tab
+2. In the **Show** dropdown, select **"Archive Recovery"**
+3. All files recovered from the archive scan are listed
+
+Recovered files have these markers in the database:
+- `source_path` starts with `RECOVERED:`
+- `revision_reason` is `recovered_from_archive`
+
+#### Manual Database Recovery
+
+If automatic recovery doesn't appear or you prefer manual control:
+
+1. **Close PyPhotoOrganizer** completely
+2. **Navigate to your database directory**
+3. **Find the `db_snapshots` folder**
+4. **Copy the most recent valid backup** over your corrupted database:
+   ```bash
+   # Linux/macOS
+   cp db_snapshots/db_snapshot_20240115_143022_pre_import_a1b2c3d4.db PhotoDB.db
+
+   # Windows
+   copy db_snapshots\db_snapshot_20240115_143022_pre_import_a1b2c3d4.db PhotoDB.db
+   ```
+5. **Delete WAL/SHM files** if present:
+   ```bash
+   rm PhotoDB.db-wal PhotoDB.db-shm
+   ```
+6. **Restart PyPhotoOrganizer**
+
+---
+
+### Archive Corruption
+
+If files in your photo archive become corrupted or are accidentally deleted:
+
+#### Symptoms
+- Photos display incorrectly or won't open
+- "File not found" errors in Photo Review
+- Missing thumbnails
+- Gaps in your photo timeline
+
+#### Recovery Options
+
+**Option 1: Restore from External Backup**
+
+If you maintain external backups of your archive (highly recommended):
+
+1. Identify the corrupted/missing files from Import History
+2. Restore those files from your backup to the same locations in the archive
+3. The database already has the correct paths, so files will be recognized immediately
+
+**Option 2: Re-import from Original Sources**
+
+If you still have the original source files:
+
+1. Ensure source directories are configured in Import Settings
+2. Run a new import - the system will:
+   - Skip files that already exist in the archive (by hash)
+   - Re-import any missing files
+   - Place them in the correct date-based folders
+
+**Option 3: Recover from Prior Revision Archive**
+
+If the corrupted files have prior revisions (from rotations or edits):
+
+1. Open **Photo Review**
+2. Find the affected photo
+3. Check if prior revisions exist
+4. Restore from a prior revision if available
+
+**Option 4: Recover from Delete Vault**
+
+If files were accidentally deleted and are in the Delete Vault:
+
+1. Go to **Archive Maintenance** tab
+2. Click **"View Vault Contents"**
+3. Select the files you want to restore
+4. Click **"Restore Selected"**
+
+#### Preventing Archive Corruption
+
+1. **Use reliable storage**: Enterprise SSDs or quality HDDs
+2. **Maintain multiple backups**: Follow the 3-2-1 rule (3 copies, 2 media types, 1 offsite)
+3. **Enable content hashing**: Helps detect visual duplicates even if file hashes change
+4. **Avoid editing directly in archive**: Use Photo Review for rotations/edits
+5. **Monitor disk health**: Use tools like CrystalDiskInfo (Windows) or smartctl (Linux)
+
+---
+
+### Backup Location Corruption
+
+The configured backup location (set in Archive Maintenance) stores full database backups.
+
+#### Symptoms
+- "Backup failed" errors
+- Cannot create scheduled backups
+- Backup directory inaccessible
+
+#### Recovery Steps
+
+1. **Check if backup location exists**:
+   - Navigate to the configured backup path
+   - If the drive/folder is missing, restore it or choose a new location
+
+2. **Configure a new backup location**:
+   - Go to **Archive Maintenance** tab
+   - Click **"Change"** next to Backup Location
+   - Select a new, accessible folder
+   - Create a new backup immediately
+
+3. **Recover from previous backups**:
+   - Check other locations where you may have manual backups
+   - The `db_snapshots/` folder (next to your database) always has recent snapshots
+
+#### Best Practices
+
+- Don't place backups on the same drive as your database
+- Use a separate physical drive or network location
+- Verify backups periodically by listing their contents
+
+---
+
+### Delete Vault Corruption
+
+The Delete Vault stores soft-deleted files for potential recovery.
+
+#### Symptoms
+- Cannot restore deleted files
+- "File not found" when attempting restore
+- Vault contents don't match database records
+
+#### Recovery Steps
+
+1. **Check vault location**:
+   - Go to **Archive Maintenance** tab
+   - Verify the Delete Vault path is accessible
+
+2. **If vault files are missing but database records exist**:
+   - The files are unrecoverable from the vault
+   - Check if you have external backups
+   - The original source files may still exist
+
+3. **If vault is completely corrupted**:
+   - Configure a new Delete Vault location
+   - Existing vault records will show files as "unrecoverable"
+   - New deletions will use the new vault
+
+4. **Clean up orphaned records**:
+   - If vault files exist but records are corrupted
+   - You may need to manually re-import these files
+   - They'll be treated as new files with new database entries
+
+---
+
+### Prior Revision Archive Corruption
+
+The Prior Revision Archive stores original versions of files before rotation or editing.
+
+#### Symptoms
+- Cannot undo rotations/edits
+- "Original not found" errors
+- Prior Revision Archive directory missing
+
+#### Recovery Steps
+
+1. **If the archive directory is missing**:
+   - Reconfigure the Prior Revision Archive location
+   - Previous revisions are lost, but current versions are intact
+
+2. **If specific revision files are corrupted**:
+   - The current archive version is still valid
+   - Undo functionality for those files is lost
+   - Future edits will create new revision backups
+
+3. **Rebuilding revision tracking**:
+   - If you have external backups of the Prior Revision Archive
+   - Restore the files to the configured location
+   - The database links (by file hash) should reconnect automatically
+
+#### Minimizing Impact
+
+- The Prior Revision Archive is for convenience, not critical data
+- Your main archive always has the current (edited) version
+- Consider including Prior Revision Archive in your backup strategy if undo is important to you
+
+---
+
+### Cloud Sync Conflicts
+
+Using cloud-synced folders (Dropbox, OneDrive, Google Drive, iCloud) for your database can cause corruption due to sync conflicts.
+
+#### Symptoms
+- "File is not a database" error after sync
+- Duplicate files with "(1)" or "conflicted copy" suffixes
+- Random corruption during imports
+- Different data on different computers
+
+#### Why This Happens
+
+SQLite databases use multiple files (`.db`, `.db-wal`, `.db-shm`) that must stay synchronized. Cloud services may:
+- Sync the main file before the WAL file
+- Create conflicts when two devices access simultaneously
+- Interrupt writes during sync operations
+
+#### Immediate Recovery
+
+1. **Stop all PyPhotoOrganizer instances** on all devices
+2. **Wait for sync to complete** on all devices
+3. **Identify the correct version**:
+   - Check file dates
+   - Look for conflict copies
+   - Choose the most recent valid database
+4. **Use automatic recovery** to restore from backup if needed
+5. **Delete conflict copies** after recovery
+
+#### Recommended Configuration
+
+**Option 1: Local Database, Synced Archive (Recommended)**
+```
+Database:  C:\Users\You\Documents\PhotoDB.db        (local, not synced)
+Archive:   D:\Dropbox\PhotoArchive\                 (synced for backup)
+```
+
+**Option 2: Synced Database with Precautions**
+```
+Database:  D:\Dropbox\PhotoDB.db                    (synced - risky)
+Archive:   D:\Dropbox\PhotoArchive\                 (synced)
+
+Precautions:
+- Only run PyPhotoOrganizer on ONE device at a time
+- Wait for sync to complete before switching devices
+- Pause sync during large imports
+- Keep extra backups outside cloud storage
+```
+
+**Option 3: Network Database (Advanced)**
+```
+Database:  \\NAS\Photos\PhotoDB.db                  (network share)
+Archive:   \\NAS\Photos\Archive\                    (network share)
+
+Notes:
+- Slower but avoids sync conflicts
+- Use on local network only
+- Ensure stable connection
+```
+
+#### Preventing Cloud Sync Issues
+
+1. **Pause sync during imports**: Use your cloud client's pause feature
+2. **One device at a time**: Never run PyPhotoOrganizer simultaneously on multiple devices
+3. **Wait for sync**: Ensure uploads complete before switching devices
+4. **Local database**: Keep the `.db` file outside synced folders when possible
+5. **Regular backups**: Export to a non-synced location regularly
+
+---
+
+### Disk and Storage Failures
+
+Complete disk failure requires restoring from backups.
+
+#### Symptoms
+- Drive not recognized by system
+- Clicking/grinding noises from HDD
+- Massive I/O errors in logs
+- System crashes when accessing drive
+
+#### If the Database Drive Failed
+
+1. **Replace the failed drive**
+2. **Restore database from**:
+   - Last known good backup from another location
+   - Cloud backup if configured
+   - Another computer if synced
+3. **Use automatic recovery** if backup is partial/old
+
+#### If the Archive Drive Failed
+
+1. **Replace the failed drive**
+2. **Restore archive from your external backup**
+3. **Database will still work** - paths will show files as missing until restored
+4. **Re-import from sources** if no archive backup exists
+
+#### If Multiple Drives Failed
+
+1. Prioritize restoring the archive (your actual photos)
+2. Database can be rebuilt from archive if needed:
+   - Create new database
+   - Add archive as source folder
+   - Run import to rebuild database from archive files
+
+#### Building Resilience
+
+1. **RAID arrays**: For archive storage (RAID 1 or RAID 5)
+2. **UPS**: Prevent corruption from power loss
+3. **Regular backups**: Test restores periodically
+4. **Monitor drive health**: Replace drives showing SMART warnings
+5. **Geographic distribution**: Keep one backup offsite
+
+---
+
+### Complete Disaster Recovery Checklist
+
+Use this checklist when recovering from a major failure:
+
+#### Phase 1: Assessment
+- [ ] Identify what was lost (database, archive, both)
+- [ ] Locate all available backups
+- [ ] Check cloud storage for synced copies
+- [ ] Verify source files still exist (if re-import needed)
+
+#### Phase 2: Database Recovery
+- [ ] Restore database from most recent backup
+- [ ] Use automatic recovery if database is corrupted
+- [ ] Run archive scan to recover orphaned files
+- [ ] Verify database opens without errors
+- [ ] Check photo count matches expectations
+
+#### Phase 3: Archive Recovery
+- [ ] Restore archive files from backup
+- [ ] Verify restored files are accessible
+- [ ] Run Photo Review to spot-check images
+- [ ] Re-import from sources if files are missing
+
+#### Phase 4: Validation
+- [ ] Open Photo Review and browse archive
+- [ ] Check Import History for recent sessions
+- [ ] Verify albums contain expected photos
+- [ ] Test a few operations (rotation, deletion, restore)
+
+#### Phase 5: Prevention
+- [ ] Review and improve backup strategy
+- [ ] Consider additional redundancy
+- [ ] Document your recovery process
+- [ ] Schedule regular backup verification
+
+---
+
+### Prevention Best Practices Summary
+
+| Practice | Protects Against | Implementation |
+|----------|------------------|----------------|
+| Automatic snapshots | Database corruption | Enabled by default before imports |
+| Manual backups | All data loss | Copy .db file weekly to external drive |
+| Archive backups | Archive corruption | Full backup to external drive monthly |
+| Content hashing | Visual duplicate detection | Enable in System Settings |
+| Local database | Cloud sync conflicts | Store .db outside synced folders |
+| UPS | Power loss corruption | Connect computer to UPS |
+| SMART monitoring | Drive failure | Use disk health monitoring tools |
+| 3-2-1 backups | Complete disaster | 3 copies, 2 media types, 1 offsite |
+
+---
+
 ## FAQ
 
 ### Q: Are my source files modified?
@@ -2199,10 +2827,13 @@ rm *.log *.log.*
 **A:** The application creates automatic snapshots in `db_snapshots/` before each import. For additional safety, copy the `.db` file to a safe location periodically. The archive folder should also be backed up separately.
 
 ### Q: My database is corrupted. How do I recover?
-**A:** See the [Database Health and Recovery](#database-health-and-recovery) section. You have three options:
-1. **Restore from quick snapshot** (recommended) - Check the `db_snapshots/` folder for automatic backups
-2. **Restore from external backup** - If you have manual backups
-3. **Create new database** - Re-scan your archive to rebuild (loses history but preserves photos)
+**A:** PyPhotoOrganizer now includes **automatic recovery**. When you try to open a corrupted database:
+1. The system automatically detects the corruption
+2. It finds the most recent valid backup in `db_snapshots/`
+3. A dialog offers to restore from that backup
+4. After restoration, it offers to scan the archive for any files imported since the backup
+
+See the comprehensive [Recovering from Data or Storage Corruption](#recovering-from-data-or-storage-corruption) section for detailed guidance on all corruption scenarios.
 
 ### Q: The application crashed during an import. Did I lose data?
 **A:** No. On next startup, the application detects incomplete operations and offers to recover them. Files that were successfully copied are preserved, and partially-copied files are cleaned up. You can then re-run the import to continue where it left off.

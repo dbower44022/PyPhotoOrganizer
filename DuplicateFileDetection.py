@@ -12,7 +12,7 @@ import sys
 import tempfile
 
 from PIL import Image, ImageOps, UnidentifiedImageError
-from PIL.ExifTags import TAGS
+from PIL.ExifTags import TAGS, GPSTAGS, IFD
 from PIL import IptcImagePlugin
 from tqdm import tqdm
 
@@ -956,6 +956,224 @@ def get_file_list(sources, recursive=False, file_endings=None, progress_callback
         logger.exception(f"\n list_files process Failed : { sys.exc_info()} - {e}")
 
 
+def _validate_exif_date(date_string, logger):
+    """
+    Validate and parse an EXIF date string.
+
+    Args:
+        date_string: The date string from EXIF (format: YYYY:MM:DD HH:MM:SS)
+        logger: Logger instance
+
+    Returns:
+        datetime or None: Parsed datetime if valid, None otherwise
+    """
+    if not date_string:
+        return None
+
+    # Handle bytes
+    if isinstance(date_string, bytes):
+        try:
+            date_string = date_string.decode('utf-8', errors='ignore')
+        except Exception:
+            return None
+
+    date_string = str(date_string).strip()
+
+    # Check for empty or null-like values
+    if not date_string or date_string == '' or date_string == "0000:00:00 00:00:00":
+        return None
+
+    # Check for whitespace-only after stripping colons and spaces
+    if date_string.replace(':', '').replace(' ', '').strip() == '':
+        return None
+
+    try:
+        # Try standard EXIF format: YYYY:MM:DD HH:MM:SS
+        parsed_date = datetime.datetime.strptime(date_string, '%Y:%m:%d %H:%M:%S')
+
+        # Validate year is reasonable (1990 to current+1)
+        current_year = datetime.datetime.now().year
+        if parsed_date.year < 1990 or parsed_date.year > current_year + 1:
+            logger.debug(f"EXIF date {date_string} has unreasonable year {parsed_date.year}")
+            return None
+
+        # Check for Unix epoch (1970-01-01)
+        if parsed_date.year == 1970 and parsed_date.month == 1 and parsed_date.day == 1:
+            logger.debug(f"EXIF date {date_string} is Unix epoch, treating as invalid")
+            return None
+
+        return parsed_date
+
+    except ValueError as e:
+        logger.debug(f"Could not parse EXIF date '{date_string}': {e}")
+        return None
+
+
+def _read_all_exif_dates(img, logger):
+    """
+    Read all date-related fields from EXIF data, accessing proper IFDs.
+
+    In PIL 10.x, getexif() returns only the base IFD. DateTimeOriginal and
+    other EXIF-specific tags are in the EXIF sub-IFD, accessed via get_ifd().
+
+    Args:
+        img: PIL Image object (must be open)
+        logger: Logger instance
+
+    Returns:
+        dict: Dictionary with date field names as keys and (datetime, source_name) tuples as values.
+              Only includes successfully parsed dates.
+    """
+    dates = {}
+
+    try:
+        exif = img.getexif()
+        if not exif:
+            logger.debug("No EXIF data found in image")
+            return dates
+
+        # === Read from Base IFD (IFD0) ===
+        # Tag 306: DateTime (file modification time)
+        base_datetime = exif.get(306)
+        if base_datetime:
+            parsed = _validate_exif_date(base_datetime, logger)
+            if parsed:
+                dates['DateTime'] = (parsed, 'exif_datetime')
+                logger.debug(f"Found DateTime (306) in base IFD: {parsed}")
+
+        # === Read from EXIF IFD ===
+        try:
+            exif_ifd = exif.get_ifd(IFD.Exif)
+            if exif_ifd:
+                # Tag 36867: DateTimeOriginal (when photo was taken)
+                dto = exif_ifd.get(36867)
+                if dto:
+                    parsed = _validate_exif_date(dto, logger)
+                    if parsed:
+                        dates['DateTimeOriginal'] = (parsed, 'exif')
+                        logger.debug(f"Found DateTimeOriginal (36867) in EXIF IFD: {parsed}")
+
+                # Tag 36868: DateTimeDigitized (when digitized)
+                dtd = exif_ifd.get(36868)
+                if dtd:
+                    parsed = _validate_exif_date(dtd, logger)
+                    if parsed:
+                        dates['DateTimeDigitized'] = (parsed, 'exif_digitized')
+                        logger.debug(f"Found DateTimeDigitized (36868) in EXIF IFD: {parsed}")
+
+                # Tag 50971: PreviewDateTime
+                preview_dt = exif_ifd.get(50971)
+                if preview_dt:
+                    parsed = _validate_exif_date(preview_dt, logger)
+                    if parsed:
+                        dates['PreviewDateTime'] = (parsed, 'exif_preview')
+                        logger.debug(f"Found PreviewDateTime (50971) in EXIF IFD: {parsed}")
+        except Exception as e:
+            logger.debug(f"Error reading EXIF IFD: {e}")
+
+        # === Read from GPS IFD ===
+        try:
+            gps_ifd = exif.get_ifd(IFD.GPSInfo)
+            if gps_ifd:
+                # Tag 29: GPSDateStamp (format: YYYY:MM:DD)
+                # Tag 7: GPSTimeStamp (tuple of rationals: (H, M, S))
+                gps_date = gps_ifd.get(29)
+                gps_time = gps_ifd.get(7)
+
+                if gps_date:
+                    # Handle bytes
+                    if isinstance(gps_date, bytes):
+                        gps_date = gps_date.decode('utf-8', errors='ignore')
+
+                    gps_date = str(gps_date).strip()
+
+                    # Build time string
+                    time_str = "00:00:00"
+                    if gps_time and len(gps_time) >= 3:
+                        try:
+                            # GPS time is typically tuple of rationals or floats
+                            h = int(float(gps_time[0]))
+                            m = int(float(gps_time[1]))
+                            s = int(float(gps_time[2]))
+                            time_str = f"{h:02d}:{m:02d}:{s:02d}"
+                        except (ValueError, TypeError):
+                            pass
+
+                    # Combine date and time
+                    gps_datetime_str = f"{gps_date} {time_str}"
+                    # GPS date format is YYYY:MM:DD, so we can use the same parser
+                    parsed = _validate_exif_date(gps_datetime_str, logger)
+                    if parsed:
+                        # Note: GPS time is UTC, but we'll use it as-is for comparison
+                        dates['GPSDateTime'] = (parsed, 'exif_gps')
+                        logger.debug(f"Found GPS DateTime: {parsed} (UTC)")
+        except Exception as e:
+            logger.debug(f"Error reading GPS IFD: {e}")
+
+    except Exception as e:
+        logger.error(f"Error reading EXIF dates: {e}")
+
+    return dates
+
+
+def _select_best_exif_date(exif_dates, logger):
+    """
+    Select the best date from available EXIF dates using priority and earliest-date logic.
+
+    Priority order:
+    1. DateTimeOriginal (most authoritative - when shutter clicked)
+    2. DateTimeDigitized (when digitized - same as Original for digital cameras)
+    3. GPSDateTime (GPS timestamp, in UTC)
+    4. DateTime (file modification - often correct for edited photos)
+    5. PreviewDateTime (when preview generated - least reliable)
+
+    If the top priority date is not available, use the EARLIEST valid date among
+    remaining options (since a file can only be modified AFTER creation).
+
+    Args:
+        exif_dates (dict): Dictionary from _read_all_exif_dates()
+        logger: Logger instance
+
+    Returns:
+        tuple: (datetime, source_name) or (None, None) if no valid dates
+    """
+    if not exif_dates:
+        return None, None
+
+    # Priority order for date selection
+    priority_order = [
+        'DateTimeOriginal',
+        'DateTimeDigitized',
+        'GPSDateTime',
+        'DateTime',
+        'PreviewDateTime'
+    ]
+
+    # First, check if DateTimeOriginal exists (highest priority, always use if available)
+    if 'DateTimeOriginal' in exif_dates:
+        dt, source = exif_dates['DateTimeOriginal']
+        logger.info(f"Using DateTimeOriginal as best date: {dt}")
+        return dt, source
+
+    # If no DateTimeOriginal, collect all other valid dates and use the EARLIEST
+    # Rationale: A photo can only be modified AFTER it was created, so earliest date
+    # is most likely to be the original creation date
+    remaining_dates = []
+    for field_name in priority_order[1:]:  # Skip DateTimeOriginal
+        if field_name in exif_dates:
+            dt, source = exif_dates[field_name]
+            remaining_dates.append((dt, source, field_name))
+
+    if remaining_dates:
+        # Sort by datetime and pick the earliest
+        remaining_dates.sort(key=lambda x: x[0])
+        earliest_dt, earliest_source, earliest_field = remaining_dates[0]
+        logger.info(f"No DateTimeOriginal found. Using earliest EXIF date from {earliest_field}: {earliest_dt}")
+        return earliest_dt, earliest_source
+
+    return None, None
+
+
 def _check_date_reliability(year, month, day, has_exif):
     """
     Check if a date is considered reliable.
@@ -1349,10 +1567,17 @@ def get_creation_date(file_path, database_path=None):
     Also tracks the date source and reliability.
 
     Date extraction priority for IMAGES:
-    1. EXIF DateTimeOriginal (most accurate for camera photos)
-    2. IPTC Date Created (fallback for images without EXIF)
-    3. OS file metadata (creation time or modification time)
-    4. Fallback to year 1000 on complete failure
+    1. EXIF DateTimeOriginal (most authoritative - when shutter clicked)
+    2. If no DateTimeOriginal, use EARLIEST valid date from:
+       - EXIF DateTimeDigitized (when digitized)
+       - EXIF GPSDateTime (GPS timestamp, UTC)
+       - EXIF DateTime (file modification time)
+       - EXIF PreviewDateTime (when preview generated)
+       Rationale: A file can only be modified AFTER creation, so the
+       earliest date is most likely the original creation date.
+    3. IPTC Date Created (fallback for images without EXIF)
+    4. OS file metadata (creation time or modification time)
+    5. Fallback to year 1000 on complete failure
 
     Date extraction priority for VIDEOS:
     1. Video metadata via ffprobe (creation_time tag)
@@ -1361,6 +1586,10 @@ def get_creation_date(file_path, database_path=None):
     4. OS file metadata
     5. Fallback to year 1000 on complete failure
 
+    Note: In PIL 10.x, getexif() only returns the base IFD. DateTimeOriginal
+    and other EXIF-specific tags are in the EXIF sub-IFD, accessed via get_ifd().
+    This function properly reads from all IFDs (base, EXIF, GPS).
+
     Parameters:
     file_path (str): The full file name with path.
     database_path (str, optional): Path to database for user-specified unreliable paths check.
@@ -1368,7 +1597,9 @@ def get_creation_date(file_path, database_path=None):
     Returns:
     tuple: A tuple containing (year, month, day, date_source, is_reliable).
            - year, month, day: Date components as zero-padded strings
-           - date_source: 'exif', 'iptc', 'video_metadata', 'video_quicktime', 'os_metadata', or 'fallback'
+           - date_source: 'exif', 'exif_digitized', 'exif_gps', 'exif_datetime',
+                          'exif_preview', 'iptc', 'video_metadata', 'video_quicktime',
+                          'os_metadata', or 'fallback'
            - is_reliable: Boolean indicating if date is considered reliable
     """
     try:
@@ -1430,116 +1661,62 @@ def get_creation_date(file_path, database_path=None):
             return year, month, day, date_source, is_reliable
 
         # STEP 2: Try to get EXIF data (PLATFORM-INDEPENDENT - runs on all OS)
-        # Now try to get a more accurate date from EXIF data.
+        # Read all available EXIF dates from proper IFDs and select the best one.
+        # In PIL 10.x, getexif() only returns the base IFD - DateTimeOriginal and
+        # other EXIF-specific tags require accessing the EXIF sub-IFD via get_ifd().
         try:
-            processed_photos = 0
-            not_photos = 0
-
-            # TAGS is defined in PIL as a list of items returned
-            _TAGS_r = dict(((v, k) for k, v in TAGS.items()))
-
-            # logger.info(f"TAGS.items() = {TAGS.items()}")
-            #logger.info(f"The extension for file is {extension}, and the supported_extensions = {supported_extensions}")
             if extension.lower() in supported_extensions:
-                # verifying extension is valid saves time necessary for pillow to attempt open and fail, which can be considerable.
-                logger.info(f"We have a pillow supported file type - {extension}. So attempt to get exif data.")
+                logger.info(f"Pillow-supported file type: {extension}. Reading all EXIF dates...")
 
                 with Image.open(file_path) as im:
                     try:
-                        exif_data_PIL = im.getexif()
-                        #logger.info(f"exif_data_PIL = {exif_data_PIL}")
-                        '''
-                        EXIF contains at least four dates:
-                        DateTime -
-                        DateTimeDigitized -
-                        PreviewDateTime -
-                        DateTimeOriginal -
+                        # Read all EXIF dates from proper IFDs (base, EXIF, GPS)
+                        exif_dates = _read_all_exif_dates(im, logger)
 
-                        GPS Date time can be retrieved from the  GPSTAGS object if necessary.
-                        GPSDateTime -
-                        '''
-                        logger.info(f"____________________   List of Date Tags ____________________________________ ")
-                        logger.info(f"_TAGS_r  for DateTimeOriginal = ")
-                        logger.info(_TAGS_r["DateTimeOriginal"])
-                        logger.info(_TAGS_r["Model"])
-                        # logger.info(_TAGS_r["CreateDate"])
-                        # logger.info(_TAGS_r["GPSDateTime"])
-                        # logger.info(_TAGS_r["DateTimeCreated"])
-                        logger.info(f"________________________________________________________ ")
-                        if exif_data_PIL is not None:
-                            # Safely check if DateTimeOriginal exists in EXIF
-                            datetime_original_tag = _TAGS_r.get("DateTimeOriginal")
-                            if datetime_original_tag and datetime_original_tag in exif_data_PIL:
-                                # if a value for DateTimeOriginal is included in EXIF data, then use that as the fileDate.
-                                fileDate = exif_data_PIL[datetime_original_tag]
-                                logger.info(f"fileDate = {fileDate}")
-                                # Validate EXIF date is not empty, not just whitespace, not "0000:00:00 00:00:00", and can be parsed
-                                if (fileDate != '' and len(fileDate) > 10 and
-                                    fileDate != "0000:00:00 00:00:00" and
-                                    fileDate.strip() != '' and
-                                    fileDate.strip().replace(':', '').replace(' ', '').strip() != ''):
-                                    # we located a proper file date in the exif data, so use that instead of date from OS.
-                                    # Try to parse the EXIF date - if it fails, fall back to OS date
-                                    try:
-                                        has_exif = True  # Mark that we found EXIF data
-                                        date_source = 'exif'  # Date came from EXIF
-                                        logger.info("------------------  File Dates --------------------------")
-                                        logger.info(f"Date from os {datetime.datetime.fromtimestamp(creation_time)}, date from EXIF {fileDate}")
-                                        exif_datetime = datetime.datetime.strptime(fileDate, '%Y:%m:%d %H:%M:%S')
-                                        logger.info(f"Converted EXIF fileDate = {exif_datetime}")
-                                        logger.info("--------------------------------------------")
+                        if exif_dates:
+                            logger.info(f"Found {len(exif_dates)} EXIF date field(s): {list(exif_dates.keys())}")
 
-                                        if creation_date != exif_datetime:
-                                            logger.info("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
-                                            logger.info("The OS and EXIF dates do NOT match, so using the EXIF date!")
-                                            logger.info("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^")
-                                            creation_date = exif_datetime
-                                        else:
-                                            logger.info("The OS and EXIF dates matched, so using them both :)")
-                                    except ValueError as e:
-                                        logger.warning(f"EXIF date '{fileDate}' could not be parsed, falling back to OS date: {e}")
-                                        has_exif = False
-                                        date_source = 'os_metadata'
+                            # Select the best date using priority and earliest-date algorithm
+                            best_date, best_source = _select_best_exif_date(exif_dates, logger)
 
-                                    im.close()
-                                    processed_photos += 1
-                                    logger.info(f"\r{processed_photos} photos processed, {not_photos} not processed")
+                            if best_date:
+                                has_exif = True
+                                date_source = best_source
+                                logger.info("------------------  File Dates --------------------------")
+                                logger.info(f"Date from OS: {creation_date}")
+                                logger.info(f"Best EXIF date: {best_date} (source: {best_source})")
+
+                                if creation_date != best_date:
+                                    logger.info("OS and EXIF dates differ - using EXIF date")
+                                    creation_date = best_date
                                 else:
-                                    logger.info("fileDate does not exist in EXIF data. Trying IPTC...")
-                                    # Try IPTC as fallback
-                                    creation_date, date_source, has_exif = _try_iptc_date(im, creation_date, date_source, has_exif, logger)
+                                    logger.info("OS and EXIF dates match")
+                                logger.info("--------------------------------------------")
                             else:
-                                logger.info(f"exif_data_PIL[_TAGS_r[DateTimeOriginal]] does not exist. Trying IPTC...")
-                                # Try IPTC as fallback
-                                creation_date, date_source, has_exif = _try_iptc_date(im, creation_date, date_source, has_exif, logger)
+                                # No valid EXIF dates found, try IPTC
+                                logger.info("No valid EXIF dates found. Trying IPTC...")
+                                creation_date, date_source, has_exif = _try_iptc_date(
+                                    im, creation_date, date_source, has_exif, logger
+                                )
                         else:
-                            not_photos += 1
-                            logger.info(f"No EXIF data was present. Checking for IPTC data...")
-                            # Try IPTC as fallback
-                            creation_date, date_source, has_exif = _try_iptc_date(im, creation_date, date_source, has_exif, logger)
-                            logger.info(f"\r{processed_photos} photos processed, {not_photos} not processed")
+                            # No EXIF data at all, try IPTC
+                            logger.info("No EXIF date fields found. Trying IPTC...")
+                            creation_date, date_source, has_exif = _try_iptc_date(
+                                im, creation_date, date_source, has_exif, logger
+                            )
+
                     except Exception as e:
-                        logger.exception(f"The failure {e} occurred for file {file_path}")
-                im.close()
+                        logger.exception(f"Error reading EXIF/IPTC from {file_path}: {e}")
+                        # Fall through to use OS metadata
             else:
-                logger.info(f"The file {file_path}, with an extension of {extension} cannot be opened by pillow to determine date information, so return the OS date created. Supported Extensions = {supported_extensions}")
+                logger.info(f"File {file_path} with extension {extension} not supported by Pillow. Using OS date.")
 
         except IOError as io_err:
-            not_photos += 1
-            logger.error(f"IOError when processing file {file_path}- {io_err}.")
-            logger.info(f"\r{processed_photos} photos processed, {not_photos} not processed")
-            pass
+            logger.error(f"IOError when processing file {file_path}: {io_err}")
         except OSError as os_err:
-            not_photos += 1
-            logger.error(f"OSError when processing file {file_path}- {os_err}.")
-            logger.info(f"\r{processed_photos} photos processed, {not_photos} not processed")
-            pass
-        except KeyError as key_err:
-            logger.error(f"KeyError when processing file {file_path} - {key_err}.")
-            not_photos += 1
-            pass
+            logger.error(f"OSError when processing file {file_path}: {os_err}")
         except Exception as e:
-            logger.exception(f"When processing file {file_path} this error occurred:  {e}")
+            logger.exception(f"Error processing file {file_path}: {e}")
 
         logger.info(f"Completed locating date for {file_path}, now convert it.... {creation_date}")
 

@@ -16,6 +16,9 @@ from datetime import datetime
 import os
 import sqlite3
 import logging
+import shutil
+import glob
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +177,444 @@ class DatabaseSelectorDialog(QDialog):
             result['error'] = str(e)
 
         return result
+
+    @staticmethod
+    def _find_filesystem_backups(db_path: str) -> list:
+        """
+        Find backup files for a database by scanning the filesystem.
+
+        This is used when the database is corrupted and we can't query
+        the QuickBackups table. Scans the db_snapshots directory for
+        backup files.
+
+        Args:
+            db_path: Path to the (corrupted) database file
+
+        Returns:
+            List of backup info dicts sorted by timestamp (newest first):
+            [
+                {
+                    'path': str,
+                    'filename': str,
+                    'timestamp': str,  # YYYYMMDD_HHMMSS
+                    'reason': str,
+                    'size_bytes': int,
+                    'modified_time': float
+                },
+                ...
+            ]
+        """
+        backups = []
+
+        try:
+            # Get the db_snapshots directory
+            db_dir = os.path.dirname(os.path.abspath(db_path))
+            snapshots_dir = os.path.join(db_dir, "db_snapshots")
+
+            if not os.path.isdir(snapshots_dir):
+                logger.debug(f"No db_snapshots directory found at {snapshots_dir}")
+                return []
+
+            # Pattern: db_snapshot_YYYYMMDD_HHMMSS_reason_uuid.db
+            pattern = os.path.join(snapshots_dir, "db_snapshot_*.db")
+            backup_files = glob.glob(pattern)
+
+            # Parse each backup file
+            filename_pattern = re.compile(
+                r'db_snapshot_(\d{8}_\d{6})_(.+?)_[a-f0-9]{8}\.db$'
+            )
+
+            for backup_path in backup_files:
+                filename = os.path.basename(backup_path)
+                match = filename_pattern.match(filename)
+
+                if match:
+                    timestamp_str = match.group(1)
+                    reason = match.group(2)
+
+                    try:
+                        size_bytes = os.path.getsize(backup_path)
+                        modified_time = os.path.getmtime(backup_path)
+
+                        backups.append({
+                            'path': backup_path,
+                            'filename': filename,
+                            'timestamp': timestamp_str,
+                            'reason': reason,
+                            'size_bytes': size_bytes,
+                            'modified_time': modified_time
+                        })
+                    except OSError as e:
+                        logger.debug(f"Could not stat backup file {backup_path}: {e}")
+
+            # Sort by timestamp (newest first)
+            backups.sort(key=lambda x: x['timestamp'], reverse=True)
+            logger.debug(f"Found {len(backups)} backup files in {snapshots_dir}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for backup files: {e}")
+
+        return backups
+
+    @staticmethod
+    def _validate_backup(backup_path: str) -> dict:
+        """
+        Validate a backup file and get its photo count.
+
+        Args:
+            backup_path: Path to the backup database file
+
+        Returns:
+            Dictionary with validation results:
+            {
+                'is_valid': bool,
+                'photo_count': int,
+                'error': str or None,
+                'database_name': str or None,
+                'archive_location': str or None
+            }
+        """
+        result = {
+            'is_valid': False,
+            'photo_count': 0,
+            'error': None,
+            'database_name': None,
+            'archive_location': None
+        }
+
+        try:
+            conn = sqlite3.connect(backup_path, timeout=5)
+            cursor = conn.cursor()
+
+            # Run integrity check
+            cursor.execute("PRAGMA integrity_check")
+            integrity = cursor.fetchone()[0]
+            if integrity != 'ok':
+                result['error'] = f"Integrity check failed: {integrity}"
+                conn.close()
+                return result
+
+            # Check for required tables
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [row[0] for row in cursor.fetchall()]
+
+            if 'DatabaseMetadata' not in tables or 'UniquePhotos' not in tables:
+                result['error'] = "Missing required tables"
+                conn.close()
+                return result
+
+            # Get photo count
+            cursor.execute("SELECT COUNT(*) FROM UniquePhotos")
+            result['photo_count'] = cursor.fetchone()[0]
+
+            # Get metadata
+            cursor.execute("""
+                SELECT database_name, archive_location
+                FROM DatabaseMetadata WHERE id = 1
+            """)
+            row = cursor.fetchone()
+            if row:
+                result['database_name'] = row[0]
+                result['archive_location'] = row[1]
+
+            conn.close()
+            result['is_valid'] = True
+
+        except sqlite3.DatabaseError as e:
+            result['error'] = f"Database error: {e}"
+        except Exception as e:
+            result['error'] = str(e)
+
+        return result
+
+    def _attempt_corruption_recovery(self, db_path: str, error_message: str) -> tuple:
+        """
+        Attempt to recover a corrupted database from backup.
+
+        Args:
+            db_path: Path to the corrupted database file
+            error_message: The error message from the corruption detection
+
+        Returns:
+            Tuple of (success: bool, message: str, recovered_db_info: dict or None)
+        """
+        # Find available backups
+        backups = self._find_filesystem_backups(db_path)
+
+        if not backups:
+            return (False, "No backup files found in db_snapshots directory.", None)
+
+        # Find the most recent valid backup
+        valid_backup = None
+        for backup in backups:
+            validation = self._validate_backup(backup['path'])
+            if validation['is_valid']:
+                valid_backup = {**backup, **validation}
+                break
+
+        if not valid_backup:
+            return (False, "No valid backup files found. All backups failed integrity check.", None)
+
+        # Format backup info for the user
+        backup_time = valid_backup['timestamp']
+        # Parse YYYYMMDD_HHMMSS to readable format
+        try:
+            formatted_time = datetime.strptime(backup_time, "%Y%m%d_%H%M%S").strftime(
+                "%Y-%m-%d at %H:%M:%S"
+            )
+        except ValueError:
+            formatted_time = backup_time
+
+        photo_count = valid_backup['photo_count']
+        backup_size_mb = valid_backup['size_bytes'] / (1024 * 1024)
+        backup_reason = valid_backup['reason'].replace('_', ' ')
+
+        # Ask user for confirmation
+        response = QMessageBox.question(
+            self,
+            "Database Corruption Detected",
+            f"The database file is corrupted and cannot be opened.\n\n"
+            f"Error: {error_message}\n\n"
+            f"A backup is available:\n"
+            f"  • Created: {formatted_time}\n"
+            f"  • Reason: {backup_reason}\n"
+            f"  • Photos: {photo_count:,}\n"
+            f"  • Size: {backup_size_mb:.1f} MB\n\n"
+            f"Would you like to restore from this backup?\n\n"
+            f"The corrupted file will be renamed with a .corrupted suffix.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+
+        if response != QMessageBox.Yes:
+            return (False, "Recovery cancelled by user.", None)
+
+        # Perform the restoration
+        try:
+            # Rename corrupted file
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            corrupted_path = f"{db_path}.corrupted_{timestamp}"
+            shutil.move(db_path, corrupted_path)
+            logger.info(f"Renamed corrupted database to: {corrupted_path}")
+
+            # Copy backup to original location
+            shutil.copy2(valid_backup['path'], db_path)
+            logger.info(f"Restored database from backup: {valid_backup['path']}")
+
+            # Remove any leftover WAL/SHM files from corrupted database
+            for suffix in ['-wal', '-shm']:
+                wal_path = f"{db_path}{suffix}"
+                if os.path.exists(wal_path):
+                    try:
+                        os.remove(wal_path)
+                        logger.debug(f"Removed leftover {suffix} file")
+                    except OSError:
+                        pass
+
+            # Build db_info for the restored database
+            db_info = {
+                'path': os.path.abspath(db_path),
+                'filename': os.path.basename(db_path),
+                'database_name': valid_backup.get('database_name', 'Recovered Database'),
+                'archive_location': valid_backup.get('archive_location', ''),
+                'total_photos': valid_backup['photo_count']
+            }
+
+            # Get video archive location if available
+            video_archive_location = self._get_video_archive_location(db_path)
+
+            # Offer to scan archive for orphaned files
+            archive_location = valid_backup.get('archive_location', '')
+            if archive_location and os.path.isdir(archive_location):
+                response = QMessageBox.question(
+                    self,
+                    "Database Restored - Scan for Lost Files?",
+                    f"The database has been restored successfully.\n\n"
+                    f"Restored from: {valid_backup['filename']}\n"
+                    f"Created: {formatted_time}\n"
+                    f"Photos in backup: {photo_count:,}\n\n"
+                    f"Would you like to scan the archive for files that were imported "
+                    f"after the backup was created?\n\n"
+                    f"This will find any 'orphaned' files in the archive that are not "
+                    f"tracked in the restored database and add them back.\n\n"
+                    f"The corrupted file has been saved as:\n"
+                    f"{os.path.basename(corrupted_path)}",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+
+                if response == QMessageBox.Yes:
+                    # Run archive recovery scan
+                    scan_results = self._run_archive_recovery_scan(
+                        db_path, archive_location, video_archive_location
+                    )
+
+                    if scan_results:
+                        # Update photo count with recovered files
+                        db_info['total_photos'] = photo_count + scan_results.get('recovered', 0)
+
+                        # Show final results
+                        if scan_results.get('recovered', 0) > 0:
+                            QMessageBox.information(
+                                self,
+                                "Archive Recovery Complete",
+                                f"Recovery scan completed successfully.\n\n"
+                                f"Files scanned: {scan_results.get('total_scanned', 0):,}\n"
+                                f"Orphaned files found: {scan_results.get('orphaned_found', 0):,}\n"
+                                f"Files recovered: {scan_results.get('recovered', 0):,}\n"
+                                f"Failed: {scan_results.get('failed', 0):,}\n\n"
+                                f"Total photos now in database: {db_info['total_photos']:,}\n\n"
+                                f"Recovered files are marked in the database and can be "
+                                f"viewed in Import History under 'Archive Recovery' filter."
+                            )
+                        else:
+                            QMessageBox.information(
+                                self,
+                                "Archive Recovery Complete",
+                                f"Recovery scan completed.\n\n"
+                                f"Files scanned: {scan_results.get('total_scanned', 0):,}\n"
+                                f"No orphaned files found - the archive matches the backup.\n\n"
+                                f"Total photos in database: {db_info['total_photos']:,}"
+                            )
+            else:
+                # Just show success message if archive location not available
+                QMessageBox.information(
+                    self,
+                    "Database Restored",
+                    f"The database has been restored successfully.\n\n"
+                    f"Restored from: {valid_backup['filename']}\n"
+                    f"Created: {formatted_time}\n"
+                    f"Photos recovered: {photo_count:,}\n\n"
+                    f"Note: The archive location could not be found. You may want to "
+                    f"run an archive recovery scan manually after setting the correct "
+                    f"archive location.\n\n"
+                    f"The corrupted file has been saved as:\n"
+                    f"{os.path.basename(corrupted_path)}"
+                )
+
+            return (True, "Database restored successfully.", db_info)
+
+        except Exception as e:
+            error_msg = f"Failed to restore backup: {e}"
+            logger.error(error_msg, exc_info=True)
+            return (False, error_msg, None)
+
+    @staticmethod
+    def _get_video_archive_location(db_path: str) -> str:
+        """
+        Get the video archive location from a database.
+
+        Args:
+            db_path: Path to the database file
+
+        Returns:
+            Video archive location path, or empty string if not set
+        """
+        try:
+            conn = sqlite3.connect(db_path, timeout=5)
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT video_archive_location, separate_video_archive
+                FROM DatabaseMetadata WHERE id = 1
+            """)
+            row = cursor.fetchone()
+            conn.close()
+
+            if row and row[1] and row[0]:  # separate_video_archive is True and location set
+                return row[0]
+        except Exception as e:
+            logger.debug(f"Could not get video archive location: {e}")
+
+        return ""
+
+    def _run_archive_recovery_scan(self, db_path: str, archive_location: str,
+                                    video_archive_location: str = "") -> dict:
+        """
+        Run the archive recovery scan to find and recover orphaned files.
+
+        Args:
+            db_path: Path to the database file
+            archive_location: Path to the photo archive
+            video_archive_location: Optional path to video archive
+
+        Returns:
+            Results dictionary with scan statistics, or None if cancelled/failed
+        """
+        from PySide6.QtWidgets import QProgressDialog
+        from PySide6.QtCore import Qt
+        from ui.archive_recovery_worker import ArchiveRecoveryWorker
+
+        # Create progress dialog
+        progress = QProgressDialog(
+            "Scanning archive for orphaned files...",
+            "Cancel",
+            0, 100,
+            self
+        )
+        progress.setWindowTitle("Archive Recovery Scan")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        # Create and configure worker
+        worker = ArchiveRecoveryWorker(
+            db_path,
+            archive_location,
+            video_archive_location if video_archive_location else None,
+            parent=self
+        )
+
+        results = {'cancelled': False}
+
+        def on_progress(current, total, filename):
+            if total > 0:
+                percent = int((current / total) * 100)
+                progress.setValue(percent)
+                progress.setLabelText(f"Scanning: {filename}\n({current:,} / {total:,} files)")
+
+        def on_status(message):
+            progress.setLabelText(message)
+
+        def on_completed(result):
+            results.update(result)
+
+        def on_error(error_msg):
+            results['error'] = error_msg
+            logger.error(f"Archive recovery error: {error_msg}")
+
+        def on_cancelled():
+            worker.stop()
+
+        # Connect signals
+        worker.progress_update.connect(on_progress)
+        worker.status_update.connect(on_status)
+        worker.completed.connect(on_completed)
+        worker.error_occurred.connect(on_error)
+        progress.canceled.connect(on_cancelled)
+
+        # Start worker
+        worker.start()
+
+        # Wait for completion (process events to keep UI responsive)
+        while worker.isRunning():
+            QApplication.processEvents()
+            worker.wait(50)  # Wait up to 50ms
+
+        progress.close()
+
+        # Handle errors
+        if 'error' in results:
+            QMessageBox.warning(
+                self,
+                "Archive Recovery Error",
+                f"An error occurred during archive recovery:\n\n{results['error']}"
+            )
+            return None
+
+        if results.get('cancelled'):
+            return None
+
+        return results
 
     def _repair_database_metadata(self, db_path: str, diagnosis: dict) -> bool:
         """
@@ -449,8 +890,54 @@ class DatabaseSelectorDialog(QDialog):
         database_path = db_info.get('path')
         archive_location = db_info.get('archive_location')
 
+        # Re-validate database integrity before opening
+        # (handles case where corruption occurred after list was populated)
+        diagnosis = self._diagnose_database(database_path)
+        if diagnosis['error']:
+            error_lower = diagnosis['error'].lower()
+            is_corruption = any(phrase in error_lower for phrase in [
+                'file is not a database',
+                'disk i/o error',
+                'database disk image is malformed',
+                'database or disk is full',
+                'unable to open database'
+            ])
+
+            if is_corruption:
+                # Attempt automatic recovery from backup
+                success, message, recovered_db_info = self._attempt_corruption_recovery(
+                    database_path, diagnosis['error']
+                )
+
+                if success and recovered_db_info:
+                    # Recovery succeeded - update db_info with recovered data
+                    db_info = recovered_db_info
+                    db_info['last_activity'] = self._get_last_activity_date(database_path)
+                    archive_location = db_info.get('archive_location')
+                    # Continue to open the recovered database
+                else:
+                    if "cancelled" not in message.lower():
+                        QMessageBox.critical(
+                            self,
+                            "Database Corrupted",
+                            f"The database is corrupted and cannot be opened:\n\n"
+                            f"{database_path}\n\n"
+                            f"Error: {diagnosis['error']}\n\n"
+                            f"Recovery: {message}"
+                        )
+                    return
+            else:
+                QMessageBox.critical(
+                    self,
+                    "Database Error",
+                    f"Cannot open database:\n\n"
+                    f"{database_path}\n\n"
+                    f"Error: {diagnosis['error']}"
+                )
+                return
+
         # Validate archive location exists
-        if not os.path.exists(archive_location):
+        if archive_location and not os.path.exists(archive_location):
             response = QMessageBox.warning(
                 self,
                 "Archive Location Not Found",
@@ -516,14 +1003,50 @@ class DatabaseSelectorDialog(QDialog):
 
         # Handle various diagnosis outcomes
         if diagnosis['error']:
-            QMessageBox.critical(
-                self,
-                "Invalid File",
-                f"The selected file is not a valid database:\n\n"
-                f"{file_path}\n\n"
-                f"Error: {diagnosis['error']}"
-            )
-            return
+            # Check if this is a corruption error that might be recoverable
+            error_lower = diagnosis['error'].lower()
+            is_corruption = any(phrase in error_lower for phrase in [
+                'file is not a database',
+                'disk i/o error',
+                'database disk image is malformed',
+                'database or disk is full',
+                'unable to open database'
+            ])
+
+            if is_corruption:
+                # Attempt automatic recovery from backup
+                success, message, db_info = self._attempt_corruption_recovery(
+                    file_path, diagnosis['error']
+                )
+
+                if success and db_info:
+                    # Recovery succeeded - open the restored database
+                    db_info['last_activity'] = self._get_last_activity_date(file_path)
+                    self.open_database(db_info)
+                    return
+                elif not success and "cancelled" not in message.lower():
+                    # Recovery failed (not cancelled) - show error with recovery info
+                    QMessageBox.critical(
+                        self,
+                        "Recovery Failed",
+                        f"The database file is corrupted and recovery failed:\n\n"
+                        f"{file_path}\n\n"
+                        f"Original error: {diagnosis['error']}\n\n"
+                        f"Recovery error: {message}\n\n"
+                        f"You may need to restore from a manual backup."
+                    )
+                # If cancelled, just return without showing another message
+                return
+            else:
+                # Non-corruption error - show original message
+                QMessageBox.critical(
+                    self,
+                    "Invalid File",
+                    f"The selected file is not a valid database:\n\n"
+                    f"{file_path}\n\n"
+                    f"Error: {diagnosis['error']}"
+                )
+                return
 
         if not diagnosis['is_sqlite']:
             QMessageBox.warning(

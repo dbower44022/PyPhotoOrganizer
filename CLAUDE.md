@@ -70,6 +70,7 @@ python main.py              # CLI mode
 | `archive_change_scanner_worker.py` | `ArchiveChangeScannerWorker` for detecting external file modifications |
 | `bulk_delete_worker.py` | `BulkDeleteWorker` for bulk delete matching files operations |
 | `bulk_delete_preview_dialog.py` | `BulkDeletePreviewDialog` for previewing matched files before deletion |
+| `archive_recovery_worker.py` | `ArchiveRecoveryWorker` for recovering orphaned files after database restore |
 | `theme.py` | `ThemeManager`, light/dark mode support |
 
 ### Database Tables
@@ -326,6 +327,115 @@ def _run_startup_health_check(self):
 - `_recover_pending_operations()` - Perform recovery
 - `_discard_pending_operations()` - Discard incomplete operations
 - `_create_pre_import_backup()` - Create backup before import
+
+#### Automatic Corruption Recovery
+
+**Purpose:** When a user attempts to open a corrupted database, automatically detect and offer to restore from the most recent valid backup.
+
+**Corruption Detection:**
+Corruption is detected when `_diagnose_database()` returns errors containing:
+- "file is not a database"
+- "disk i/o error"
+- "database disk image is malformed"
+- "database or disk is full"
+- "unable to open database"
+
+**Recovery Flow:**
+1. User attempts to open database (via list selection or browse)
+2. `_diagnose_database()` detects corruption error
+3. `_find_filesystem_backups()` scans `db_snapshots/` directory for backup files
+4. `_validate_backup()` verifies each backup until a valid one is found
+5. User shown confirmation dialog with backup details (date, photo count, size)
+6. On confirmation:
+   - Corrupted file renamed with `.corrupted_TIMESTAMP` suffix
+   - Backup copied to original location
+   - WAL/SHM files cleaned up
+7. Success dialog shows what was recovered and potential data loss
+
+**Key Methods (DatabaseSelectorDialog class):**
+- `_find_filesystem_backups(db_path)` - Scan filesystem for backup files (since corrupted DB can't be queried)
+- `_validate_backup(backup_path)` - Verify backup integrity and get photo count
+- `_attempt_corruption_recovery(db_path, error_message)` - Orchestrate the recovery process
+
+**Filesystem Backup Discovery:**
+When database is corrupted, the `QuickBackups` table cannot be queried. Instead, backups are found by:
+1. Locating `db_snapshots/` directory next to database
+2. Scanning for files matching pattern: `db_snapshot_YYYYMMDD_HHMMSS_<reason>_<uuid8>.db`
+3. Parsing timestamp and reason from filename
+4. Validating each with `PRAGMA integrity_check`
+
+**User Notification:**
+The recovery dialog shows:
+- Backup creation date/time
+- Backup reason (e.g., "pre import")
+- Photo count in backup
+- Backup file size
+
+After successful recovery:
+- Photos recovered count
+- Warning about data loss (files imported after backup)
+- Location of preserved corrupted file
+
+**Integration Points:**
+- `open_database()` - Re-validates before opening, offers recovery on corruption
+- `on_browse_clicked()` - Detects corruption during browse, offers recovery
+
+#### Orphaned File Recovery (Archive Scan)
+
+**Purpose:** After restoring from backup, scan the archive to find files that were imported after the backup was created but are not in the restored database.
+
+**When Offered:**
+After successful backup restoration, user is prompted to scan the archive for orphaned files.
+
+**How It Works:**
+1. User restores database from backup
+2. System offers to scan archive for orphaned files
+3. `ArchiveRecoveryWorker` scans archive directory for all media files
+4. Each file is hashed and checked against database
+5. Files not in database are "orphaned" - imported after backup
+6. Orphaned files are added to database with recovery metadata
+
+**Recovery Metadata:**
+Recovered files are marked in the database with:
+- `source_path` = `RECOVERED:<original_archive_path>`
+- `revision_reason` = `recovered_from_archive`
+- `revision_timestamp` = recovery timestamp
+
+**Audit Trail:**
+- Creates session with `operation_mode='archive_recovery'`
+- Logs each file with `operation='archive_recovery'`
+- Viewable in Import History under "Archive Recovery" filter
+
+**Worker (`ui/archive_recovery_worker.py`):**
+```python
+class ArchiveRecoveryWorker(QThread):
+    progress_update = Signal(int, int, str)  # current, total, filename
+    status_update = Signal(str)               # status message
+    file_recovered = Signal(dict)             # per-file notification
+    completed = Signal(dict)                  # final results
+    error_occurred = Signal(str)              # error message
+```
+
+**Key Methods (ArchiveRecoveryWorker):**
+- `_get_known_hashes()` - Get all file hashes from database
+- `_scan_archive()` - Recursively find all media files
+- `_recover_file(file_info)` - Add orphaned file to database
+
+**Results Dictionary:**
+```python
+{
+    'cancelled': bool,
+    'total_scanned': int,    # Files scanned in archive
+    'orphaned_found': int,   # Files not in database
+    'recovered': int,        # Successfully added to database
+    'failed': int            # Failed to add
+}
+```
+
+**UI Integration:**
+- Dialog shows progress during scan
+- Final results show files recovered
+- Import History "Archive Recovery" filter shows all recovered files
 
 ## Key Implementation Details
 
@@ -633,13 +743,82 @@ python -m migrations.schema_v6_relative_paths /path/to/PhotoDB.db --dry-run
 python -m migrations.schema_v6_relative_paths /path/to/PhotoDB.db
 ```
 
-### Date Extraction Priority
+### Date Extraction System
 
-**Images**: EXIF DateTimeOriginal → IPTC Date Created → OS metadata → Year 1000 fallback
+The system reads all available date metadata and uses an intelligent algorithm to select the most accurate original creation date.
 
-**Videos**: ffprobe → mutagen → QuickTime atoms → OS metadata → Year 1000 fallback
+#### EXIF IFD Access (PIL 10.x Fix)
 
-**Unreliable dates** flagged when: no EXIF, year 1000, year < 1990, year > current+1, Unix epoch (1970-01-01), user-specified paths.
+**Important**: In PIL 10.x, `getexif()` only returns the base IFD. DateTimeOriginal and other EXIF-specific tags are in the EXIF sub-IFD, which must be accessed via `get_ifd(IFD.Exif)`:
+
+```python
+exif = img.getexif()           # Base IFD only (contains DateTime)
+exif_ifd = exif.get_ifd(IFD.Exif)  # EXIF IFD (contains DateTimeOriginal)
+gps_ifd = exif.get_ifd(IFD.GPSInfo)  # GPS IFD (contains GPSDateStamp)
+```
+
+#### Date Fields Read
+
+| IFD | Tag ID | Field Name | Description |
+|-----|--------|------------|-------------|
+| Base (IFD0) | 306 | DateTime | File modification time |
+| EXIF | 36867 | DateTimeOriginal | When photo was taken (shutter click) |
+| EXIF | 36868 | DateTimeDigitized | When image was digitized |
+| EXIF | 50971 | PreviewDateTime | When preview was generated |
+| GPS | 29 | GPSDateStamp | GPS date (UTC, format: YYYY:MM:DD) |
+| GPS | 7 | GPSTimeStamp | GPS time (UTC, tuple of H, M, S) |
+
+#### Image Date Priority Algorithm
+
+1. **DateTimeOriginal** - If present and valid, always use (most authoritative)
+2. **Earliest Valid Date** - If no DateTimeOriginal, use the earliest among:
+   - DateTimeDigitized
+   - GPSDateTime (combined GPSDateStamp + GPSTimeStamp)
+   - DateTime
+   - PreviewDateTime
+
+   *Rationale*: A file can only be modified AFTER creation, so the earliest date is most likely the original.
+
+3. **IPTC Date Created** - Fallback for images without EXIF (tag 2:55)
+4. **OS Metadata** - File creation/modification time (least reliable)
+5. **Year 1000 Fallback** - Indicates complete failure
+
+#### Video Date Priority
+
+1. **ffprobe** - `creation_time` tag from format metadata
+2. **mutagen** - `©day` tag for MP4/MOV files
+3. **QuickTime atoms** - `mvhd` atom creation_time (handles 1904 epoch)
+4. **OS Metadata** - File timestamps
+5. **Year 1000 Fallback**
+
+#### Date Validation
+
+Dates are validated before use:
+- Must be parseable (format: `YYYY:MM:DD HH:MM:SS`)
+- Year must be 1990-current+1 (reasonable range for digital photos)
+- Not Unix epoch (1970-01-01 00:00:00)
+- Not null date (0000:00:00 00:00:00)
+
+#### Unreliable Date Flagging
+
+Dates flagged as unreliable when:
+- No EXIF/video metadata found (only OS date available)
+- Year equals 1000 (fallback date)
+- Year < 1990 (before consumer digital cameras)
+- Year > current year + 1 (future date)
+- Unix epoch date (1970-01-01)
+- File is in a user-specified unreliable path
+
+#### Key Helper Functions
+
+| Function | Location | Purpose |
+|----------|----------|---------|
+| `_validate_exif_date()` | `DuplicateFileDetection.py` | Validates/parses EXIF date strings |
+| `_read_all_exif_dates()` | `DuplicateFileDetection.py` | Reads dates from all IFDs (base, EXIF, GPS) |
+| `_select_best_exif_date()` | `DuplicateFileDetection.py` | Implements priority + earliest-date algorithm |
+| `_try_iptc_date()` | `DuplicateFileDetection.py` | IPTC date extraction fallback |
+| `_try_video_date()` | `DuplicateFileDetection.py` | Video metadata extraction (ffprobe, mutagen, QuickTime) |
+| `get_creation_date()` | `DuplicateFileDetection.py` | Main entry point for date extraction |
 
 ### Photo Filtering
 
