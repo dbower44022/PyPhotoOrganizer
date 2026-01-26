@@ -26,6 +26,237 @@ import constants
 logger = utils.setup_logger(__name__, "DuplicateFileDetection_app_error.log")
 
 
+# -------------------------------------------------------------------------
+# Metadata Quality Scoring Functions (Schema v7)
+# -------------------------------------------------------------------------
+
+# Score values for different date sources (higher = better)
+METADATA_SOURCE_SCORES = {
+    'exif': 80,              # DateTimeOriginal - best
+    'exif_digitized': 70,    # DateTimeDigitized
+    'exif_gps': 65,          # GPS timestamp
+    'exif_datetime': 50,     # DateTime (file modification in EXIF)
+    'exif_preview': 45,      # PreviewDateTime
+    'iptc': 40,              # IPTC Date Created
+    'video_metadata': 60,    # ffprobe/mutagen creation_time
+    'video_quicktime': 55,   # QuickTime atom parsing
+    'os_metadata': 20,       # OS file timestamps
+    'fallback': 0            # Year 1000 fallback
+}
+
+
+def calculate_metadata_quality_score(date_source: str, is_reliable: bool) -> int:
+    """
+    Calculate a numerical metadata quality score (0-100).
+
+    Higher scores indicate better/more reliable metadata. This score is used
+    to compare incoming files with archive files to determine if the incoming
+    file has superior metadata worth upgrading to.
+
+    Score components:
+    - Base score (0-80): From date source type
+    - Reliability bonus (0-20): Added if date is reliable
+
+    Parameters:
+        date_source (str): Source of the date ('exif', 'os_metadata', etc.)
+        is_reliable (bool): Whether the date is considered reliable
+
+    Returns:
+        int: Quality score from 0 to 100
+    """
+    if date_source is None:
+        date_source = 'fallback'
+
+    base_score = METADATA_SOURCE_SCORES.get(date_source, 0)
+    reliability_bonus = 20 if is_reliable else 0
+
+    return base_score + reliability_bonus
+
+
+def should_upgrade_archive_file(archive_metadata: dict, incoming_date_source: str,
+                                 incoming_is_reliable: bool, incoming_date: str = None) -> tuple:
+    """
+    Determine if an archive file should be upgraded with an incoming duplicate.
+
+    An upgrade is recommended when:
+    1. Incoming file has a higher metadata quality score, OR
+    2. Same score AND incoming is reliable AND archive is not
+
+    Note: Files that have been manually corrected by the user are never upgraded.
+    This function does NOT check for manual corrections - that must be done separately.
+
+    Parameters:
+        archive_metadata (dict): Metadata from the archive file containing:
+            - date_source (str): Source of the archive file's date
+            - date_reliable (bool): Whether archive date is reliable
+            - metadata_quality_score (int): Pre-computed score for archive file
+            - create_datetime (str): Archive file's creation date
+        incoming_date_source (str): Date source of incoming file
+        incoming_is_reliable (bool): Whether incoming file's date is reliable
+        incoming_date (str, optional): Creation date of incoming file
+
+    Returns:
+        tuple: (should_upgrade: bool, reason: str, incoming_score: int)
+            - should_upgrade: True if incoming file should replace archive file
+            - reason: Explanation of the decision
+            - incoming_score: Calculated quality score for incoming file
+    """
+    # Calculate incoming file's quality score
+    incoming_score = calculate_metadata_quality_score(incoming_date_source, incoming_is_reliable)
+
+    # Get archive file's quality score (use pre-computed if available)
+    archive_score = archive_metadata.get('metadata_quality_score')
+    if archive_score is None:
+        # Fall back to computing from components
+        archive_date_source = archive_metadata.get('date_source')
+        archive_is_reliable = archive_metadata.get('date_reliable', True)
+        archive_score = calculate_metadata_quality_score(archive_date_source, archive_is_reliable)
+
+    # Compare scores
+    if incoming_score > archive_score:
+        # Incoming has better metadata
+        score_diff = incoming_score - archive_score
+        return (True,
+                f"Incoming has better metadata (score {incoming_score} vs {archive_score}, +{score_diff})",
+                incoming_score)
+
+    elif incoming_score == archive_score:
+        # Same score - check reliability as tiebreaker
+        archive_is_reliable = archive_metadata.get('date_reliable', True)
+        if incoming_is_reliable and not archive_is_reliable:
+            return (True,
+                    f"Same score ({incoming_score}) but incoming is reliable, archive is not",
+                    incoming_score)
+
+        # Check if dates differ - might be useful info but don't upgrade just for that
+        archive_date = archive_metadata.get('create_datetime')
+        if incoming_date and archive_date and incoming_date != archive_date:
+            return (False,
+                    f"Same quality ({incoming_score}), different dates ({incoming_date} vs {archive_date}) - no upgrade",
+                    incoming_score)
+
+        return (False,
+                f"Same quality ({incoming_score}), no improvement",
+                incoming_score)
+
+    else:
+        # Archive has better metadata
+        score_diff = archive_score - incoming_score
+        return (False,
+                f"Archive has better metadata (score {archive_score} vs {incoming_score}, archive is +{score_diff})",
+                incoming_score)
+
+
+def is_file_manually_corrected(database_path: str, file_hash: str) -> tuple:
+    """
+    Check if a file has been manually corrected by the user.
+
+    A file is protected from replacement if ANY of these are true:
+    1. Has revision_reason of 'date_correction' or 'exif_edit' (explicit EXIF edit)
+    2. Has a corrected_date in UnreliableDates table
+    3. Is a revision of a file that was user-edited (walks revision chain)
+
+    Parameters:
+        database_path (str): Path to the database
+        file_hash (str): Hash of the file to check
+
+    Returns:
+        tuple: (is_protected: bool, protection_reason: str or None)
+            - is_protected: True if file should not be replaced
+            - protection_reason: Explanation if protected, None otherwise
+    """
+    try:
+        # Import here to avoid circular import
+        from database_metadata import DatabaseMetadata
+
+        with PhotoDatabase(database_path) as db:
+            # Check 1: Direct revision reason check
+            db.cursor.execute("""
+                SELECT revision_reason, revised_photo FROM UniquePhotos WHERE file_hash = ?
+            """, (file_hash,))
+            result = db.cursor.fetchone()
+
+            if result:
+                revision_reason, revised_photo = result
+
+                # Check for explicit user edits
+                if revision_reason in ('date_correction', 'exif_edit', 'manual_correction'):
+                    return (True, f"File has user correction: {revision_reason}")
+
+                # Check 3: Walk revision chain to check ancestors
+                if revised_photo:
+                    # This file is a revision - check if the original was user-edited
+                    chain_protected, chain_reason = _check_revision_chain(db, revised_photo, set())
+                    if chain_protected:
+                        return (True, f"Ancestor in revision chain was edited: {chain_reason}")
+
+        # Check 2: Corrected date in UnreliableDates table
+        db_meta = DatabaseMetadata(database_path)
+        try:
+            with db_meta._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT corrected_date FROM UnreliableDates
+                    WHERE file_hash = ? AND corrected_date IS NOT NULL
+                """, (file_hash,))
+                result = cursor.fetchone()
+
+                if result and result[0]:
+                    return (True, "File has corrected date in UnreliableDates")
+        except Exception as e:
+            logger.warning(f"Could not check UnreliableDates for {file_hash}: {e}")
+
+        return (False, None)
+
+    except Exception as e:
+        logger.error(f"Error checking if file is manually corrected: {e}")
+        # On error, err on the side of caution and don't protect
+        return (False, None)
+
+
+def _check_revision_chain(db, file_hash: str, visited: set) -> tuple:
+    """
+    Recursively check revision chain for user corrections.
+
+    Parameters:
+        db: PhotoDatabase instance
+        file_hash (str): Hash to check
+        visited (set): Set of already-visited hashes to prevent cycles
+
+    Returns:
+        tuple: (is_protected: bool, protection_reason: str or None)
+    """
+    if file_hash in visited:
+        return (False, None)  # Cycle detected, stop
+
+    visited.add(file_hash)
+
+    try:
+        db.cursor.execute("""
+            SELECT revision_reason, revised_photo FROM UniquePhotos WHERE file_hash = ?
+        """, (file_hash,))
+        result = db.cursor.fetchone()
+
+        if not result:
+            return (False, None)
+
+        revision_reason, revised_photo = result
+
+        # Check for user edits at this level
+        if revision_reason in ('date_correction', 'exif_edit', 'manual_correction'):
+            return (True, f"Ancestor {file_hash[:8]}... has {revision_reason}")
+
+        # Continue up the chain
+        if revised_photo:
+            return _check_revision_chain(db, revised_photo, visited)
+
+        return (False, None)
+
+    except Exception as e:
+        logger.warning(f"Error checking revision chain for {file_hash}: {e}")
+        return (False, None)
+
+
 class PhotoDatabase:
     """
     Context manager for handling SQLite database connections for photo hash storage.
@@ -192,6 +423,19 @@ class PhotoDatabase:
                 logger.info("Upgrading database to Schema v6: adding storage_type column")
                 self.cursor.execute("ALTER TABLE UniquePhotos ADD COLUMN storage_type TEXT")
 
+            # Schema v7: Add metadata quality tracking columns for metadata upgrade feature
+            if 'date_source' not in columns:
+                logger.info("Upgrading database to Schema v7: adding date_source column")
+                self.cursor.execute("ALTER TABLE UniquePhotos ADD COLUMN date_source TEXT")
+
+            if 'date_reliable' not in columns:
+                logger.info("Upgrading database to Schema v7: adding date_reliable column")
+                self.cursor.execute("ALTER TABLE UniquePhotos ADD COLUMN date_reliable INTEGER DEFAULT 1")
+
+            if 'metadata_quality_score' not in columns:
+                logger.info("Upgrading database to Schema v7: adding metadata_quality_score column")
+                self.cursor.execute("ALTER TABLE UniquePhotos ADD COLUMN metadata_quality_score INTEGER DEFAULT 0")
+
             # Create index for content hash lookups
             self.cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_unique_content_hash
@@ -242,9 +486,10 @@ class PhotoDatabase:
 
     def insert_unique_photo(self, file_hash, file_path, create_datetime, create_year, create_month, create_day,
                            partial_hash=None, partial_hash_bytes=None, file_size=None, source_path=None,
-                           content_hash=None, relative_path=None, storage_type=None):
+                           content_hash=None, relative_path=None, storage_type=None,
+                           date_source=None, date_reliable=True, metadata_quality_score=None):
         """
-        Insert a new unique photo record into the database (Schema v6).
+        Insert a new unique photo record into the database (Schema v7).
 
         Parameters:
             file_hash (str): SHA-256 hash of the full file
@@ -260,23 +505,26 @@ class PhotoDatabase:
             content_hash (str, optional): SHA-256 hash of normalized pixel content
             relative_path (str, optional): Path relative to archive base (Schema v6)
             storage_type (str, optional): Storage type: 'archive', 'video_archive', or 'prior_revision' (Schema v6)
+            date_source (str, optional): Source of the date: 'exif', 'exif_digitized', 'exif_gps', etc. (Schema v7)
+            date_reliable (bool, optional): Whether the date is considered reliable (Schema v7)
+            metadata_quality_score (int, optional): Computed metadata quality score 0-100 (Schema v7)
         """
         try:
-            # Insert into UniquePhotos (v6 schema with relative paths)
+            # Insert into UniquePhotos (v7 schema with metadata quality tracking)
             # revised_photo=NULL, revision_reason=NULL (this is an original import, not a revision)
             self.cursor.execute(
                 """INSERT INTO UniquePhotos
                    (file_hash, partial_hash, partial_hash_bytes, file_size, file_name, source_path,
                     revised_photo, revision_reason, revision_timestamp,
                     create_datetime, create_year, create_month, create_day, content_hash,
-                    relative_path, storage_type)
-                   VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)""",
+                    relative_path, storage_type, date_source, date_reliable, metadata_quality_score)
+                   VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (file_hash, partial_hash, partial_hash_bytes, file_size, file_path, source_path,
                  create_datetime, create_year, create_month, create_day, content_hash,
-                 relative_path, storage_type)
+                 relative_path, storage_type, date_source, 1 if date_reliable else 0, metadata_quality_score)
             )
 
-            logger.debug(f"Inserted unique photo: {file_path} (partial_hash: {partial_hash is not None}, source: {source_path}, content_hash: {content_hash is not None}, relative_path: {relative_path})")
+            logger.debug(f"Inserted unique photo: {file_path} (partial_hash: {partial_hash is not None}, source: {source_path}, content_hash: {content_hash is not None}, relative_path: {relative_path}, date_source: {date_source})")
         except sqlite3.IntegrityError:
             # Hash already exists (PRIMARY KEY constraint)
             logger.warning(f"Attempted to insert duplicate hash: {file_hash}")
@@ -480,6 +728,154 @@ class PhotoDatabase:
             return result[0] if result else 0
         except Exception as e:
             logger.exception(f"Failed to count files without content hash: {e}")
+            raise
+
+    def get_metadata_quality_for_hash(self, file_hash):
+        """
+        Get metadata quality information for a file hash.
+        Used by the metadata upgrade feature to compare incoming files with archive files.
+
+        Parameters:
+            file_hash (str): SHA-256 hash to look up
+
+        Returns:
+            dict or None: Dictionary with metadata quality info, or None if not found.
+                {
+                    'file_hash': str,
+                    'file_name': str (archive path),
+                    'source_path': str,
+                    'create_datetime': str,
+                    'date_source': str,
+                    'date_reliable': bool,
+                    'metadata_quality_score': int,
+                    'content_hash': str,
+                    'revised_photo': str (original hash if this is a revision),
+                    'revision_reason': str
+                }
+        """
+        try:
+            self.cursor.execute(
+                """SELECT file_hash, file_name, source_path, create_datetime,
+                          date_source, date_reliable, metadata_quality_score,
+                          content_hash, revised_photo, revision_reason
+                   FROM UniquePhotos
+                   WHERE file_hash = ?
+                   LIMIT 1""",
+                (file_hash,)
+            )
+            result = self.cursor.fetchone()
+            if not result:
+                return None
+
+            return {
+                'file_hash': result[0],
+                'file_name': result[1],
+                'source_path': result[2],
+                'create_datetime': result[3],
+                'date_source': result[4],
+                'date_reliable': bool(result[5]) if result[5] is not None else True,
+                'metadata_quality_score': result[6] or 0,
+                'content_hash': result[7],
+                'revised_photo': result[8],
+                'revision_reason': result[9]
+            }
+        except Exception as e:
+            logger.exception(f"Failed to get metadata quality for hash: {e}")
+            raise
+
+    def update_metadata_quality(self, file_hash, date_source=None, date_reliable=None,
+                                metadata_quality_score=None):
+        """
+        Update metadata quality columns for an existing record.
+        Used for backfilling metadata quality scores on existing files.
+
+        Parameters:
+            file_hash (str): Primary key of the record to update
+            date_source (str, optional): The date source to set
+            date_reliable (bool, optional): Whether date is reliable
+            metadata_quality_score (int, optional): The quality score to set
+
+        Returns:
+            bool: True if record was updated, False if not found
+        """
+        try:
+            # Build dynamic update query based on provided parameters
+            updates = []
+            values = []
+
+            if date_source is not None:
+                updates.append("date_source = ?")
+                values.append(date_source)
+
+            if date_reliable is not None:
+                updates.append("date_reliable = ?")
+                values.append(1 if date_reliable else 0)
+
+            if metadata_quality_score is not None:
+                updates.append("metadata_quality_score = ?")
+                values.append(metadata_quality_score)
+
+            if not updates:
+                return False
+
+            values.append(file_hash)
+            query = f"UPDATE UniquePhotos SET {', '.join(updates)} WHERE file_hash = ?"
+
+            self.cursor.execute(query, tuple(values))
+            return self.cursor.rowcount > 0
+        except Exception as e:
+            logger.exception(f"Failed to update metadata quality: {e}")
+            raise
+
+    def get_files_without_metadata_quality(self, limit=100):
+        """
+        Get files that don't have metadata quality score calculated yet.
+        Used for backfilling metadata quality on existing files.
+
+        Parameters:
+            limit (int): Maximum number of records to return
+
+        Returns:
+            list: List of dicts with file_hash, file_name, source_path, create_datetime
+        """
+        try:
+            self.cursor.execute(
+                """SELECT file_hash, file_name, source_path, create_datetime
+                   FROM UniquePhotos
+                   WHERE metadata_quality_score IS NULL OR metadata_quality_score = 0
+                   LIMIT ?""",
+                (limit,)
+            )
+            results = self.cursor.fetchall()
+            return [
+                {
+                    "file_hash": row[0],
+                    "file_name": row[1],
+                    "source_path": row[2],
+                    "create_datetime": row[3]
+                }
+                for row in results
+            ]
+        except Exception as e:
+            logger.exception(f"Failed to get files without metadata quality: {e}")
+            raise
+
+    def count_files_without_metadata_quality(self):
+        """
+        Count how many files don't have a metadata quality score yet.
+        Used for progress display during backfill.
+
+        Returns:
+            int: Count of files without metadata_quality_score
+        """
+        try:
+            self.cursor.execute(
+                "SELECT COUNT(*) FROM UniquePhotos WHERE metadata_quality_score IS NULL OR metadata_quality_score = 0"
+            )
+            result = self.cursor.fetchone()
+            return result[0] if result else 0
+        except Exception as e:
+            logger.exception(f"Failed to count files without metadata quality: {e}")
             raise
 
     def get_archive_files_for_change_scan(self, scan_path: str, limit: int = 100, offset: int = 0,
@@ -1923,7 +2319,7 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                    partial_hash_enabled=True, partial_hash_bytes=constants.PARTIAL_HASH_BYTES,
                    partial_hash_min_file_size=constants.PARTIAL_HASH_MIN_FILE_SIZE,
                    config=None, progress_callback=None, audit_manager=None, session_id=None, should_stop=None,
-                   content_hash_enabled=True):
+                   content_hash_enabled=True, metadata_upgrade_enabled=True):
     """ Looks through a list of files and returns a list of duplicate and original files using two-stage hashing.
 
         Two-Stage Hashing Strategy:
@@ -1939,6 +2335,11 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
         - Filters out icons, web graphics, thumbnails based on size, dimensions, filename
         - Filtered files are tracked separately and not added to the database
 
+        Metadata Upgrade Detection (Schema v7):
+        - When a duplicate is detected, checks if incoming file has better metadata
+        - If metadata upgrade is enabled and incoming has better metadata, adds to upgrade_candidates
+        - Files manually corrected by user are protected from replacement
+
         Parameters:
         files - a list of files to be processed including the directory path to access the file
         hashes - a list of all previously located file hashes.
@@ -1953,6 +2354,7 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
             Used for graceful shutdown - when True is returned, commits partial progress and exits cleanly.
         content_hash_enabled - whether to calculate content (pixel) hashes for duplicate detection (default: True)
             Content hashing detects visually identical images with different metadata/EXIF.
+        metadata_upgrade_enabled - whether to detect upgrade candidates (duplicates with better metadata) (default: True)
 
         Returns:
             results - a dictionary containing:
@@ -1960,6 +2362,7 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                 original_files - list of new unique files that were added to database
                 filtered_files - list of files that were filtered out (not real photos)
                 content_duplicate_files - list of files with same pixel content as existing files
+                upgrade_candidates - list of duplicates that have better metadata than archive (Schema v7)
                 status - "completed" if successful, "cancelled" if stopped early
                 files_processed - total number of files processed
                 files_skipped - number of files skipped (already in DB from previous run)
@@ -2000,6 +2403,8 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
         original_files = []
         filtered_files = []
         content_duplicate_files = []  # Files with same pixel content as existing files
+        upgrade_candidates = []  # Schema v7: Duplicates with better metadata than archive
+        protected_files = []  # Schema v7: Duplicates that would upgrade but are user-protected
         files_processed = 0
         files_skipped = 0
         files_since_last_commit = 0
@@ -2016,6 +2421,71 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
         date_from_exif = 0  # Files with EXIF date (includes IPTC)
         date_from_os = 0  # Files using OS metadata date
         date_from_video = 0  # Files using video metadata date
+
+        def _check_and_handle_upgrade_candidate(db, incoming_path, archive_file_hash, incoming_file_size):
+            """
+            Check if a duplicate should be an upgrade candidate.
+
+            Returns:
+                tuple: (is_upgrade_candidate, candidate_info or None, is_protected, protection_reason)
+            """
+            if not metadata_upgrade_enabled:
+                return (False, None, False, None)
+
+            try:
+                # Get archive file's metadata
+                archive_metadata = db.get_metadata_quality_for_hash(archive_file_hash)
+                if not archive_metadata:
+                    logger.warning(f"No metadata found for archive hash {archive_file_hash}")
+                    return (False, None, False, None)
+
+                # Get incoming file's date info
+                incoming_year, incoming_month, incoming_day, incoming_date_source, incoming_is_reliable = get_creation_date(incoming_path, database_path)
+                incoming_date = f"{incoming_year}-{incoming_month}-{incoming_day}"
+
+                # Check if archive file is manually corrected (protected)
+                is_protected, protection_reason = is_file_manually_corrected(database_path, archive_file_hash)
+                if is_protected:
+                    logger.info(f"Archive file is protected from upgrade: {protection_reason}")
+                    return (False, None, True, protection_reason)
+
+                # Compare metadata quality
+                should_upgrade, upgrade_reason, incoming_score = should_upgrade_archive_file(
+                    archive_metadata,
+                    incoming_date_source,
+                    incoming_is_reliable,
+                    incoming_date
+                )
+
+                if should_upgrade:
+                    candidate_info = {
+                        'incoming_path': incoming_path,
+                        'incoming_file_size': incoming_file_size,
+                        'archive_file_hash': archive_file_hash,
+                        'archive_path': archive_metadata.get('file_name'),
+                        'archive_date': archive_metadata.get('create_datetime'),
+                        'archive_date_source': archive_metadata.get('date_source'),
+                        'archive_metadata_score': archive_metadata.get('metadata_quality_score', 0),
+                        'incoming_date': incoming_date,
+                        'incoming_year': incoming_year,
+                        'incoming_month': incoming_month,
+                        'incoming_day': incoming_day,
+                        'incoming_date_source': incoming_date_source,
+                        'incoming_is_reliable': incoming_is_reliable,
+                        'incoming_metadata_score': incoming_score,
+                        'upgrade_reason': upgrade_reason,
+                        'date_changed': incoming_date != archive_metadata.get('create_datetime'),
+                        'content_hash': archive_metadata.get('content_hash')
+                    }
+                    logger.info(f"Upgrade candidate found: {incoming_path} -> {archive_metadata.get('file_name')} ({upgrade_reason})")
+                    return (True, candidate_info, False, None)
+                else:
+                    logger.debug(f"No upgrade needed: {upgrade_reason}")
+                    return (False, None, False, None)
+
+            except Exception as e:
+                logger.warning(f"Error checking upgrade candidate for {incoming_path}: {e}")
+                return (False, None, False, None)
 
         # Initialize photo filter if config provided
         photo_filter = None
@@ -2229,7 +2699,45 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                 # Check if full hash matches any of the candidates or historical hashes
                                 if file_hash in matching_full_hashes or file_hash in historical_hashes:
                                     logger.info(f"DUPLICATE CONFIRMED: Full hash matches (current or historical) for {filename}")
-                                    # This is a true duplicate
+
+                                    # Schema v7: Check if this duplicate should be an upgrade candidate
+                                    is_upgrade, candidate_info, is_protected, protect_reason = _check_and_handle_upgrade_candidate(
+                                        db, filename, file_hash, file_size
+                                    )
+
+                                    if is_upgrade and candidate_info:
+                                        # Add to upgrade candidates instead of regular duplicates
+                                        upgrade_candidates.append(candidate_info)
+                                        files_processed += 1
+
+                                        # Log upgrade candidate to audit
+                                        if audit_manager and session_id:
+                                            try:
+                                                db.commit()
+                                                audit_manager.log_file_operation(
+                                                    session_id=session_id,
+                                                    source_path=filename,
+                                                    operation='upgrade_candidate',
+                                                    status='pending',
+                                                    file_hash=file_hash,
+                                                    file_size=file_size,
+                                                    notes=candidate_info.get('upgrade_reason', '')
+                                                )
+                                            except Exception as audit_err:
+                                                logger.debug(f"Failed to log audit for upgrade candidate: {audit_err}")
+
+                                        pbar.update(1)
+                                        continue
+
+                                    elif is_protected:
+                                        # Track as protected but still a duplicate
+                                        protected_files.append({
+                                            'file_path': filename,
+                                            'file_hash': file_hash,
+                                            'protection_reason': protect_reason
+                                        })
+
+                                    # This is a true duplicate (no upgrade needed)
                                     files_skipped += 1
                                     duplicate_file = {
                                         "file_hash": file_hash,
@@ -2294,6 +2802,44 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                             # Check if hash already exists in database (current or historical)
                             if db.has_hash(file_hash) or file_hash in historical_hashes:
                                 logger.info(f"File hash already in database (current or historical): {filename}")
+
+                                # Schema v7: Check if this duplicate should be an upgrade candidate
+                                is_upgrade, candidate_info, is_protected, protect_reason = _check_and_handle_upgrade_candidate(
+                                    db, filename, file_hash, file_size
+                                )
+
+                                if is_upgrade and candidate_info:
+                                    # Add to upgrade candidates instead of regular duplicates
+                                    upgrade_candidates.append(candidate_info)
+                                    files_processed += 1
+
+                                    # Log upgrade candidate to audit
+                                    if audit_manager and session_id:
+                                        try:
+                                            db.commit()
+                                            audit_manager.log_file_operation(
+                                                session_id=session_id,
+                                                source_path=filename,
+                                                operation='upgrade_candidate',
+                                                status='pending',
+                                                file_hash=file_hash,
+                                                file_size=file_size,
+                                                notes=candidate_info.get('upgrade_reason', '')
+                                            )
+                                        except Exception as audit_err:
+                                            logger.debug(f"Failed to log audit for upgrade candidate: {audit_err}")
+
+                                    pbar.update(1)
+                                    continue
+
+                                elif is_protected:
+                                    # Track as protected but still a duplicate
+                                    protected_files.append({
+                                        'file_path': filename,
+                                        'file_hash': file_hash,
+                                        'protection_reason': protect_reason
+                                    })
+
                                 files_skipped += 1
                                 duplicate_file = {
                                     "file_hash": file_hash,
@@ -2333,6 +2879,25 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                         # Check against in-memory hash list (current batch) and historical hashes
                         if file_hash in hashes or file_hash in historical_hashes:
                             logger.info(f"Duplicate found (in batch or historical): {filename}")
+
+                            # Schema v7: Check if this duplicate should be an upgrade candidate
+                            is_upgrade, candidate_info, is_protected, protect_reason = _check_and_handle_upgrade_candidate(
+                                db, filename, file_hash, file_size
+                            )
+
+                            if is_upgrade and candidate_info:
+                                upgrade_candidates.append(candidate_info)
+                                files_processed += 1
+                                pbar.update(1)
+                                continue
+
+                            elif is_protected:
+                                protected_files.append({
+                                    'file_path': filename,
+                                    'file_hash': file_hash,
+                                    'protection_reason': protect_reason
+                                })
+
                             duplicate_file = {
                                 "file_hash": file_hash,
                                 "file_path": filename,
@@ -2450,7 +3015,10 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                 "file_create_month": file_month,
                                 "file_create_day": file_day,
                                 "content_hash": content_hash,
-                                "is_content_duplicate": is_content_duplicate
+                                "is_content_duplicate": is_content_duplicate,
+                                # Schema v7: Metadata quality tracking
+                                "date_source": date_source,
+                                "date_reliable": is_reliable
                             }
                             original_files.append(original_file)
 
@@ -2466,7 +3034,10 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                 }
                                 content_duplicate_files.append(content_duplicate_entry)
 
-                            # Add to database with partial hash info and source path (v5 schema)
+                            # Calculate metadata quality score (Schema v7)
+                            metadata_quality_score = calculate_metadata_quality_score(date_source, is_reliable)
+
+                            # Add to database with partial hash info and source path (v7 schema)
                             db.insert_unique_photo(
                                 file_hash,
                                 filename,  # This will be archive path after organize_files()
@@ -2478,7 +3049,10 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                 partial_hash_bytes=partial_hash_bytes if partial_hash else None,
                                 file_size=file_size,
                                 source_path=filename,  # Original source location (v5 schema)
-                                content_hash=content_hash
+                                content_hash=content_hash,
+                                date_source=date_source,  # Schema v7: Track date source
+                                date_reliable=is_reliable,  # Schema v7: Track reliability
+                                metadata_quality_score=metadata_quality_score  # Schema v7: Track quality score
                             )
 
                             files_processed += 1
@@ -2575,6 +3149,8 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
         results["original_files"] = original_files
         results["filtered_files"] = filtered_files
         results["content_duplicate_files"] = content_duplicate_files
+        results["upgrade_candidates"] = upgrade_candidates  # Schema v7: Duplicates with better metadata
+        results["protected_files"] = protected_files  # Schema v7: User-corrected files not upgraded
         results["status"] = "cancelled" if was_cancelled else "completed"
         results["files_processed"] = files_processed
         results["files_skipped"] = files_skipped
@@ -2583,6 +3159,12 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
         if was_cancelled:
             logger.info(f"=== PROCESSING CANCELLED ===")
             logger.info(f"Partial progress saved: {files_processed} files processed, {len(original_files)} unique files added")
+
+        # Log upgrade candidate stats
+        if upgrade_candidates:
+            logger.info(f"Upgrade candidates found: {len(upgrade_candidates)}")
+        if protected_files:
+            logger.info(f"Protected files (user-corrected): {len(protected_files)}")
 
         # Add filter statistics if filtering was enabled
         if photo_filter and photo_filter.enabled:

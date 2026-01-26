@@ -212,6 +212,26 @@ class DatabaseMetadata:
         );
     """
 
+    METADATA_UPGRADE_HISTORY_TABLE_SCHEMA = """
+        CREATE TABLE IF NOT EXISTS MetadataUpgradeHistory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            upgrade_timestamp TEXT NOT NULL,
+            session_id TEXT,
+            original_file_hash TEXT NOT NULL,
+            incoming_file_hash TEXT NOT NULL,
+            original_date_source TEXT,
+            original_metadata_score INTEGER,
+            incoming_date_source TEXT,
+            incoming_metadata_score INTEGER,
+            original_date TEXT,
+            incoming_date TEXT,
+            archive_path TEXT NOT NULL,
+            prior_revision_path TEXT NOT NULL,
+            date_changed INTEGER DEFAULT 0,
+            FOREIGN KEY (original_file_hash) REFERENCES UniquePhotos(file_hash)
+        );
+    """
+
     def __init__(self, database_path: str):
         """
         Initialize database metadata manager.
@@ -232,6 +252,7 @@ class DatabaseMetadata:
         self._ensure_pending_operations_table()
         self._ensure_audit_queue_table()
         self._ensure_quick_backups_table()
+        self._ensure_metadata_upgrade_history_table()
 
     def _get_connection(self) -> sqlite3.Connection:
         """
@@ -371,6 +392,13 @@ class DatabaseMetadata:
                     logger.info("Upgrading database: adding last_backup_status column")
                     cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN last_backup_status TEXT")
 
+                # Add metadata_upgrade_enabled column if missing (for metadata-based archive upgrade feature)
+                if 'metadata_upgrade_enabled' not in columns:
+                    logger.info("Upgrading database: adding metadata_upgrade_enabled column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN metadata_upgrade_enabled INTEGER DEFAULT 1")
+                    # Set default value for existing rows (feature enabled by default)
+                    cursor.execute("UPDATE DatabaseMetadata SET metadata_upgrade_enabled = 1 WHERE metadata_upgrade_enabled IS NULL")
+
                 conn.commit()
                 logger.debug(f"Metadata table ensured in {self.database_path}")
 
@@ -502,6 +530,36 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to create QuickBackups table: {e}")
+            raise
+
+    def _ensure_metadata_upgrade_history_table(self):
+        """Ensure the MetadataUpgradeHistory table exists for tracking metadata-based upgrades."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Create table if it doesn't exist
+                cursor.execute(self.METADATA_UPGRADE_HISTORY_TABLE_SCHEMA)
+
+                # Create indexes for efficient lookups
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_metadata_upgrade_timestamp
+                    ON MetadataUpgradeHistory(upgrade_timestamp)
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_metadata_upgrade_original_hash
+                    ON MetadataUpgradeHistory(original_file_hash)
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_metadata_upgrade_session
+                    ON MetadataUpgradeHistory(session_id)
+                """)
+
+                conn.commit()
+                logger.debug(f"MetadataUpgradeHistory table ensured in {self.database_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to create MetadataUpgradeHistory table: {e}")
             raise
 
     def _ensure_unreliable_dates_table(self):
@@ -709,7 +767,8 @@ class DatabaseMetadata:
                         'thumbnail_size', 'thumbnail_cache_dir', 'preview_window_geometry',
                         'preview_window_visible', 'cache_memory_mb', 'cache_worker_threads',
                         'delete_vault_location', 'photo_review_state', 'content_hash_enabled',
-                        'backup_location', 'last_backup_timestamp', 'last_backup_status'
+                        'backup_location', 'last_backup_timestamp', 'last_backup_status',
+                        'metadata_upgrade_enabled'  # Schema v7
                     }
 
                     missing_metadata = expected_metadata_columns - metadata_columns
@@ -777,7 +836,7 @@ class DatabaseMetadata:
                     'DatabaseMetadata', 'SourceDirectories', 'SourceDirectorySubAlbums',
                     'PendingOperations', 'AuditQueue', 'QuickBackups', 'UnreliableDates',
                     'FileRenameHistory', 'ThumbnailCache', 'DeletedFiles', 'FileVersions',
-                    'SavedQueries', 'Albums', 'AlbumPhotos'
+                    'SavedQueries', 'Albums', 'AlbumPhotos', 'MetadataUpgradeHistory'  # Schema v7
                 }
 
                 missing_tables = expected_tables - existing_tables
@@ -3699,6 +3758,244 @@ class DatabaseMetadata:
         except Exception as e:
             logger.error(f"Failed to set content hash enabled state: {e}", exc_info=True)
             return False
+
+    # -------------------------------------------------------------------------
+    # Metadata Upgrade Configuration Methods
+    # -------------------------------------------------------------------------
+
+    def is_metadata_upgrade_enabled(self) -> bool:
+        """
+        Check if metadata-based archive upgrade is enabled.
+
+        When enabled, if a duplicate file being imported has better metadata
+        (e.g., EXIF date) than the existing archive file, the archive file
+        will be replaced with the incoming file. The original is preserved
+        in the Prior Revision Archive.
+
+        Returns:
+            True if enabled (default), False otherwise
+        """
+        try:
+            self._ensure_metadata_table()
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT metadata_upgrade_enabled FROM DatabaseMetadata WHERE id = 1
+                """)
+                result = cursor.fetchone()
+
+                if result is None or result[0] is None:
+                    return True  # Default to enabled
+                return bool(result[0])
+
+        except Exception as e:
+            logger.error(f"Error checking metadata upgrade enabled status: {e}", exc_info=True)
+            return True  # Default to enabled on error
+
+    def set_metadata_upgrade_enabled(self, enabled: bool) -> bool:
+        """
+        Enable or disable metadata-based archive upgrade.
+
+        When enabled, if a duplicate file being imported has better metadata
+        (e.g., EXIF date) than the existing archive file, the archive file
+        will be replaced with the incoming file. The original is preserved
+        in the Prior Revision Archive.
+
+        Note: Files that have been manually corrected by the user are never replaced.
+
+        Args:
+            enabled: True to enable metadata upgrades, False to disable
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            logger.info(f"→ set_metadata_upgrade_enabled({enabled}) called for database: {self.database_path}")
+            self._ensure_metadata_table()
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Check if row exists
+                cursor.execute("SELECT COUNT(*) FROM DatabaseMetadata WHERE id = 1")
+                count = cursor.fetchone()[0]
+                if count == 0:
+                    logger.error("Cannot set metadata upgrade enabled: DatabaseMetadata row (id=1) does not exist!")
+                    return False
+
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET metadata_upgrade_enabled = ?
+                    WHERE id = 1
+                """, (1 if enabled else 0,))
+
+                rows_affected = cursor.rowcount
+                conn.commit()
+
+                if rows_affected > 0:
+                    logger.info(f"Metadata upgrade {'ENABLED' if enabled else 'DISABLED'} successfully")
+                    return True
+                else:
+                    logger.warning("UPDATE returned 0 rows affected - row may not exist")
+                    return False
+
+        except Exception as e:
+            logger.error(f"Failed to set metadata upgrade enabled state: {e}", exc_info=True)
+            return False
+
+    # -------------------------------------------------------------------------
+    # Metadata Upgrade History Methods
+    # -------------------------------------------------------------------------
+
+    def insert_metadata_upgrade_record(self, session_id: str, original_file_hash: str,
+                                       incoming_file_hash: str, original_date_source: str,
+                                       original_metadata_score: int, incoming_date_source: str,
+                                       incoming_metadata_score: int, original_date: str,
+                                       incoming_date: str, archive_path: str,
+                                       prior_revision_path: str, date_changed: bool) -> bool:
+        """
+        Record a metadata upgrade operation for audit trail.
+
+        Args:
+            session_id: Import session ID
+            original_file_hash: Hash of the original archive file
+            incoming_file_hash: Hash of the incoming (replacement) file
+            original_date_source: Date source of original file ('exif', 'os_metadata', etc.)
+            original_metadata_score: Metadata quality score of original file
+            incoming_date_source: Date source of incoming file
+            incoming_metadata_score: Metadata quality score of incoming file
+            original_date: Creation date from original file (YYYY-MM-DD)
+            incoming_date: Creation date from incoming file (YYYY-MM-DD)
+            archive_path: Path where file is stored in archive
+            prior_revision_path: Path where original was moved in Prior Revision Archive
+            date_changed: Whether the date changed (requiring file reorganization)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    INSERT INTO MetadataUpgradeHistory
+                    (upgrade_timestamp, session_id, original_file_hash, incoming_file_hash,
+                     original_date_source, original_metadata_score, incoming_date_source,
+                     incoming_metadata_score, original_date, incoming_date,
+                     archive_path, prior_revision_path, date_changed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    datetime.now().isoformat(),
+                    session_id,
+                    original_file_hash,
+                    incoming_file_hash,
+                    original_date_source,
+                    original_metadata_score,
+                    incoming_date_source,
+                    incoming_metadata_score,
+                    original_date,
+                    incoming_date,
+                    archive_path,
+                    prior_revision_path,
+                    1 if date_changed else 0
+                ))
+
+                conn.commit()
+                logger.info(f"Recorded metadata upgrade: {original_file_hash} -> {incoming_file_hash}")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to insert metadata upgrade record: {e}", exc_info=True)
+            return False
+
+    def get_metadata_upgrade_history(self, session_id: str = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Get metadata upgrade history records.
+
+        Args:
+            session_id: Optional session ID to filter by
+            limit: Maximum number of records to return
+
+        Returns:
+            List of dictionaries containing upgrade history records
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                if session_id:
+                    cursor.execute("""
+                        SELECT id, upgrade_timestamp, session_id, original_file_hash,
+                               incoming_file_hash, original_date_source, original_metadata_score,
+                               incoming_date_source, incoming_metadata_score, original_date,
+                               incoming_date, archive_path, prior_revision_path, date_changed
+                        FROM MetadataUpgradeHistory
+                        WHERE session_id = ?
+                        ORDER BY upgrade_timestamp DESC
+                        LIMIT ?
+                    """, (session_id, limit))
+                else:
+                    cursor.execute("""
+                        SELECT id, upgrade_timestamp, session_id, original_file_hash,
+                               incoming_file_hash, original_date_source, original_metadata_score,
+                               incoming_date_source, incoming_metadata_score, original_date,
+                               incoming_date, archive_path, prior_revision_path, date_changed
+                        FROM MetadataUpgradeHistory
+                        ORDER BY upgrade_timestamp DESC
+                        LIMIT ?
+                    """, (limit,))
+
+                results = cursor.fetchall()
+
+                return [{
+                    'id': row[0],
+                    'upgrade_timestamp': row[1],
+                    'session_id': row[2],
+                    'original_file_hash': row[3],
+                    'incoming_file_hash': row[4],
+                    'original_date_source': row[5],
+                    'original_metadata_score': row[6],
+                    'incoming_date_source': row[7],
+                    'incoming_metadata_score': row[8],
+                    'original_date': row[9],
+                    'incoming_date': row[10],
+                    'archive_path': row[11],
+                    'prior_revision_path': row[12],
+                    'date_changed': bool(row[13])
+                } for row in results]
+
+        except Exception as e:
+            logger.error(f"Failed to get metadata upgrade history: {e}", exc_info=True)
+            return []
+
+    def get_metadata_upgrade_count(self, session_id: str = None) -> int:
+        """
+        Get count of metadata upgrades, optionally filtered by session.
+
+        Args:
+            session_id: Optional session ID to filter by
+
+        Returns:
+            Count of metadata upgrade records
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                if session_id:
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM MetadataUpgradeHistory WHERE session_id = ?
+                    """, (session_id,))
+                else:
+                    cursor.execute("SELECT COUNT(*) FROM MetadataUpgradeHistory")
+
+                result = cursor.fetchone()
+                return result[0] if result else 0
+
+        except Exception as e:
+            logger.error(f"Failed to get metadata upgrade count: {e}", exc_info=True)
+            return 0
 
     # -------------------------------------------------------------------------
     # Saved Queries Methods

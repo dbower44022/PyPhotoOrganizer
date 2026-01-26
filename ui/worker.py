@@ -161,6 +161,13 @@ class ProcessingWorker(QThread):
                 'total_filtered': final_results.get('total_filtered', 0),
                 'total_unreliable_dates': final_results.get('total_unreliable_dates', 0),
                 'total_errors': final_results.get('total_errors', 0),
+                # Schema v7: Metadata upgrade results
+                'upgrade_candidates': final_results.get('upgrade_candidates', 0),
+                'upgrades_completed': final_results.get('upgrades_completed', 0),
+                'upgrades_failed': final_results.get('upgrades_failed', 0),
+                'upgrades_skipped': final_results.get('upgrades_skipped', 0),
+                'protected_files': final_results.get('protected_files', 0),
+                'files_reorganized': final_results.get('files_reorganized', 0),
                 'processing_time': processing_time,
                 'filter_statistics': final_results.get('filter_statistics', {}),
                 'filtered_files': final_results.get('filtered_files', []),
@@ -181,7 +188,11 @@ class ProcessingWorker(QThread):
                         'total_unique_files': complete_results['total_new_original_files'],
                         'total_duplicates': complete_results['total_duplicates'],
                         'total_filtered': complete_results['total_filtered'],
-                        'total_errors': complete_results['total_errors']
+                        'total_errors': complete_results['total_errors'],
+                        # Schema v7: Metadata upgrade stats
+                        'upgrade_candidates': complete_results.get('upgrade_candidates', 0),
+                        'upgrades_completed': complete_results.get('upgrades_completed', 0),
+                        'upgrades_failed': complete_results.get('upgrades_failed', 0)
                     }
                 )
 

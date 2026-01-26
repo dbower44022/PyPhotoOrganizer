@@ -119,6 +119,8 @@ class FileLogTableModel(QAbstractTableModel):
                     return QBrush(QColor('orange'))
                 elif status == 'content_duplicate':
                     return QBrush(QColor('#9966CC'))  # Purple for content duplicates
+                elif status == 'upgraded':
+                    return QBrush(QColor('#0088CC'))  # Blue for metadata upgrades
 
         elif role == Qt.BackgroundRole:
             # Highlight rows being processed
@@ -865,6 +867,7 @@ class ImportHistoryTab(QWidget):
             "New Files (Added to Archive)",
             "Duplicates",
             "Content Duplicates",
+            "Metadata Upgrades",
             "Filtered (Icons/Thumbnails)",
             "Recently Overridden",
             "External Modifications",
@@ -1330,6 +1333,7 @@ class ImportHistoryTab(QWidget):
                 self._new_files_logs = []
                 self._duplicate_logs = []
                 self._content_duplicate_logs = []
+                self._metadata_upgrade_logs = []
                 self._filtered_logs = []
                 self._external_modification_logs = []
                 self._bulk_delete_logs = []
@@ -1348,6 +1352,8 @@ class ImportHistoryTab(QWidget):
                         self._duplicate_logs.append(log)
                     elif op == 'content_duplicate_detected':
                         self._content_duplicate_logs.append(log)
+                    elif op == 'metadata_upgrade':
+                        self._metadata_upgrade_logs.append(log)
                     elif op == 'skip_filtered':
                         self._filtered_logs.append(log)
                     elif op == 'external_modification_detected':
@@ -1361,7 +1367,7 @@ class ImportHistoryTab(QWidget):
                     if status == 'failed':
                         self._error_logs.append(log)
 
-            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Content Duplicates: {len(self._content_duplicate_logs)}, Filtered: {len(self._filtered_logs)}, External Mods: {len(self._external_modification_logs)}, Bulk Delete: {len(self._bulk_delete_logs)}, Archive Recovery: {len(self._archive_recovery_logs)}, Errors: {len(self._error_logs)}")
+            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Content Duplicates: {len(self._content_duplicate_logs)}, Metadata Upgrades: {len(self._metadata_upgrade_logs)}, Filtered: {len(self._filtered_logs)}, External Mods: {len(self._external_modification_logs)}, Bulk Delete: {len(self._bulk_delete_logs)}, Archive Recovery: {len(self._archive_recovery_logs)}, Errors: {len(self._error_logs)}")
 
             # Enrich duplicate logs with archive file paths
             with profile_block("Enrich duplicate logs with archive paths", logger):
@@ -1399,6 +1405,7 @@ class ImportHistoryTab(QWidget):
                 self._new_files_logs = []
                 self._duplicate_logs = []
                 self._content_duplicate_logs = []
+                self._metadata_upgrade_logs = []
                 self._filtered_logs = []
                 self._external_modification_logs = []
                 self._bulk_delete_logs = []
@@ -1417,6 +1424,8 @@ class ImportHistoryTab(QWidget):
                         self._duplicate_logs.append(log)
                     elif op == 'content_duplicate_detected':
                         self._content_duplicate_logs.append(log)
+                    elif op == 'metadata_upgrade':
+                        self._metadata_upgrade_logs.append(log)
                     elif op == 'skip_filtered':
                         self._filtered_logs.append(log)
                     elif op == 'external_modification_detected':
@@ -1430,7 +1439,7 @@ class ImportHistoryTab(QWidget):
                     if status == 'failed':
                         self._error_logs.append(log)
 
-            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Content Duplicates: {len(self._content_duplicate_logs)}, Filtered: {len(self._filtered_logs)}, External Mods: {len(self._external_modification_logs)}, Bulk Delete: {len(self._bulk_delete_logs)}, Archive Recovery: {len(self._archive_recovery_logs)}, Errors: {len(self._error_logs)}")
+            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Content Duplicates: {len(self._content_duplicate_logs)}, Metadata Upgrades: {len(self._metadata_upgrade_logs)}, Filtered: {len(self._filtered_logs)}, External Mods: {len(self._external_modification_logs)}, Bulk Delete: {len(self._bulk_delete_logs)}, Archive Recovery: {len(self._archive_recovery_logs)}, Errors: {len(self._error_logs)}")
 
             # Enrich duplicate logs with archive file paths
             with profile_block("Enrich duplicate logs with archive paths", logger):
@@ -1463,6 +1472,8 @@ class ImportHistoryTab(QWidget):
             self._model.setData(self._duplicate_logs)
         elif show == "Content Duplicates":
             self._model.setData(getattr(self, '_content_duplicate_logs', []))
+        elif show == "Metadata Upgrades":
+            self._model.setData(getattr(self, '_metadata_upgrade_logs', []))
         elif show == "Filtered (Icons/Thumbnails)":
             self._model.setData(self._filtered_logs)
         elif show == "Recently Overridden":

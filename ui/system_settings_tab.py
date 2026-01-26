@@ -206,6 +206,43 @@ class SystemSettingsTab(QWidget):
         # Initialize backfill worker reference
         self._backfill_worker = None
 
+        # Metadata-Based Archive Upgrade Settings
+        metadata_upgrade_group = QGroupBox("Metadata-Based Archive Upgrades")
+        metadata_upgrade_group.setStyleSheet(self.groupbox_style)
+        metadata_upgrade_layout = QVBoxLayout()
+
+        metadata_upgrade_desc = QLabel(
+            "When importing a duplicate file with better metadata (e.g., EXIF date vs OS date), "
+            "automatically replace the archive file with the incoming file. The original is "
+            "preserved in the Prior Revision Archive. User-corrected files are never replaced."
+        )
+        metadata_upgrade_desc.setWordWrap(True)
+        metadata_upgrade_desc.setStyleSheet("font-style: italic; color: gray; padding: 5px;")
+        metadata_upgrade_layout.addWidget(metadata_upgrade_desc)
+
+        self.metadata_upgrade_enabled_check = QCheckBox("Enable automatic metadata upgrades during import")
+        self.metadata_upgrade_enabled_check.setChecked(True)
+        self.metadata_upgrade_enabled_check.setToolTip(
+            "When enabled, duplicates with better metadata will replace inferior archive files.\n"
+            "For example: A file with EXIF date will replace a file that only has OS file date.\n"
+            "Files you have manually corrected are protected and will never be replaced."
+        )
+        self.metadata_upgrade_enabled_check.stateChanged.connect(self.on_metadata_upgrade_enabled_changed)
+        metadata_upgrade_layout.addWidget(self.metadata_upgrade_enabled_check)
+
+        # Priority explanation
+        priority_label = QLabel(
+            "<b>Metadata quality priority:</b> EXIF DateTimeOriginal > EXIF DateTimeDigitized > "
+            "GPS Date > Video metadata > IPTC > EXIF DateTime > OS file date"
+        )
+        priority_label.setWordWrap(True)
+        priority_label.setStyleSheet("font-size: 10px; color: #444; margin-top: 10px; padding: 5px; "
+                                     "background-color: #f9f9f9; border: 1px solid #ddd; border-radius: 3px;")
+        metadata_upgrade_layout.addWidget(priority_label)
+
+        metadata_upgrade_group.setLayout(metadata_upgrade_layout)
+        layout.addWidget(metadata_upgrade_group)
+
         # Thumbnail Cache Settings
         cache_group = QGroupBox("Thumbnail Cache Settings (Date Corrections Tab)")
         cache_group.setStyleSheet(self.groupbox_style)
@@ -463,6 +500,12 @@ class SystemSettingsTab(QWidget):
         self.content_hash_enabled_check.blockSignals(True)
         self.content_hash_enabled_check.setChecked(content_hash_enabled)
         self.content_hash_enabled_check.blockSignals(False)
+
+        # Load metadata upgrade settings
+        metadata_upgrade_enabled = db_metadata.is_metadata_upgrade_enabled()
+        self.metadata_upgrade_enabled_check.blockSignals(True)
+        self.metadata_upgrade_enabled_check.setChecked(metadata_upgrade_enabled)
+        self.metadata_upgrade_enabled_check.blockSignals(False)
 
     def refresh_database_statistics(self):
         """Refresh the database statistics display."""
@@ -864,6 +907,22 @@ class SystemSettingsTab(QWidget):
             self.content_hash_enabled_check.blockSignals(True)
             self.content_hash_enabled_check.setChecked(not enabled)
             self.content_hash_enabled_check.blockSignals(False)
+
+    def on_metadata_upgrade_enabled_changed(self, state):
+        """Handle metadata upgrade enabled checkbox change."""
+        if not self.db_metadata:
+            return
+
+        enabled = state == Qt.Checked
+        success = self.db_metadata.set_metadata_upgrade_enabled(enabled)
+        if success:
+            logger.info(f"Metadata upgrades {'enabled' if enabled else 'disabled'}")
+        else:
+            logger.warning("Failed to save metadata upgrade setting")
+            # Revert checkbox
+            self.metadata_upgrade_enabled_check.blockSignals(True)
+            self.metadata_upgrade_enabled_check.setChecked(not enabled)
+            self.metadata_upgrade_enabled_check.blockSignals(False)
 
     def start_content_hash_backfill(self):
         """Start the content hash backfill process."""

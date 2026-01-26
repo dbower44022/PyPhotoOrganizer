@@ -85,6 +85,287 @@ from datetime import datetime as dt_datetime
 logger = utils.setup_logger(__name__, "main_app_error.log")
 
 
+def perform_metadata_upgrades(upgrade_candidates, database_path, db_metadata, organization_template,
+                               progress_callback=None, audit_manager=None, session_id=None,
+                               should_stop=None):
+    """
+    Perform metadata-based archive upgrades for files identified as upgrade candidates.
+
+    This function handles the upgrade process where a duplicate file with better metadata
+    replaces an existing archive file. The original archive file is moved to the Prior
+    Revision Archive before replacement.
+
+    Parameters:
+        upgrade_candidates (list): List of upgrade candidate dictionaries from find_duplicates
+            Each dict contains: incoming_path, archive_file_hash, archive_path, archive_date,
+            incoming_date, incoming_year/month/day, incoming_date_source, incoming_is_reliable,
+            incoming_metadata_score, upgrade_reason, date_changed, content_hash
+        database_path (str): Path to the SQLite database
+        db_metadata (DatabaseMetadata): DatabaseMetadata instance
+        organization_template (OrganizationTemplate): Template for organizing files by date
+        progress_callback (callable): Optional callback(current, total, current_file) for progress
+        audit_manager (AuditManager): Optional audit manager for logging
+        session_id (str): Optional session ID for audit logging
+        should_stop (callable): Optional callable that returns True if processing should stop
+
+    Returns:
+        dict: Results containing:
+            upgrades_completed: Number of successful upgrades
+            upgrades_failed: Number of failed upgrades
+            upgrades_skipped: Number skipped (user-corrected, missing prior revision archive)
+            files_reorganized: Number of files moved to new date-based folder
+            was_cancelled: Boolean if processing was cancelled
+    """
+    results = {
+        'upgrades_completed': 0,
+        'upgrades_failed': 0,
+        'upgrades_skipped': 0,
+        'files_reorganized': 0,
+        'was_cancelled': False
+    }
+
+    if not upgrade_candidates:
+        logger.info("No upgrade candidates to process")
+        return results
+
+    logger.info(f"Processing {len(upgrade_candidates)} metadata upgrade candidates")
+
+    # Get Prior Revision Archive location
+    prior_revision_archive = db_metadata.get_prior_revision_archive_location()
+    if not prior_revision_archive:
+        logger.warning("Prior Revision Archive not configured - skipping all metadata upgrades")
+        results['upgrades_skipped'] = len(upgrade_candidates)
+        return results
+
+    if not os.path.exists(prior_revision_archive):
+        try:
+            os.makedirs(prior_revision_archive, exist_ok=True)
+            logger.info(f"Created Prior Revision Archive directory: {prior_revision_archive}")
+        except Exception as e:
+            logger.error(f"Failed to create Prior Revision Archive: {e}")
+            results['upgrades_skipped'] = len(upgrade_candidates)
+            return results
+
+    # Get destination directory for reorganization
+    destination_directory = db_metadata.get_archive_location()
+
+    for idx, candidate in enumerate(upgrade_candidates, 1):
+        # Check for cancellation
+        if should_stop and should_stop():
+            logger.info(f"Metadata upgrade cancelled after {idx-1} files")
+            results['was_cancelled'] = True
+            break
+
+        # Progress callback
+        if progress_callback:
+            callback_result = progress_callback(idx, len(upgrade_candidates), candidate.get('incoming_path', ''))
+            if callback_result:
+                results['was_cancelled'] = True
+                break
+
+        try:
+            incoming_path = candidate['incoming_path']
+            archive_hash = candidate['archive_file_hash']
+            archive_path = candidate['archive_path']
+            incoming_date = candidate['incoming_date']
+            incoming_year = candidate['incoming_year']
+            incoming_month = candidate['incoming_month']
+            incoming_day = candidate['incoming_day']
+            incoming_date_source = candidate['incoming_date_source']
+            incoming_is_reliable = candidate['incoming_is_reliable']
+            incoming_score = candidate['incoming_metadata_score']
+            archive_date = candidate.get('archive_date')
+            archive_date_source = candidate.get('archive_date_source')
+            archive_score = candidate.get('archive_metadata_score', 0)
+            date_changed = candidate.get('date_changed', False)
+            upgrade_reason = candidate.get('upgrade_reason', '')
+
+            logger.info(f"Processing upgrade {idx}/{len(upgrade_candidates)}: {incoming_path}")
+            logger.info(f"  Archive file: {archive_path}")
+            logger.info(f"  Upgrade reason: {upgrade_reason}")
+
+            # Verify source file exists
+            if not os.path.exists(incoming_path):
+                logger.warning(f"Incoming file not found, skipping: {incoming_path}")
+                results['upgrades_skipped'] += 1
+                continue
+
+            # Verify archive file exists
+            if not archive_path or not os.path.exists(archive_path):
+                logger.warning(f"Archive file not found, skipping upgrade: {archive_path}")
+                results['upgrades_skipped'] += 1
+                continue
+
+            # Step 1: Move archive file to Prior Revision Archive
+            # Add hash suffix to filename to ensure uniqueness
+            archive_basename = os.path.basename(archive_path)
+            archive_name, archive_ext = os.path.splitext(archive_basename)
+            hash_suffix = archive_hash[:8] if archive_hash else uuid.uuid4().hex[:8]
+            prior_revision_filename = f"{archive_name}_{hash_suffix}{archive_ext}"
+            prior_revision_path = os.path.join(prior_revision_archive, prior_revision_filename)
+
+            # Handle name collision in prior revision archive
+            collision_counter = 1
+            while os.path.exists(prior_revision_path):
+                prior_revision_filename = f"{archive_name}_{hash_suffix}_{collision_counter}{archive_ext}"
+                prior_revision_path = os.path.join(prior_revision_archive, prior_revision_filename)
+                collision_counter += 1
+
+            try:
+                shutil.move(archive_path, prior_revision_path)
+                logger.info(f"  Moved original to Prior Revision: {prior_revision_path}")
+            except Exception as e:
+                logger.error(f"Failed to move archive to Prior Revision: {e}")
+                results['upgrades_failed'] += 1
+                continue
+
+            # Step 2: Determine target path (may differ if date changed)
+            if date_changed:
+                # Calculate new path using organization template
+                target_folder = organization_template.get_folder_path(incoming_year, incoming_month, incoming_day)
+                target_directory = os.path.join(destination_directory, target_folder)
+                target_path = os.path.join(target_directory, os.path.basename(archive_path))
+                results['files_reorganized'] += 1
+                logger.info(f"  Date changed, new location: {target_path}")
+            else:
+                # Use same path as original
+                target_path = archive_path
+                target_directory = os.path.dirname(target_path)
+
+            # Create target directory if needed
+            os.makedirs(target_directory, exist_ok=True)
+
+            # Handle target filename collision
+            if os.path.exists(target_path):
+                base, ext = os.path.splitext(target_path)
+                counter = 1
+                while os.path.exists(target_path):
+                    target_path = f"{base}_{counter}{ext}"
+                    counter += 1
+
+            # Step 3: Copy incoming file to archive
+            try:
+                shutil.copy2(incoming_path, target_path)
+                logger.info(f"  Copied incoming file to archive: {target_path}")
+            except Exception as e:
+                logger.error(f"Failed to copy incoming file to archive: {e}")
+                # Try to restore original
+                try:
+                    shutil.move(prior_revision_path, archive_path)
+                    logger.info("  Restored original file after copy failure")
+                except Exception as restore_e:
+                    logger.error(f"Failed to restore original file: {restore_e}")
+                results['upgrades_failed'] += 1
+                continue
+
+            # Step 4: Verify copy integrity
+            incoming_hash = DuplicateFileDetection.hash_file(incoming_path)
+            target_hash = DuplicateFileDetection.hash_file(target_path)
+
+            if incoming_hash != target_hash:
+                logger.error(f"Hash mismatch after copy - incoming: {incoming_hash}, target: {target_hash}")
+                # Remove bad copy and restore original
+                try:
+                    os.remove(target_path)
+                    shutil.move(prior_revision_path, archive_path)
+                except Exception as restore_e:
+                    logger.error(f"Failed to restore after hash mismatch: {restore_e}")
+                results['upgrades_failed'] += 1
+                continue
+
+            # Step 5: Update database
+            try:
+                with DuplicateFileDetection.PhotoDatabase(database_path) as db:
+                    # Calculate new metadata quality score
+                    new_metadata_score = DuplicateFileDetection.calculate_metadata_quality_score(
+                        incoming_date_source, incoming_is_reliable
+                    )
+
+                    # Update the UniquePhotos record
+                    db.cursor.execute("""
+                        UPDATE UniquePhotos
+                        SET file_name = ?,
+                            create_datetime = ?,
+                            create_year = ?,
+                            create_month = ?,
+                            create_day = ?,
+                            date_source = ?,
+                            date_reliable = ?,
+                            metadata_quality_score = ?,
+                            revised_photo = ?,
+                            revision_reason = ?,
+                            revision_timestamp = ?
+                        WHERE file_hash = ?
+                    """, (
+                        target_path,
+                        incoming_date,
+                        incoming_year,
+                        incoming_month,
+                        incoming_day,
+                        incoming_date_source,
+                        1 if incoming_is_reliable else 0,
+                        new_metadata_score,
+                        None,  # Clear any revision link since we're replacing
+                        'metadata_upgrade',
+                        dt_datetime.now().isoformat(),
+                        archive_hash
+                    ))
+
+                    db.commit()
+                    logger.info(f"  Updated database record for hash {archive_hash}")
+
+                # Record upgrade in history
+                db_metadata.insert_metadata_upgrade_record(
+                    session_id=session_id or '',
+                    original_file_hash=archive_hash,
+                    incoming_file_hash=incoming_hash,
+                    original_date_source=archive_date_source,
+                    original_metadata_score=archive_score,
+                    incoming_date_source=incoming_date_source,
+                    incoming_metadata_score=incoming_score,
+                    original_date=archive_date,
+                    incoming_date=incoming_date,
+                    archive_path=target_path,
+                    prior_revision_path=prior_revision_path,
+                    date_changed=date_changed
+                )
+
+                # Log to audit trail
+                if audit_manager and session_id:
+                    try:
+                        audit_manager.log_file_operation(
+                            session_id=session_id,
+                            source_path=incoming_path,
+                            operation='metadata_upgrade',
+                            status='success',
+                            file_hash=incoming_hash,
+                            archive_path=target_path,
+                            notes=upgrade_reason
+                        )
+                    except Exception as audit_err:
+                        logger.warning(f"Failed to log audit for metadata upgrade: {audit_err}")
+
+            except Exception as e:
+                logger.error(f"Failed to update database after upgrade: {e}")
+                # File is already in place, but DB update failed
+                # This is a partial success - log but count as failed
+                results['upgrades_failed'] += 1
+                continue
+
+            results['upgrades_completed'] += 1
+            logger.info(f"  Upgrade completed successfully")
+
+        except Exception as e:
+            logger.error(f"Unexpected error during metadata upgrade: {e}")
+            results['upgrades_failed'] += 1
+
+    logger.info(f"Metadata upgrade summary: {results['upgrades_completed']} completed, "
+                f"{results['upgrades_failed']} failed, {results['upgrades_skipped']} skipped, "
+                f"{results['files_reorganized']} reorganized")
+
+    return results
+
+
 def configure_logging(verbose):
     """
     Configure logging settings.
@@ -220,6 +501,10 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
 
             hashes = DuplicateFileDetection.load_photo_hashes(database_path)
             logger.info("The load_photo_hashes completed and returned 'hashes' ")
+            # Check if metadata upgrade feature is enabled
+            metadata_upgrade_enabled = db_metadata.is_metadata_upgrade_enabled()
+            logger.info(f"Metadata upgrade feature: {'ENABLED' if metadata_upgrade_enabled else 'DISABLED'}")
+
             results = DuplicateFileDetection.find_duplicates(
                 files,
                 hashes,
@@ -232,7 +517,8 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                 audit_manager=audit_manager,
                 session_id=session_id,
                 should_stop=should_stop,  # Pass stop check callable
-                content_hash_enabled=config.get('content_hash_enabled', True)  # Content-based duplicate detection
+                content_hash_enabled=config.get('content_hash_enabled', True),  # Content-based duplicate detection
+                metadata_upgrade_enabled=metadata_upgrade_enabled  # Schema v7: Detect upgrade candidates
             )
             logger.info(f"The DuplicateFileDetection.find_duplicates returned = {results}")
 
@@ -250,6 +536,13 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                     "total_unreliable_dates": results.get('unreliable_dates_count', 0),
                     "total_errors": 0,
                     "total_album_additions": 0,
+                    # Schema v7: Metadata upgrade results (safe defaults for cancelled case)
+                    "upgrade_candidates": len(results.get('upgrade_candidates', [])),
+                    "upgrades_completed": 0,
+                    "upgrades_failed": 0,
+                    "upgrades_skipped": 0,
+                    "protected_files": len(results.get('protected_files', [])),
+                    "files_reorganized": 0,
                     "filter_statistics": results.get('filter_statistics', {}),
                     "filtered_files": results.get('filtered_files', []),
                     "was_cancelled": True
@@ -262,8 +555,16 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             original_files = results.get('original_files')
             filtered_files = results.get('filtered_files', [])
             content_duplicate_files = results.get('content_duplicate_files', [])
+            upgrade_candidates = results.get('upgrade_candidates', [])  # Schema v7: Duplicates with better metadata
+            protected_files = results.get('protected_files', [])  # Schema v7: User-corrected files
             filter_stats = results.get('filter_statistics')
             unreliable_dates_count = results.get('unreliable_dates_count', 0)
+
+            # Log upgrade candidate stats
+            if upgrade_candidates:
+                logger.info(f"Found {len(upgrade_candidates)} metadata upgrade candidates")
+            if protected_files:
+                logger.info(f"Found {len(protected_files)} user-protected files (not upgraded)")
 
             # Log filter statistics if filtering was enabled
             if filter_stats and filter_stats['total_filtered'] > 0:
@@ -767,6 +1068,38 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
         if total_album_additions > 0:
             logger.info(f"Album additions: {total_album_additions} files added to albums")
 
+        # Schema v7: Process metadata upgrade candidates
+        upgrade_results = {
+            'upgrades_completed': 0,
+            'upgrades_failed': 0,
+            'upgrades_skipped': 0,
+            'files_reorganized': 0,
+            'was_cancelled': False
+        }
+
+        if upgrade_candidates and not was_cancelled:
+            logger.info(f"Processing {len(upgrade_candidates)} metadata upgrade candidates...")
+
+            # Get organization template for potential file reorganization
+            org_template = OrganizationTemplate(organization_template)
+
+            upgrade_results = perform_metadata_upgrades(
+                upgrade_candidates=upgrade_candidates,
+                database_path=database_path,
+                db_metadata=db_metadata,
+                organization_template=org_template,
+                progress_callback=None,  # Could add progress callback support later
+                audit_manager=audit_manager,
+                session_id=session_id,
+                should_stop=should_stop
+            )
+
+            if upgrade_results.get('was_cancelled'):
+                was_cancelled = True
+
+            logger.info(f"Metadata upgrades complete: {upgrade_results['upgrades_completed']} completed, "
+                        f"{upgrade_results['upgrades_failed']} failed, {upgrade_results['upgrades_skipped']} skipped")
+
         organize_files_return = {
             "total_files_processed": total_files_processed,
             "total_new_original_files": files_actually_organized,
@@ -776,6 +1109,13 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             "total_unreliable_dates": unreliable_dates_count,
             "total_errors": total_errors,
             "total_album_additions": total_album_additions,
+            # Schema v7: Metadata upgrade results
+            "upgrade_candidates": len(upgrade_candidates) if 'upgrade_candidates' in dir() else 0,
+            "upgrades_completed": upgrade_results.get('upgrades_completed', 0),
+            "upgrades_failed": upgrade_results.get('upgrades_failed', 0),
+            "upgrades_skipped": upgrade_results.get('upgrades_skipped', 0),
+            "protected_files": len(protected_files) if 'protected_files' in dir() else 0,
+            "files_reorganized": upgrade_results.get('files_reorganized', 0),
             "filter_statistics": filter_stats or {},
             "filtered_files": filtered_files,
             "content_duplicate_files": content_duplicate_files if 'content_duplicate_files' in dir() else [],
@@ -794,6 +1134,13 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             "total_unreliable_dates": unreliable_dates_count if 'unreliable_dates_count' in dir() else 0,
             "total_errors": total_errors,
             "total_album_additions": total_album_additions if 'total_album_additions' in dir() else 0,
+            # Schema v7: Metadata upgrade results (safe defaults for exception case)
+            "upgrade_candidates": len(upgrade_candidates) if 'upgrade_candidates' in dir() else 0,
+            "upgrades_completed": 0,
+            "upgrades_failed": 0,
+            "upgrades_skipped": 0,
+            "protected_files": len(protected_files) if 'protected_files' in dir() else 0,
+            "files_reorganized": 0,
             "filter_statistics": filter_stats if 'filter_stats' in dir() else {},
             "filtered_files": filtered_files if 'filtered_files' in dir() else [],
             "content_duplicate_files": content_duplicate_files if 'content_duplicate_files' in dir() else [],

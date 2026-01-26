@@ -304,6 +304,11 @@ class MainWindow(QMainWindow):
         duplicates = results.get('total_duplicates', 0)
         filtered = results.get('total_filtered', 0)
         unreliable_dates = results.get('total_unreliable_dates', 0)
+        # Schema v7: Metadata upgrade stats
+        upgrade_candidates = results.get('upgrade_candidates', 0)
+        upgrades_completed = results.get('upgrades_completed', 0)
+        upgrades_failed = results.get('upgrades_failed', 0)
+        protected_files = results.get('protected_files', 0)
 
         if was_cancelled:
             # Show cancelled message with partial progress
@@ -318,15 +323,28 @@ class MainWindow(QMainWindow):
                                   f"Files already in the database will be skipped.\n\n"
                                   f"View the Import History tab for details.")
         else:
+            # Build completion message
+            message = (f"Processing complete!\n\n"
+                       f"Total files examined: {total_examined}\n"
+                       f"New original photos: {originals}\n"
+                       f"Duplicates found: {duplicates}\n"
+                       f"Filtered files: {filtered}\n"
+                       f"Files with suspicious dates: {unreliable_dates}")
+
+            # Add metadata upgrade section if there were any candidates
+            if upgrade_candidates > 0:
+                message += (f"\n\n--- Metadata Upgrades ---\n"
+                           f"Upgrade candidates found: {upgrade_candidates}\n"
+                           f"Successfully upgraded: {upgrades_completed}\n")
+                if upgrades_failed > 0:
+                    message += f"Failed to upgrade: {upgrades_failed}\n"
+                if protected_files > 0:
+                    message += f"Protected (user-corrected): {protected_files}\n"
+
+            message += f"\n\nView the Import History tab for full details."
+
             # Show normal completion message
-            QMessageBox.information(self, "Processing Complete",
-                                  f"Processing complete!\n\n"
-                                  f"Total files examined: {total_examined}\n"
-                                  f"New original photos: {originals}\n"
-                                  f"Duplicates found: {duplicates}\n"
-                                  f"Filtered files: {filtered}\n"
-                                  f"Files with suspicious dates: {unreliable_dates}\n\n"
-                                  f"View the Import History tab for full details.")
+            QMessageBox.information(self, "Processing Complete", message)
 
     def processing_error(self, error_msg):
         """Handle processing error."""
