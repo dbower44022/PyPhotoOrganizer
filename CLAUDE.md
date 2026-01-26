@@ -1052,6 +1052,72 @@ For each file successfully copied to archive:
 - If sub-album creation fails, fall back to parent album
 - Results include `total_album_additions` count
 
+### Source Directory Path Validation
+
+The Import Settings tab validates source directory paths and displays status icons (✓ green checkmark for valid, ⚠ red triangle for invalid). Enhanced diagnostics provide detailed tooltips explaining validation failures.
+
+**Validation Checks (`_validate_path()`):**
+1. `os.path.exists(path)` - Path must exist
+2. `os.path.isdir(path)` - Must be a directory, not a file
+3. `os.access(path, os.R_OK)` - Must have read permission
+
+**Diagnostic Helper Methods:**
+
+| Method | Purpose |
+|--------|---------|
+| `_diagnose_missing_path()` | Identifies where path breaks, detects mount types, suggests fixes |
+| `_diagnose_permission_error()` | Explains permission issues with mount-specific guidance |
+| `_diagnose_os_error()` | Handles OS-level errors (stale NFS, timeouts, network unreachable) |
+
+**Network Mount Detection:**
+
+The validation system recognizes and provides specific guidance for:
+- **NFS mounts**: Paths containing `-nfs` or `/nfs/`
+- **SMB/CIFS shares**: Paths containing `-smb`, `-cifs`
+- **GVFS paths**: Paths starting with `/run/user/*/gvfs/`
+- **Generic mounts**: Paths under `/mnt/` or `/media/`
+
+**Path Break Detection:**
+
+When a path doesn't exist, the system identifies exactly where it breaks:
+```
+Path does not exist: /data/NAS-nfs/Photos/Album
+Path breaks at: /data/NAS-nfs/Photos
+Last valid path: /data/NAS-nfs
+```
+
+**OS Error Handling:**
+
+| Error | Status | Guidance |
+|-------|--------|----------|
+| `ESTALE` | Stale Mount | NFS handle stale, remount needed |
+| `ETIMEDOUT` | Timeout | Network share not responding |
+| `EHOSTUNREACH` | Unreachable | Network connectivity issue |
+| `EACCES` | Permission Denied | Mount options or server permissions |
+
+**Automount Considerations:**
+
+For systems using `x-systemd.automount`, paths may not be accessible until triggered:
+- Mount point directory exists but subdirectories don't until accessed
+- Browsing to the folder in Files triggers the automount
+- Click "Refresh Status" button after mounting to re-validate
+
+**Debug Logging:**
+
+Validation logs at DEBUG level for troubleshooting:
+```
+Validating path: '/data/NAS-nfs/Photos'
+  os.path.exists: True
+  os.path.isdir: True
+  os.access(R_OK): True
+  Result: Available - path is valid
+```
+
+**UI Interaction:**
+- Hover over ⚠ icon to see detailed diagnostic tooltip
+- Click "Refresh Status" to re-validate all source directories
+- Tooltips include actionable fix suggestions
+
 ### Theme System
 
 `ThemeManager` singleton with light/dark mode:

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 import os
+import errno
 import constants
 from datetime import datetime
 import logging
@@ -672,28 +673,237 @@ class ImportSettingsTab(QWidget):
         self.source_table.setCellWidget(row_position, 6, sub_albums_widget)
 
     def _validate_path(self, path: str) -> tuple:
-        """Validate if a path exists and is accessible."""
+        """
+        Validate if a path exists and is accessible.
+
+        Returns:
+            tuple: (is_valid, status_text, status_detail)
+                - is_valid: True if path is accessible
+                - status_text: Short status for display (e.g., "Available", "Not Found")
+                - status_detail: Detailed explanation with suggestions for tooltips
+        """
+        logger.debug(f"Validating path: {repr(path)}")
+
         try:
-            if not os.path.exists(path):
-                if path.startswith('/run/user/') and '/gvfs/' in path:
-                    return (False, "Not Mounted",
-                           "Network share not mounted. Open the share in your file manager first.")
-                else:
-                    return (False, "Not Found",
-                           f"Path does not exist: {path}")
+            exists = os.path.exists(path)
+            logger.debug(f"  os.path.exists: {exists}")
 
-            if not os.path.isdir(path):
+            if not exists:
+                result = self._diagnose_missing_path(path)
+                logger.debug(f"  Result: {result[1]} - path does not exist")
+                return result
+
+            is_dir = os.path.isdir(path)
+            logger.debug(f"  os.path.isdir: {is_dir}")
+
+            if not is_dir:
+                logger.debug(f"  Result: Not a Directory")
                 return (False, "Not a Directory",
-                       f"Path exists but is not a directory: {path}")
+                       f"Path exists but is not a directory: {path}\n\n"
+                       f"This appears to be a file, not a folder. "
+                       f"Please select a directory containing photos.")
 
-            if not os.access(path, os.R_OK):
-                return (False, "Permission Denied",
-                       f"Cannot read directory (permission denied): {path}")
+            can_read = os.access(path, os.R_OK)
+            logger.debug(f"  os.access(R_OK): {can_read}")
 
+            if not can_read:
+                result = self._diagnose_permission_error(path)
+                logger.debug(f"  Result: {result[1]} - permission denied")
+                return result
+
+            logger.debug(f"  Result: Available - path is valid")
             return (True, "Available", f"Path is accessible: {path}")
 
+        except OSError as e:
+            # Handle specific OS errors that might occur during validation
+            logger.warning(f"  OSError during validation: {e}")
+            return self._diagnose_os_error(path, e)
         except Exception as e:
+            logger.error(f"  Unexpected error during validation: {e}", exc_info=True)
             return (False, "Error", f"Error checking path: {str(e)}")
+
+    def _diagnose_missing_path(self, path: str) -> tuple:
+        """
+        Diagnose why a path doesn't exist and provide helpful suggestions.
+
+        Returns:
+            tuple: (is_valid, status_text, status_detail)
+        """
+        # Check for GVFS paths (GNOME Virtual File System)
+        if path.startswith('/run/user/') and '/gvfs/' in path:
+            return (False, "Not Mounted",
+                   f"Network share not mounted.\n\n"
+                   f"Path: {path}\n\n"
+                   f"How to fix:\n"
+                   f"• Open the network share in Files (file manager) first\n"
+                   f"• The share will auto-mount when you browse to it\n"
+                   f"• Then click 'Refresh Status' to update")
+
+        # Find where the path breaks to provide better diagnostics
+        parts = path.split(os.sep)
+        existing_part = ""
+        missing_part = ""
+
+        for i in range(1, len(parts) + 1):
+            check_path = os.sep.join(parts[:i]) or os.sep
+            if os.path.exists(check_path):
+                existing_part = check_path
+            else:
+                missing_part = os.sep.join(parts[:i])
+                break
+
+        # Detect network mount patterns
+        is_nfs = '-nfs' in path.lower() or '/nfs/' in path.lower()
+        is_smb = '-smb' in path.lower() or '/smb/' in path.lower() or '-cifs' in path.lower()
+        is_network_mount = is_nfs or is_smb or path.startswith('/mnt/') or path.startswith('/media/')
+
+        # Check if the existing part is a mount point
+        is_mount_point = existing_part and os.path.ismount(existing_part)
+
+        # Build diagnostic message
+        detail_lines = [f"Path does not exist: {path}", ""]
+
+        if existing_part and missing_part:
+            detail_lines.append(f"Path breaks at: {missing_part}")
+            detail_lines.append(f"Last valid path: {existing_part}")
+            detail_lines.append("")
+
+        # Provide specific guidance based on path type
+        if is_nfs:
+            detail_lines.append("This appears to be an NFS network mount.")
+            detail_lines.append("")
+            detail_lines.append("Possible causes:")
+            detail_lines.append("• NFS share is not mounted (automount may be inactive)")
+            detail_lines.append("• NFS server is unreachable")
+            detail_lines.append("• Network connectivity issue")
+            detail_lines.append("")
+            detail_lines.append("How to fix:")
+            detail_lines.append("• Browse to the folder in Files to trigger automount")
+            detail_lines.append("• Check NFS server is online: ping <server>")
+            detail_lines.append("• Manually mount: sudo mount -a")
+            detail_lines.append("• Then click 'Refresh Status'")
+        elif is_smb:
+            detail_lines.append("This appears to be an SMB/CIFS network share.")
+            detail_lines.append("")
+            detail_lines.append("Possible causes:")
+            detail_lines.append("• Network share is not mounted")
+            detail_lines.append("• Server is unreachable or credentials expired")
+            detail_lines.append("")
+            detail_lines.append("How to fix:")
+            detail_lines.append("• Browse to the share in Files to reconnect")
+            detail_lines.append("• Check server is online")
+            detail_lines.append("• Manually mount: sudo mount -a")
+        elif is_network_mount:
+            detail_lines.append("This appears to be a network mount point.")
+            detail_lines.append("")
+            detail_lines.append("How to fix:")
+            detail_lines.append("• Ensure the network share is mounted")
+            detail_lines.append("• Browse to the folder in Files")
+            detail_lines.append("• Run: sudo mount -a")
+        elif is_mount_point:
+            detail_lines.append(f"'{existing_part}' is a mount point but the subdirectory doesn't exist.")
+            detail_lines.append("")
+            detail_lines.append("Possible causes:")
+            detail_lines.append("• The folder was renamed or moved on the server")
+            detail_lines.append("• The mount is connected to wrong share")
+        else:
+            detail_lines.append("How to fix:")
+            detail_lines.append("• Verify the folder path is correct")
+            detail_lines.append("• Check if the folder was moved or renamed")
+            detail_lines.append("• Ensure you have access to parent directories")
+
+        detail_lines.append("")
+        detail_lines.append("After fixing, click 'Refresh Status' to re-validate.")
+
+        status_text = "Not Mounted" if is_network_mount else "Not Found"
+        return (False, status_text, "\n".join(detail_lines))
+
+    def _diagnose_permission_error(self, path: str) -> tuple:
+        """
+        Diagnose permission issues and provide helpful suggestions.
+
+        Returns:
+            tuple: (is_valid, status_text, status_detail)
+        """
+        detail_lines = [f"Cannot read directory: {path}", ""]
+
+        # Check specific permissions
+        can_execute = os.access(path, os.X_OK)
+
+        detail_lines.append("Permission denied when trying to read this directory.")
+        detail_lines.append("")
+
+        if not can_execute:
+            detail_lines.append("Missing execute permission (cannot enter directory).")
+            detail_lines.append("")
+
+        # Check if it's a network mount
+        is_network = '-nfs' in path.lower() or '-smb' in path.lower() or path.startswith('/mnt/')
+
+        if is_network:
+            detail_lines.append("This is a network mount. Permission issues may be caused by:")
+            detail_lines.append("• Mount options (uid/gid mismatch)")
+            detail_lines.append("• Server-side permissions")
+            detail_lines.append("• NFS squash settings")
+            detail_lines.append("")
+            detail_lines.append("How to fix:")
+            detail_lines.append("• Check mount options in /etc/fstab")
+            detail_lines.append("• Verify user permissions on the server")
+            detail_lines.append("• Try remounting with correct uid/gid")
+        else:
+            detail_lines.append("How to fix:")
+            detail_lines.append(f"• Check folder permissions: ls -la \"{path}\"")
+            detail_lines.append(f"• Grant read access: chmod +r \"{path}\"")
+            detail_lines.append("• Verify you are the owner or in the correct group")
+
+        return (False, "Permission Denied", "\n".join(detail_lines))
+
+    def _diagnose_os_error(self, path: str, error: OSError) -> tuple:
+        """
+        Diagnose OS-level errors during path validation.
+
+        Returns:
+            tuple: (is_valid, status_text, status_detail)
+        """
+        detail_lines = [f"System error accessing path: {path}", ""]
+        detail_lines.append(f"Error: {error}")
+        detail_lines.append("")
+
+        if error.errno == errno.ESTALE:
+            detail_lines.append("Stale NFS file handle detected.")
+            detail_lines.append("")
+            detail_lines.append("The NFS mount has become stale (server disconnected).")
+            detail_lines.append("")
+            detail_lines.append("How to fix:")
+            detail_lines.append("• Unmount and remount: sudo umount -l <mount> && sudo mount -a")
+            detail_lines.append("• Or reboot the system")
+            return (False, "Stale Mount", "\n".join(detail_lines))
+        elif error.errno == errno.ENOENT:
+            return self._diagnose_missing_path(path)
+        elif error.errno == errno.EACCES:
+            return self._diagnose_permission_error(path)
+        elif error.errno == errno.ETIMEDOUT:
+            detail_lines.append("Connection timed out.")
+            detail_lines.append("")
+            detail_lines.append("The network share is not responding.")
+            detail_lines.append("")
+            detail_lines.append("How to fix:")
+            detail_lines.append("• Check network connectivity")
+            detail_lines.append("• Verify the server is online")
+            detail_lines.append("• Try accessing the share in Files first")
+            return (False, "Timeout", "\n".join(detail_lines))
+        elif error.errno == errno.EHOSTUNREACH or error.errno == errno.ENETUNREACH:
+            detail_lines.append("Network unreachable.")
+            detail_lines.append("")
+            detail_lines.append("How to fix:")
+            detail_lines.append("• Check network connectivity")
+            detail_lines.append("• Verify the server IP/hostname is correct")
+            return (False, "Unreachable", "\n".join(detail_lines))
+        else:
+            detail_lines.append("How to fix:")
+            detail_lines.append("• Try accessing the path in terminal or Files")
+            detail_lines.append("• Check system logs: journalctl -xe")
+            return (False, "Error", "\n".join(detail_lines))
 
     def _on_source_checkbox_changed(self, path: str, state: int):
         """Handle checkbox state change - update database."""
