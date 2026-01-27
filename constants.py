@@ -159,6 +159,15 @@ THUMBNAIL_DISK_CACHE_GB = 5
 # Number of thumbnail worker threads
 THUMBNAIL_WORKER_THREADS = 8
 
+# Video thumbnail extraction settings
+VIDEO_THUMBNAIL_TIMESTAMP_PERCENT = 0.10  # Extract frame at 10% into video
+VIDEO_THUMBNAIL_MAX_TIMESTAMP = 5.0       # Max seconds into video for first frame
+VIDEO_THUMBNAIL_QUALITY = 85              # JPEG quality for video thumbnails
+
+# Video duration overlay settings
+VIDEO_DURATION_FONT_SIZE_PERCENT = 0.067  # Duration font size as percent of thumbnail
+VIDEO_DURATION_PADDING = 4                 # Padding around duration badge
+
 
 # ============================================================================
 # WORKER/THREADING CONSTANTS

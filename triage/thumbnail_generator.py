@@ -10,6 +10,12 @@ Performance optimizations:
 - Handles HEIC, RAW formats via pillow_heif
 - Runs in separate thread (no UI blocking)
 
+Video Thumbnail Support (v3.1.0):
+- Uses ffmpeg to extract actual frames from videos (when available)
+- Falls back to placeholder with play button if ffmpeg not installed
+- Displays video duration overlay on thumbnails
+- Extracts frame at 10% into video to avoid black intro frames
+
 EXIF Orientation Handling (v3.0.3):
 - Applies EXIF orientation tags via ImageOps.exif_transpose()
 - Ensures thumbnails display with correct rotation
@@ -21,9 +27,12 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from PySide6.QtCore import QRunnable, QObject, Signal, Slot, Qt
+
+if TYPE_CHECKING:
+    from video_thumbnail import VideoThumbnailExtractor
 from PySide6.QtGui import QPixmap, QImage, QColor, QPainter, QFont
 from PIL import Image, ImageOps
 
@@ -94,22 +103,26 @@ class ThumbnailWorker(QRunnable):
         This method runs in a separate thread via QThreadPool.
         """
         try:
-            # Check if file is a video (skip - PIL cannot open videos)
+            # Check if file is a video (use ffmpeg or placeholder)
             file_ext = os.path.splitext(self.file_path)[1].lower()
-            video_extensions = {'.mov', '.mp4', '.avi', '.mkv', '.m4v', '.mpg', '.mpeg', '.wmv'}
+            video_extensions = {'.mov', '.mp4', '.avi', '.mkv', '.m4v', '.mpg', '.mpeg', '.wmv', '.flv', '.3gp'}
 
             if file_ext in video_extensions:
-                # For videos, save a placeholder to disk cache and emit path
-                logger.debug(f"Creating video placeholder for: {self.file_path}")
+                logger.debug(f"Processing video file: {self.file_path}")
 
-                # Create placeholder and save to disk
+                # Create cache path
                 cache_subdir = self.cache_dir / self.file_hash[:2]
                 cache_subdir.mkdir(parents=True, exist_ok=True)
                 disk_path = cache_subdir / f"{self.file_hash}_{self.size}_video.jpg"
 
-                # Generate and save placeholder
-                placeholder = self._create_video_placeholder()
-                placeholder.save(str(disk_path), 'JPEG', quality=85)
+                # Try ffmpeg-based thumbnail extraction first
+                thumbnail_extracted = self._extract_video_thumbnail(str(disk_path))
+
+                if not thumbnail_extracted:
+                    # Fall back to placeholder
+                    logger.debug(f"Using placeholder for video: {self.file_path}")
+                    placeholder = self._create_video_placeholder()
+                    placeholder.save(str(disk_path), 'JPEG', quality=85)
 
                 # Update database
                 self._update_cache_metadata(disk_path)
@@ -245,12 +258,142 @@ class ThumbnailWorker(QRunnable):
             except Exception as emit_error:
                 logger.error(f"Failed to emit error signal: {emit_error}")
 
+    def _extract_video_thumbnail(self, output_path: str) -> bool:
+        """
+        Extract actual thumbnail from video using ffmpeg.
+
+        Uses the video_thumbnail module to extract a real frame from the video,
+        then adds a duration overlay.
+
+        Parameters:
+            output_path: Path to save the thumbnail
+
+        Returns:
+            True if extraction succeeded, False to fall back to placeholder
+        """
+        try:
+            from video_thumbnail import VideoThumbnailExtractor
+
+            extractor = VideoThumbnailExtractor()
+
+            if not extractor.is_available():
+                logger.debug("ffmpeg not available for video thumbnail extraction")
+                return False
+
+            # Extract thumbnail as PIL Image
+            img = extractor.extract_thumbnail_pil(self.file_path, size=self.size)
+
+            if img is None:
+                logger.warning(f"Failed to extract thumbnail from video: {self.file_path}")
+                return False
+
+            # Get video duration for overlay
+            metadata = extractor.get_video_metadata(self.file_path)
+            duration_text = metadata.duration_formatted if metadata else None
+
+            # Add duration overlay and play button indicator
+            img = self._add_video_overlay(img, duration_text)
+
+            # Save to disk
+            img.save(output_path, 'JPEG', quality=85)
+            logger.info(f"Extracted video thumbnail: {self.file_path} -> {output_path}")
+
+            return True
+
+        except ImportError:
+            logger.debug("video_thumbnail module not available")
+            return False
+        except Exception as e:
+            logger.warning(f"Video thumbnail extraction error: {e}")
+            return False
+
+    def _add_video_overlay(self, img: Image.Image, duration: Optional[str] = None) -> Image.Image:
+        """
+        Add play button and duration overlay to video thumbnail.
+
+        Parameters:
+            img: PIL Image (the extracted video frame)
+            duration: Duration string to display (e.g., "1:23:45")
+
+        Returns:
+            PIL Image with overlay added
+        """
+        from PIL import ImageDraw, ImageFont
+
+        # Convert to RGB if necessary
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+
+        draw = ImageDraw.Draw(img)
+        width, height = img.size
+
+        # Draw semi-transparent play button circle in center
+        circle_radius = min(width, height) // 8
+        center_x = width // 2
+        center_y = height // 2
+
+        # Draw circle background (semi-transparent effect via color)
+        circle_bbox = [
+            center_x - circle_radius,
+            center_y - circle_radius,
+            center_x + circle_radius,
+            center_y + circle_radius
+        ]
+        draw.ellipse(circle_bbox, fill=(0, 0, 0, 128), outline=(255, 255, 255))
+
+        # Draw play triangle inside circle
+        triangle_size = circle_radius
+        triangle = [
+            (center_x - triangle_size // 3, center_y - triangle_size // 2),
+            (center_x - triangle_size // 3, center_y + triangle_size // 2),
+            (center_x + triangle_size // 2, center_y)
+        ]
+        draw.polygon(triangle, fill=(255, 255, 255))
+
+        # Draw duration badge in bottom-right corner
+        if duration:
+            try:
+                font_size = max(10, min(width, height) // 15)
+                try:
+                    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+                except:
+                    font = ImageFont.load_default()
+
+                # Calculate text size
+                bbox = draw.textbbox((0, 0), duration, font=font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+
+                # Position in bottom-right corner with padding
+                padding = 4
+                badge_x = width - text_width - padding * 3
+                badge_y = height - text_height - padding * 3
+
+                # Draw semi-transparent background
+                badge_rect = [
+                    badge_x - padding,
+                    badge_y - padding,
+                    badge_x + text_width + padding,
+                    badge_y + text_height + padding
+                ]
+                draw.rectangle(badge_rect, fill=(0, 0, 0))
+
+                # Draw duration text
+                draw.text((badge_x, badge_y), duration, fill=(255, 255, 255), font=font)
+
+            except Exception as e:
+                logger.debug(f"Error drawing duration overlay: {e}")
+
+        return img
+
     def _create_video_placeholder(self) -> Image.Image:
         """
         Create placeholder thumbnail for video files as PIL Image.
 
+        Used when ffmpeg is not available or extraction fails.
+
         Returns:
-            PIL Image with "VIDEO" text
+            PIL Image with "VIDEO" text and play button
         """
         from PIL import ImageDraw, ImageFont
 
