@@ -1,3 +1,23 @@
+"""
+Duplicate File Detection Module
+
+This module provides the core functionality for detecting and managing
+duplicate files in a photo archive. It includes:
+
+- PhotoDatabase: SQLite database context manager for file tracking
+- Hashing functions: SHA-256 hashing for file identification
+- Date extraction: Multi-source date extraction (EXIF, IPTC, XMP, video)
+- Metadata scoring: Quality-based comparison for metadata upgrades
+- Duplicate detection: find_duplicates() for batch processing
+
+Note: This module is being refactored. New code should use the
+dedicated modules where available:
+- hashing.py: File hashing functions
+- metadata_scoring.py: Metadata quality scoring
+- date_extraction.py: Date extraction from various sources
+
+For backward compatibility, functions are still available here.
+"""
 
 import datetime
 import hashlib
@@ -5,11 +25,14 @@ import json
 import logging
 import os
 import pillow_heif  # https://github.com/bigcat88/pillow_heif
+import re
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
+from typing import Dict, List, Optional, Tuple, Any, Set, Callable
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 from PIL.ExifTags import TAGS, GPSTAGS, IFD
@@ -20,7 +43,21 @@ import utils
 from photo_filter import PhotoFilter
 import constants
 
-# from pillow_heif import register_heif_opener
+# -------------------------------------------------------------------------
+# Backward Compatibility Imports
+# -------------------------------------------------------------------------
+# Import from new modules for code that imports from here
+# These are re-exported for backward compatibility
+
+# Hashing functions - now in hashing.py
+# Note: Keeping local implementations until migration is complete
+# from hashing import hash_file, hash_file_partial, verify_copy_integrity, hash_image_content
+
+# Metadata scoring - now in metadata_scoring.py
+# from metadata_scoring import calculate_metadata_quality_score, should_upgrade_archive_file
+
+# Date extraction - now in date_extraction.py
+# from date_extraction import get_creation_date
 
 # Configure logging using shared utility
 logger = utils.setup_logger(__name__, "DuplicateFileDetection_app_error.log")

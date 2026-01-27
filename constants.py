@@ -115,3 +115,149 @@ INVALID_DATE_DAY = "01"
 
 # Dangerous path patterns that could indicate directory traversal attacks
 DANGEROUS_PATH_PATTERNS = ['..']
+
+# Maximum path length (Windows extended-length path limit)
+MAX_PATH_LENGTH = 32767
+
+
+# ============================================================================
+# DATABASE CONSTANTS (Extended)
+# ============================================================================
+
+# Database connection timeout in seconds
+DATABASE_TIMEOUT_SECONDS = 30
+
+# Database busy timeout in milliseconds
+DATABASE_BUSY_TIMEOUT_MS = 30000
+
+# Default query result limit for large result sets
+DEFAULT_QUERY_LIMIT = 5000
+
+# Default migration batch size
+MIGRATION_BATCH_SIZE = 1000
+
+
+# ============================================================================
+# THUMBNAIL CONSTANTS
+# ============================================================================
+
+# Default thumbnail sizes (in pixels)
+THUMBNAIL_SIZE_SMALL = 128
+THUMBNAIL_SIZE_MEDIUM = 256
+THUMBNAIL_SIZE_LARGE = 512
+THUMBNAIL_SIZE_XLARGE = 1024
+
+# Default thumbnail size for grids
+DEFAULT_THUMBNAIL_SIZE = 200
+
+# Memory cache size (number of thumbnails)
+THUMBNAIL_MEMORY_CACHE_SIZE = 500
+
+# Disk cache size in GB
+THUMBNAIL_DISK_CACHE_GB = 5
+
+# Number of thumbnail worker threads
+THUMBNAIL_WORKER_THREADS = 8
+
+
+# ============================================================================
+# WORKER/THREADING CONSTANTS
+# ============================================================================
+
+# Default worker timeout in milliseconds
+WORKER_TIMEOUT_MS = 30000
+
+# Default worker shutdown timeout in seconds
+WORKER_SHUTDOWN_TIMEOUT_SECONDS = 5
+
+# Progress update interval in milliseconds
+PROGRESS_UPDATE_INTERVAL_MS = 100
+
+
+# ============================================================================
+# YEAR RANGE CONSTANTS
+# ============================================================================
+
+# Minimum reasonable year for photo dates
+MIN_REASONABLE_YEAR = 1990
+
+# Maximum reasonable year for photo dates (future buffer)
+MAX_REASONABLE_YEAR = 2100
+
+# Year used for files with missing/invalid dates
+FALLBACK_YEAR = 1000
+
+
+# ============================================================================
+# METADATA QUALITY SCORES
+# ============================================================================
+
+# Score values for different date sources (higher = better)
+# Note: These are also defined in DuplicateFileDetection.py for now
+# TODO: Consolidate once DuplicateFileDetection is refactored
+METADATA_SCORE_EXIF = 80
+METADATA_SCORE_EXIF_DIGITIZED = 70
+METADATA_SCORE_EXIF_GPS = 65
+METADATA_SCORE_VIDEO_METADATA = 60
+METADATA_SCORE_VIDEO_QUICKTIME = 55
+METADATA_SCORE_EXIF_DATETIME = 50
+METADATA_SCORE_EXIF_PREVIEW = 45
+METADATA_SCORE_IPTC = 40
+METADATA_SCORE_XMP = 35
+METADATA_SCORE_OS_METADATA = 20
+METADATA_SCORE_FALLBACK = 0
+
+# Reliability bonus added to score
+METADATA_RELIABILITY_BONUS = 20
+
+
+# ============================================================================
+# LOGGING CONSTANTS
+# ============================================================================
+
+# Maximum log file size in bytes (5MB)
+LOG_MAX_SIZE_BYTES = 5 * 1024 * 1024
+
+# Number of log backup files to keep
+LOG_BACKUP_COUNT = 3
+
+
+# ============================================================================
+# UI LAYOUT CONSTANTS
+# ============================================================================
+
+# Default spacing between UI elements
+UI_SPACING_SMALL = 5
+UI_SPACING_MEDIUM = 10
+UI_SPACING_LARGE = 20
+
+# Default margins
+UI_MARGIN_SMALL = 5
+UI_MARGIN_MEDIUM = 10
+UI_MARGIN_LARGE = 20
+
+# Default button dimensions
+BUTTON_MIN_WIDTH = 100
+BUTTON_MIN_HEIGHT = 30
+
+
+# ============================================================================
+# AUDIT CONSTANTS
+# ============================================================================
+
+# Maximum audit retry attempts
+AUDIT_MAX_RETRY_ATTEMPTS = 5
+
+# Audit retention period in days
+AUDIT_RETENTION_DAYS = 30
+
+
+# ============================================================================
+# PREFETCH CONSTANTS
+# ============================================================================
+
+# Number of items to prefetch before visible area
+PREFETCH_BEFORE_COUNT = 50
+
+# Number of items to prefetch after visible area
+PREFETCH_AFTER_COUNT = 100
