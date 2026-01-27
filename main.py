@@ -1012,12 +1012,21 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
                                         heif_file.data,
                                         "raw",
                                     )
+                                    # Extract EXIF data from HEIC file to preserve metadata
+                                    exif_bytes = heif_file.info.get('exif')
                                 except Exception as e:
                                     logger.error(f"The open file for {file_path} failed with error = {e}")
+                                    exif_bytes = None
 
                                 jpeg_file_path = f"{target_path[:-5]}.jpeg"
                                 logger.info(f"The new jpeg_file_path = '{jpeg_file_path}'")
-                                heic_image.save(jpeg_file_path, format="JPEG")
+                                # Save with EXIF data if available
+                                if exif_bytes:
+                                    heic_image.save(jpeg_file_path, format="JPEG", quality=95, exif=exif_bytes)
+                                    logger.info(f"HEIC converted to JPEG with EXIF metadata preserved")
+                                else:
+                                    heic_image.save(jpeg_file_path, format="JPEG", quality=95)
+                                    logger.info(f"HEIC converted to JPEG (no EXIF metadata found in source)")
                             else:
                                 logger.info("The file is NOT a HEIC format.")
                         except Exception as e:

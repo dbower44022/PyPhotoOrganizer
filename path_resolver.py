@@ -6,13 +6,272 @@ This enables portable databases that work across different mount points and arch
 
 Schema v6 stores relative paths (e.g., '2024/01/15/photo.jpg') instead of absolute paths.
 The PathResolver reconstructs full paths at runtime by joining base locations with relative paths.
+
+Also provides path sanitization and validation utilities to handle special characters
+and prevent path traversal attacks.
 """
 
 import os
 import logging
-from typing import Optional, Tuple, Dict, Any
+import re
+import unicodedata
+from typing import Optional, Tuple, Dict, Any, List
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Path Sanitization and Validation Utilities
+# ============================================================================
+
+# Characters that are problematic in file paths across platforms
+DANGEROUS_CHARS = ['..', '\x00']  # Directory traversal and null byte
+
+# Characters that may cause issues on specific platforms
+WINDOWS_RESERVED = ['<', '>', ':', '"', '|', '?', '*']
+WINDOWS_RESERVED_NAMES = [
+    'CON', 'PRN', 'AUX', 'NUL',
+    'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+    'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
+]
+
+
+class PathValidationError(Exception):
+    """Raised when path validation fails."""
+    pass
+
+
+def validate_path(path: str, allow_absolute: bool = True) -> Tuple[bool, Optional[str]]:
+    """
+    Validate a file path for safety and correctness.
+
+    Checks for:
+    - Directory traversal attempts (..)
+    - Null byte injection
+    - Empty paths
+    - Excessively long paths
+
+    Parameters:
+        path (str): The path to validate
+        allow_absolute (bool): Whether absolute paths are allowed (default: True)
+
+    Returns:
+        Tuple[bool, Optional[str]]: (is_valid, error_message)
+            - is_valid: True if path is safe, False otherwise
+            - error_message: Description of issue if invalid, None if valid
+    """
+    if not path:
+        return (False, "Path is empty")
+
+    if path.strip() != path:
+        return (False, "Path contains leading or trailing whitespace")
+
+    # Check for null bytes (common injection attack)
+    if '\x00' in path:
+        return (False, "Path contains null byte (potential injection attack)")
+
+    # Check for directory traversal
+    # Normalize and check for .. components
+    normalized = os.path.normpath(path)
+    if '..' in normalized.split(os.sep):
+        return (False, "Path contains directory traversal (..) which is not allowed")
+
+    # Check path length (Windows max is 260, but extended-length paths can be longer)
+    if len(path) > 32767:  # Windows extended-length path limit
+        return (False, f"Path exceeds maximum length of 32767 characters")
+
+    # Check for absolute path if not allowed
+    if not allow_absolute and os.path.isabs(path):
+        return (False, "Absolute paths are not allowed")
+
+    return (True, None)
+
+
+def sanitize_path_for_database(path: str) -> str:
+    """
+    Sanitize a path for safe storage and retrieval from database.
+
+    This handles special characters like apostrophes that can cause SQL issues
+    if parameterized queries are not used properly (defense in depth).
+
+    Note: This function does NOT escape SQL - always use parameterized queries!
+    This is a defense-in-depth measure for path normalization.
+
+    Parameters:
+        path (str): The path to sanitize
+
+    Returns:
+        str: Normalized path safe for storage
+    """
+    if not path:
+        return path
+
+    # Normalize Unicode characters (decompose and recompose)
+    # This ensures consistent representation of accented characters
+    normalized = unicodedata.normalize('NFC', path)
+
+    # Replace backslashes with forward slashes for consistent storage
+    # (will be converted back to platform-specific separator on retrieval)
+    normalized = normalized.replace('\\', '/')
+
+    # Remove duplicate slashes
+    while '//' in normalized:
+        normalized = normalized.replace('//', '/')
+
+    # Strip trailing slashes (except for root)
+    if len(normalized) > 1:
+        normalized = normalized.rstrip('/')
+
+    return normalized
+
+
+def sanitize_filename(filename: str, replacement: str = '_') -> str:
+    """
+    Sanitize a filename by replacing or removing problematic characters.
+
+    Handles:
+    - Windows reserved characters (< > : " | ? *)
+    - Control characters
+    - Leading/trailing spaces and dots
+    - Reserved Windows names (CON, PRN, etc.)
+
+    Parameters:
+        filename (str): The filename to sanitize
+        replacement (str): Character to replace invalid chars with (default: '_')
+
+    Returns:
+        str: Sanitized filename safe for all platforms
+    """
+    if not filename:
+        return filename
+
+    # Normalize Unicode
+    result = unicodedata.normalize('NFC', filename)
+
+    # Replace Windows reserved characters
+    for char in WINDOWS_RESERVED:
+        result = result.replace(char, replacement)
+
+    # Remove control characters (0x00-0x1F and 0x7F)
+    result = ''.join(char for char in result if ord(char) >= 32 and ord(char) != 127)
+
+    # Remove leading/trailing dots and spaces
+    result = result.strip('. ')
+
+    # Check for Windows reserved names
+    name_without_ext = result.split('.')[0].upper()
+    if name_without_ext in WINDOWS_RESERVED_NAMES:
+        result = replacement + result
+
+    # Ensure filename is not empty after sanitization
+    if not result:
+        result = 'unnamed'
+
+    return result
+
+
+def is_path_safe_for_sql(path: str) -> bool:
+    """
+    Check if a path is safe for use in SQL queries.
+
+    Note: Always use parameterized queries! This is a defense-in-depth check.
+
+    Parameters:
+        path (str): The path to check
+
+    Returns:
+        bool: True if path appears safe, False if it contains suspicious patterns
+    """
+    if not path:
+        return True
+
+    # Check for SQL injection patterns (this is defense-in-depth)
+    suspicious_patterns = [
+        "';", '";',  # Statement termination
+        '--',        # SQL comment
+        '/*',        # Multi-line comment start
+        'UNION',     # UNION injection
+        'SELECT',    # SELECT injection
+        'DROP',      # DROP injection
+        'DELETE',    # DELETE injection
+        'INSERT',    # INSERT injection
+        'UPDATE',    # UPDATE injection
+    ]
+
+    upper_path = path.upper()
+    for pattern in suspicious_patterns:
+        if pattern in upper_path:
+            logger.warning(f"Suspicious pattern '{pattern}' found in path: {path}")
+            return False
+
+    return True
+
+
+def normalize_path_separators(path: str) -> str:
+    """
+    Normalize path separators to the current platform's separator.
+
+    Parameters:
+        path (str): Path with mixed separators
+
+    Returns:
+        str: Path with consistent separators for current platform
+    """
+    if not path:
+        return path
+
+    # Replace all separators with current platform separator
+    normalized = path.replace('/', os.sep).replace('\\', os.sep)
+
+    # Remove duplicate separators
+    while os.sep + os.sep in normalized:
+        normalized = normalized.replace(os.sep + os.sep, os.sep)
+
+    return normalized
+
+
+def escape_path_for_glob(path: str) -> str:
+    """
+    Escape special glob characters in a path for literal matching.
+
+    Parameters:
+        path (str): Path that may contain glob special characters
+
+    Returns:
+        str: Path with glob special characters escaped
+    """
+    # Glob special characters: * ? [ ]
+    special_chars = ['*', '?', '[', ']']
+    result = path
+    for char in special_chars:
+        result = result.replace(char, f'[{char}]')
+    return result
+
+
+def get_safe_path_for_display(path: str, max_length: int = 100) -> str:
+    """
+    Get a safe, truncated version of a path for display purposes.
+
+    Truncates from the middle to preserve both the beginning (drive/root)
+    and the end (filename).
+
+    Parameters:
+        path (str): The full path
+        max_length (int): Maximum display length (default: 100)
+
+    Returns:
+        str: Truncated path safe for display
+    """
+    if not path or len(path) <= max_length:
+        return path
+
+    # Keep the first part and the last part, replace middle with ...
+    ellipsis = '...'
+    available = max_length - len(ellipsis)
+    front = available // 2
+    back = available - front
+
+    return path[:front] + ellipsis + path[-back:]
 
 
 class PathResolver:

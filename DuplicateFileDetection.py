@@ -38,6 +38,7 @@ METADATA_SOURCE_SCORES = {
     'exif_datetime': 50,     # DateTime (file modification in EXIF)
     'exif_preview': 45,      # PreviewDateTime
     'iptc': 40,              # IPTC Date Created
+    'xmp': 35,               # XMP CreateDate or DateCreated (Adobe metadata)
     'video_metadata': 60,    # ffprobe/mutagen creation_time
     'video_quicktime': 55,   # QuickTime atom parsing
     'os_metadata': 20,       # OS file timestamps
@@ -1957,6 +1958,168 @@ def _try_iptc_date(im, current_creation_date, current_date_source, current_has_e
     return current_creation_date, current_date_source, current_has_exif
 
 
+def _try_xmp_date(im, current_creation_date, current_date_source, current_has_exif, logger):
+    """
+    Try to extract date from XMP metadata as fallback when EXIF and IPTC are unavailable.
+
+    XMP (Extensible Metadata Platform) is an XML-based metadata format commonly used
+    by Adobe applications. This function parses the XMP data to extract date fields.
+
+    XMP date fields checked (in priority order):
+    1. xmp:CreateDate - Date the resource was created
+    2. photoshop:DateCreated - Photoshop's creation date field
+    3. exif:DateTimeOriginal - EXIF DateTimeOriginal stored in XMP
+    4. xmp:ModifyDate - Last modification date (less reliable)
+    5. dc:date - Dublin Core date (may be multiple dates)
+
+    Parameters:
+        im: PIL Image object (must be open)
+        current_creation_date: Current datetime value to use if XMP fails
+        current_date_source: Current date source string
+        current_has_exif: Current has_exif boolean
+        logger: Logger instance
+
+    Returns:
+        tuple: (creation_date, date_source, has_exif) - updated values if XMP date found
+    """
+    import datetime
+    import re
+
+    try:
+        # Try to get XMP data from PIL image info
+        xmp_data = im.info.get('xmp')
+
+        if not xmp_data:
+            logger.debug("No XMP data found in image")
+            return current_creation_date, current_date_source, current_has_exif
+
+        # Decode if bytes
+        if isinstance(xmp_data, bytes):
+            xmp_str = xmp_data.decode('utf-8', errors='ignore')
+        else:
+            xmp_str = str(xmp_data)
+
+        logger.debug(f"Found XMP data ({len(xmp_str)} characters)")
+
+        # XMP date patterns to search for (in priority order)
+        # XMP dates can be in various ISO 8601 formats:
+        # - YYYY-MM-DDTHH:MM:SS
+        # - YYYY-MM-DDTHH:MM:SS.sss
+        # - YYYY-MM-DDTHH:MM:SS+HH:MM (timezone)
+        # - YYYY-MM-DD
+        xmp_date_patterns = [
+            # Primary creation date fields
+            (r'<xmp:CreateDate>([^<]+)</xmp:CreateDate>', 'xmp'),
+            (r'xmp:CreateDate="([^"]+)"', 'xmp'),
+            (r'<photoshop:DateCreated>([^<]+)</photoshop:DateCreated>', 'xmp'),
+            (r'photoshop:DateCreated="([^"]+)"', 'xmp'),
+            (r'<exif:DateTimeOriginal>([^<]+)</exif:DateTimeOriginal>', 'xmp'),
+            (r'exif:DateTimeOriginal="([^"]+)"', 'xmp'),
+            # Less preferred - modification date
+            (r'<xmp:ModifyDate>([^<]+)</xmp:ModifyDate>', 'xmp'),
+            (r'xmp:ModifyDate="([^"]+)"', 'xmp'),
+            # Dublin Core date (generic)
+            (r'<dc:date>.*?<rdf:li>([^<]+)</rdf:li>', 'xmp'),
+        ]
+
+        best_date = None
+        best_source = None
+
+        for pattern, source in xmp_date_patterns:
+            match = re.search(pattern, xmp_str, re.IGNORECASE | re.DOTALL)
+            if match:
+                date_str = match.group(1).strip()
+                logger.debug(f"Found XMP date field: {date_str}")
+
+                parsed_date = _parse_xmp_date(date_str, logger)
+                if parsed_date:
+                    # Use the first valid date found (highest priority)
+                    if best_date is None:
+                        best_date = parsed_date
+                        best_source = source
+                        logger.info(f"Using XMP date: {best_date} from pattern {pattern}")
+                    break  # Use first match
+
+        if best_date:
+            return best_date, best_source, True  # XMP found, treat as reliable
+
+    except Exception as xmp_err:
+        logger.warning(f"Error reading XMP data: {xmp_err}")
+
+    # Return original values if XMP extraction failed
+    return current_creation_date, current_date_source, current_has_exif
+
+
+def _parse_xmp_date(date_str: str, logger) -> 'datetime.datetime | None':
+    """
+    Parse an XMP date string into a datetime object.
+
+    XMP uses ISO 8601 date formats. This function handles various formats:
+    - YYYY-MM-DDTHH:MM:SS
+    - YYYY-MM-DDTHH:MM:SS.sss
+    - YYYY-MM-DDTHH:MM:SS+HH:MM (timezone)
+    - YYYY-MM-DDTHH:MM:SSZ (UTC)
+    - YYYY-MM-DD
+    - YYYY:MM:DD HH:MM:SS (EXIF-style in XMP)
+
+    Parameters:
+        date_str: The date string to parse
+        logger: Logger instance
+
+    Returns:
+        datetime.datetime or None if parsing fails
+    """
+    import datetime
+    import re
+
+    if not date_str:
+        return None
+
+    # Clean up the string
+    date_str = date_str.strip()
+
+    # Common XMP/ISO 8601 date formats to try
+    formats = [
+        # Full datetime with timezone
+        '%Y-%m-%dT%H:%M:%S%z',
+        # Full datetime without timezone
+        '%Y-%m-%dT%H:%M:%S',
+        # With milliseconds
+        '%Y-%m-%dT%H:%M:%S.%f',
+        # Date only
+        '%Y-%m-%d',
+        # EXIF-style (sometimes in XMP)
+        '%Y:%m:%d %H:%M:%S',
+        # Alternative separators
+        '%Y/%m/%d %H:%M:%S',
+    ]
+
+    # Handle timezone suffix (Z for UTC, or +/-HH:MM)
+    # Python's %z doesn't handle colon in timezone, so preprocess
+    if date_str.endswith('Z'):
+        date_str = date_str[:-1]  # Remove Z suffix
+
+    # Remove colon from timezone offset for Python parsing
+    # e.g., +05:30 -> +0530
+    tz_match = re.search(r'([+-])(\d{2}):(\d{2})$', date_str)
+    if tz_match:
+        date_str = date_str[:tz_match.start()] + tz_match.group(1) + tz_match.group(2) + tz_match.group(3)
+
+    # Try each format
+    for fmt in formats:
+        try:
+            parsed = datetime.datetime.strptime(date_str, fmt)
+            # Remove timezone info to keep it naive (consistent with EXIF handling)
+            if parsed.tzinfo is not None:
+                parsed = parsed.replace(tzinfo=None)
+            return parsed
+        except ValueError:
+            continue
+
+    logger.debug(f"Could not parse XMP date: {date_str}")
+    return None
+
+
 def get_creation_date(file_path, database_path=None):
     """
     Get the creation date of a file and extract year, month, and day.
@@ -1972,8 +2135,9 @@ def get_creation_date(file_path, database_path=None):
        Rationale: A file can only be modified AFTER creation, so the
        earliest date is most likely the original creation date.
     3. IPTC Date Created (fallback for images without EXIF)
-    4. OS file metadata (creation time or modification time)
-    5. Fallback to year 1000 on complete failure
+    4. XMP CreateDate/DateCreated (Adobe metadata, fallback after IPTC)
+    5. OS file metadata (creation time or modification time)
+    6. Fallback to year 1000 on complete failure
 
     Date extraction priority for VIDEOS:
     1. Video metadata via ffprobe (creation_time tag)
@@ -1994,7 +2158,7 @@ def get_creation_date(file_path, database_path=None):
     tuple: A tuple containing (year, month, day, date_source, is_reliable).
            - year, month, day: Date components as zero-padded strings
            - date_source: 'exif', 'exif_digitized', 'exif_gps', 'exif_datetime',
-                          'exif_preview', 'iptc', 'video_metadata', 'video_quicktime',
+                          'exif_preview', 'iptc', 'xmp', 'video_metadata', 'video_quicktime',
                           'os_metadata', or 'fallback'
            - is_reliable: Boolean indicating if date is considered reliable
     """
@@ -2089,20 +2253,32 @@ def get_creation_date(file_path, database_path=None):
                                     logger.info("OS and EXIF dates match")
                                 logger.info("--------------------------------------------")
                             else:
-                                # No valid EXIF dates found, try IPTC
+                                # No valid EXIF dates found, try IPTC then XMP
                                 logger.info("No valid EXIF dates found. Trying IPTC...")
                                 creation_date, date_source, has_exif = _try_iptc_date(
                                     im, creation_date, date_source, has_exif, logger
                                 )
+                                # If IPTC didn't find a date, try XMP
+                                if date_source == 'os_metadata':
+                                    logger.info("No IPTC date found. Trying XMP...")
+                                    creation_date, date_source, has_exif = _try_xmp_date(
+                                        im, creation_date, date_source, has_exif, logger
+                                    )
                         else:
-                            # No EXIF data at all, try IPTC
+                            # No EXIF data at all, try IPTC then XMP
                             logger.info("No EXIF date fields found. Trying IPTC...")
                             creation_date, date_source, has_exif = _try_iptc_date(
                                 im, creation_date, date_source, has_exif, logger
                             )
+                            # If IPTC didn't find a date, try XMP
+                            if date_source == 'os_metadata':
+                                logger.info("No IPTC date found. Trying XMP...")
+                                creation_date, date_source, has_exif = _try_xmp_date(
+                                    im, creation_date, date_source, has_exif, logger
+                                )
 
                     except Exception as e:
-                        logger.exception(f"Error reading EXIF/IPTC from {file_path}: {e}")
+                        logger.exception(f"Error reading EXIF/IPTC/XMP from {file_path}: {e}")
                         # Fall through to use OS metadata
             else:
                 logger.info(f"File {file_path} with extension {extension} not supported by Pillow. Using OS date.")

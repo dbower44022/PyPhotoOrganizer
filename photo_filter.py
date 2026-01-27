@@ -88,53 +88,94 @@ class PhotoFilter:
             Video files are automatically passed through (return True) since
             they cannot be analyzed with PIL and have different metadata structures.
         """
+        is_valid, _ = self.is_photo_with_reason(file_path)
+        return is_valid
+
+    def is_photo_with_reason(self, file_path: str) -> Tuple[bool, Optional[str]]:
+        """
+        Determine if a file is a real photograph, with detailed reason if filtered.
+
+        This method provides both the filtering decision and a human-readable
+        reason for why the file was filtered, making it useful for UI feedback
+        and debugging.
+
+        Parameters:
+            file_path (str): Path to the file to check
+
+        Returns:
+            Tuple[bool, Optional[str]]: (is_photo, reason)
+                - is_photo: True if file appears to be a photo
+                - reason: None if is_photo=True, otherwise a descriptive message
+                  explaining why the file was filtered
+
+        Note:
+            Video files are automatically passed through (return True, None) since
+            they cannot be analyzed with PIL and have different metadata structures.
+        """
         if not self.enabled:
-            return True  # Filter disabled, accept all files
+            return (True, None)  # Filter disabled, accept all files
 
         # Video files pass through - they're handled separately
         if _is_video_file(file_path):
             logger.debug(f"Video file detected, passing through: {file_path}")
-            return True
+            return (True, None)
 
         self.total_checked += 1
 
         # Check 1: Filename patterns
         if not self._check_filename(file_path):
             self.filtered_by_filename += 1
+            filename = os.path.basename(file_path)
+            matched_pattern = self._get_matched_pattern(file_path)
+            reason = f"Filename '{filename}' matches excluded pattern '{matched_pattern}'"
             logger.debug(f"Filtered by filename pattern: {file_path}")
-            return False
+            return (False, reason)
 
         # Check 2: File size
         if not self._check_file_size(file_path):
             self.filtered_by_size += 1
+            try:
+                actual_size = os.path.getsize(file_path)
+                reason = f"File size {actual_size:,} bytes is below minimum {self.min_file_size:,} bytes"
+            except OSError:
+                reason = f"File size is below minimum {self.min_file_size:,} bytes"
             logger.debug(f"Filtered by file size: {file_path}")
-            return False
+            return (False, reason)
 
         # Check 3: Image dimensions and properties (requires opening the file)
         try:
             with Image.open(file_path) as img:
+                width, height = img.size
+
                 # Check dimensions
                 if not self._check_dimensions(img, file_path):
                     self.filtered_by_dimensions += 1
-                    return False
+                    if width < self.min_width or height < self.min_height:
+                        reason = f"Dimensions {width}x{height} are below minimum {self.min_width}x{self.min_height}"
+                    else:
+                        reason = f"Dimensions {width}x{height} exceed maximum {self.max_width}x{self.max_height}"
+                    return (False, reason)
 
                 # Check for small squares (likely icons)
                 if not self._check_square_icon(img, file_path):
                     self.filtered_by_square += 1
-                    return False
+                    reason = f"Small square image {width}x{height} detected (likely icon, threshold: {self.exclude_square_smaller_than}x{self.exclude_square_smaller_than})"
+                    return (False, reason)
 
                 # Check EXIF data (if required)
                 if self.require_exif and not self._check_exif(img, file_path):
                     self.filtered_by_exif += 1
-                    return False
+                    reason = "No EXIF camera metadata found (EXIF required by settings)"
+                    return (False, reason)
 
         except Exception as e:
             logger.warning(f"Could not read image {file_path}: {e}")
             self.filtered_by_read_error += 1
-            return False  # If we can't read it, filter it out
+            reason = f"Could not read image file: {str(e)}"
+            return (False, reason)
 
         # Passed all checks - it's a photo
-        return True
+        return (True, None)
 
     def _check_filename(self, file_path: str) -> bool:
         """Check if filename contains excluded patterns."""
@@ -145,6 +186,16 @@ class PhotoFilter:
                 return False
 
         return True
+
+    def _get_matched_pattern(self, file_path: str) -> Optional[str]:
+        """Get the excluded pattern that matched this filename, if any."""
+        filename = os.path.basename(file_path).lower()
+
+        for pattern in self.excluded_patterns:
+            if pattern.lower() in filename:
+                return pattern
+
+        return None
 
     def _check_file_size(self, file_path: str) -> bool:
         """Check if file size meets minimum requirement."""
@@ -197,13 +248,18 @@ class PhotoFilter:
         """
         Get the reason why a file was filtered (for reporting).
 
-        Returns the first reason that caused filtering, or None if file passes.
+        Returns a short reason code if the file was filtered, or None if it passes.
+        For a human-readable detailed reason, use is_photo_with_reason() instead.
 
         Parameters:
             file_path (str): Path to check
 
         Returns:
-            str or None: Reason for filtering, or None if file is a photo
+            str or None: Short reason code for filtering, or None if file is a photo
+
+        Note:
+            This method does NOT update statistics. Use is_photo() or
+            is_photo_with_reason() if you need statistics tracking.
         """
         if not self.enabled:
             return None
@@ -232,6 +288,47 @@ class PhotoFilter:
             return "image_read_error"
 
         return None
+
+    def get_detailed_filter_reason(self, file_path: str) -> Optional[str]:
+        """
+        Get a detailed, human-readable reason why a file was filtered.
+
+        Unlike get_filter_reason() which returns short codes, this method
+        returns user-friendly explanations suitable for display in the UI.
+
+        Parameters:
+            file_path (str): Path to check
+
+        Returns:
+            str or None: Detailed reason for filtering, or None if file is a photo
+
+        Note:
+            This method does NOT update statistics. Use is_photo() or
+            is_photo_with_reason() if you need statistics tracking.
+        """
+        # Store current stats to restore after check (since is_photo_with_reason updates them)
+        saved_stats = (
+            self.total_checked,
+            self.filtered_by_size,
+            self.filtered_by_dimensions,
+            self.filtered_by_square,
+            self.filtered_by_exif,
+            self.filtered_by_filename,
+            self.filtered_by_read_error
+        )
+
+        _, reason = self.is_photo_with_reason(file_path)
+
+        # Restore stats (we're just checking, not filtering)
+        (self.total_checked,
+         self.filtered_by_size,
+         self.filtered_by_dimensions,
+         self.filtered_by_square,
+         self.filtered_by_exif,
+         self.filtered_by_filename,
+         self.filtered_by_read_error) = saved_stats
+
+        return reason
 
     def get_statistics(self) -> dict:
         """

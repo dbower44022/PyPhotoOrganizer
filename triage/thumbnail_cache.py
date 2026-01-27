@@ -121,6 +121,9 @@ class ThumbnailCache(QObject):
         # Placeholder generator
         self.placeholder_gen = PlaceholderGenerator()
 
+        # Cache warming control
+        self._warming_stop_requested = False
+
         logger.info(f"Thumbnail cache initialized: memory={memory_size}, "
                    f"disk={disk_size_gb}GB, workers={worker_threads}, "
                    f"async_db_writes=enabled")
@@ -653,6 +656,9 @@ class ThumbnailCache(QObject):
         # Stop database writer thread
         self._db_writer_running = False
 
+        # Stop any warming operation
+        self._warming_stop_requested = True
+
         # Wait for queue to drain (max 5 seconds)
         try:
             self._db_write_queue.join()
@@ -666,6 +672,193 @@ class ThumbnailCache(QObject):
         logger.info(f"Thumbnail cache shutdown complete. "
                    f"Queued: {self.stats['db_writes_queued']}, "
                    f"Completed: {self.stats['db_writes_completed']}")
+
+    # ========================================================================
+    # Cache Warming
+    # ========================================================================
+
+    # Signal emitted during cache warming progress (current, total, file_hash)
+    warming_progress = Signal(int, int, str)
+    warming_complete = Signal(int, int, int)  # generated, skipped, errors
+
+    def warm_cache(self, file_items: List[Dict[str, Any]], size: int = 256,
+                   batch_size: int = 50, progress_callback=None) -> Dict[str, int]:
+        """
+        Pre-generate thumbnails for a list of files (cache warming).
+
+        This method processes files in batches, checking if each file already
+        has a cached thumbnail before generating. Useful for startup or idle
+        time to improve user experience when browsing.
+
+        Args:
+            file_items: List of file dicts with 'file_hash' and 'file_path' keys
+            size: Thumbnail size to generate (default: 256)
+            batch_size: Number of files to queue before yielding (default: 50)
+            progress_callback: Optional callback(current, total, file_hash) for progress
+
+        Returns:
+            Dict with warming statistics:
+                - queued: Number of thumbnails queued for generation
+                - skipped: Number already cached (skipped)
+                - errors: Number that failed
+                - total: Total files processed
+
+        Note:
+            This method queues generation in the background. To wait for
+            completion, call wait_for_completion() after warming.
+        """
+        self._warming_stop_requested = False
+
+        stats = {
+            'queued': 0,
+            'skipped': 0,
+            'errors': 0,
+            'total': len(file_items)
+        }
+
+        if not file_items:
+            logger.info("Cache warming: No files to process")
+            return stats
+
+        logger.info(f"Cache warming: Starting for {len(file_items)} files, size={size}")
+
+        for idx, item in enumerate(file_items):
+            # Check for stop request
+            if self._warming_stop_requested:
+                logger.info(f"Cache warming: Stopped after {idx} files")
+                break
+
+            file_hash = item.get('file_hash')
+            file_path = item.get('file_path') or item.get('archive_path')
+
+            if not file_hash or not file_path:
+                stats['errors'] += 1
+                continue
+
+            # Check if already in memory cache
+            cache_key = f"{file_hash}_{size}"
+            if cache_key in self.memory_cache:
+                stats['skipped'] += 1
+                continue
+
+            # Check if already in disk cache
+            cache_entry = self.triage_db.get_thumbnail(file_hash, size)
+            if cache_entry and os.path.exists(cache_entry['thumbnail_path']):
+                stats['skipped'] += 1
+                continue
+
+            # Check if file exists
+            if not os.path.exists(file_path):
+                stats['errors'] += 1
+                continue
+
+            # Queue for generation (low priority for warming)
+            self._queue_generation(file_hash, file_path, size, priority='low')
+            stats['queued'] += 1
+
+            # Progress callback
+            if progress_callback:
+                progress_callback(idx + 1, len(file_items), file_hash)
+
+            # Emit progress signal
+            self.warming_progress.emit(idx + 1, len(file_items), file_hash)
+
+            # Yield periodically to allow other operations
+            if stats['queued'] % batch_size == 0:
+                # Brief pause to prevent overwhelming the thread pool
+                import time
+                time.sleep(0.01)
+
+        # Emit completion signal
+        self.warming_complete.emit(stats['queued'], stats['skipped'], stats['errors'])
+
+        logger.info(f"Cache warming complete: queued={stats['queued']}, "
+                   f"skipped={stats['skipped']}, errors={stats['errors']}")
+
+        return stats
+
+    def warm_cache_async(self, file_items: List[Dict[str, Any]], size: int = 256):
+        """
+        Start cache warming in a background thread.
+
+        This is a convenience method that runs warm_cache() in a background thread
+        so it doesn't block the UI. Progress can be monitored via signals:
+        - warming_progress: Emitted for each file (current, total, file_hash)
+        - warming_complete: Emitted when done (generated, skipped, errors)
+
+        Args:
+            file_items: List of file dicts with 'file_hash' and 'file_path' keys
+            size: Thumbnail size to generate (default: 256)
+        """
+        def _warm_thread():
+            try:
+                self.warm_cache(file_items, size)
+            except Exception as e:
+                logger.error(f"Cache warming thread error: {e}", exc_info=True)
+
+        warming_thread = threading.Thread(
+            target=_warm_thread,
+            daemon=True,
+            name="ThumbnailCacheWarming"
+        )
+        warming_thread.start()
+        logger.info(f"Cache warming started in background for {len(file_items)} files")
+
+    def stop_warming(self):
+        """
+        Request stop of any ongoing cache warming operation.
+
+        The warming will stop at the next file boundary (not immediately).
+        """
+        self._warming_stop_requested = True
+        logger.info("Cache warming stop requested")
+
+    def get_warming_candidates(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        """
+        Get list of files that need thumbnail generation.
+
+        Queries the database for files that don't have cached thumbnails,
+        prioritizing recently added files.
+
+        Args:
+            limit: Maximum number of files to return (default: 1000)
+
+        Returns:
+            List of dicts with 'file_hash' and 'file_path' keys
+        """
+        try:
+            import sqlite3
+
+            candidates = []
+            with sqlite3.connect(self.db_path, timeout=30) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+
+                # Get files from UniquePhotos that don't have thumbnails in cache
+                # Priority: most recently added first
+                cursor.execute("""
+                    SELECT up.file_hash, up.file_name as file_path
+                    FROM UniquePhotos up
+                    LEFT JOIN ThumbnailCache tc ON up.file_hash = tc.file_hash
+                    WHERE tc.file_hash IS NULL
+                        AND up.file_name IS NOT NULL
+                        AND up.storage_type IN ('archive', 'video_archive')
+                    ORDER BY up.rowid DESC
+                    LIMIT ?
+                """, (limit,))
+
+                for row in cursor.fetchall():
+                    candidates.append({
+                        'file_hash': row['file_hash'],
+                        'file_path': row['file_path']
+                    })
+
+            logger.info(f"Found {len(candidates)} cache warming candidates")
+            return candidates
+
+        except Exception as e:
+            logger.error(f"Error getting warming candidates: {e}", exc_info=True)
+            return []
 
 
 if __name__ == '__main__':
