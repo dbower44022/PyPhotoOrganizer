@@ -30,7 +30,7 @@ from typing import Dict, List, Optional
 import constants
 
 # Current schema version
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Schema version history
 SCHEMA_VERSION_HISTORY = {
@@ -40,7 +40,8 @@ SCHEMA_VERSION_HISTORY = {
     4: "Added metadata_upgrade_history table",
     5: "Unified schema - all hashes in UniquePhotos",
     6: "Relative paths for portable archives",
-    7: "Metadata quality tracking (date_source, date_reliable, metadata_quality_score)"
+    7: "Metadata quality tracking (date_source, date_reliable, metadata_quality_score)",
+    8: "Cloud storage support (CloudSyncStatus, storage backend tracking)"
 }
 
 
@@ -99,7 +100,7 @@ CREATE TABLE IF NOT EXISTS ArchiveMetadata (
     total_photos INTEGER DEFAULT 0,
     last_used TEXT,
     created_date TEXT,
-    schema_version INTEGER DEFAULT 7,
+    schema_version INTEGER DEFAULT 8,
     organization_template TEXT DEFAULT '{year}/{month}/{day}',
     file_type_organization TEXT DEFAULT 'combined',
     enable_file_rename INTEGER DEFAULT 0,
@@ -110,7 +111,11 @@ CREATE TABLE IF NOT EXISTS ArchiveMetadata (
     cache_worker_threads INTEGER DEFAULT 4,
     preview_window_geometry TEXT,
     preview_window_visible INTEGER DEFAULT 0,
-    ignored_directories TEXT DEFAULT '[]'
+    ignored_directories TEXT DEFAULT '[]',
+    -- Schema v8: Cloud storage configuration
+    storage_config TEXT,
+    cloud_sync_enabled INTEGER DEFAULT 0,
+    cloud_last_sync TEXT
 )
 """
 
@@ -395,6 +400,81 @@ CREATE TABLE IF NOT EXISTS MetadataUpgradeHistory (
 
 
 # ============================================================================
+# Cloud Storage Tables (Schema v8)
+# ============================================================================
+
+CLOUD_SYNC_STATUS_TABLE = """
+CREATE TABLE IF NOT EXISTS CloudSyncStatus (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash TEXT NOT NULL,
+    storage_location TEXT NOT NULL,
+    cloud_provider TEXT,
+    cloud_path TEXT,
+    upload_status TEXT DEFAULT 'pending',
+    upload_started TEXT,
+    upload_completed TEXT,
+    cloud_etag TEXT,
+    cloud_storage_class TEXT,
+    retry_count INTEGER DEFAULT 0,
+    last_error TEXT,
+    verified_at TEXT,
+    FOREIGN KEY (file_hash) REFERENCES UniquePhotos(file_hash),
+    UNIQUE (file_hash, storage_location, cloud_provider)
+)
+"""
+
+CLOUD_SYNC_STATUS_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_cloud_sync_status ON CloudSyncStatus(upload_status, storage_location)",
+    "CREATE INDEX IF NOT EXISTS idx_cloud_sync_hash ON CloudSyncStatus(file_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_cloud_sync_provider ON CloudSyncStatus(cloud_provider)",
+]
+
+# Track files that exist in multiple locations (local + cloud)
+FILE_LOCATIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS FileLocations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash TEXT NOT NULL,
+    location_type TEXT NOT NULL,
+    storage_backend TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    cloud_provider TEXT,
+    cloud_bucket TEXT,
+    verified_at TEXT,
+    FOREIGN KEY (file_hash) REFERENCES UniquePhotos(file_hash),
+    UNIQUE (file_hash, location_type, storage_backend)
+)
+"""
+
+FILE_LOCATIONS_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_file_locations_hash ON FileLocations(file_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_file_locations_type ON FileLocations(location_type, storage_backend)",
+]
+
+# Queue for pending cloud uploads (for offline support)
+CLOUD_UPLOAD_QUEUE_TABLE = """
+CREATE TABLE IF NOT EXISTS CloudUploadQueue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash TEXT NOT NULL,
+    local_path TEXT NOT NULL,
+    target_storage TEXT NOT NULL,
+    target_path TEXT NOT NULL,
+    priority INTEGER DEFAULT 0,
+    queued_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    attempts INTEGER DEFAULT 0,
+    last_attempt TEXT,
+    last_error TEXT,
+    status TEXT DEFAULT 'queued',
+    FOREIGN KEY (file_hash) REFERENCES UniquePhotos(file_hash)
+)
+"""
+
+CLOUD_UPLOAD_QUEUE_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_upload_queue_status ON CloudUploadQueue(status, priority)",
+    "CREATE INDEX IF NOT EXISTS idx_upload_queue_hash ON CloudUploadQueue(file_hash)",
+]
+
+
+# ============================================================================
 # Query Tables
 # ============================================================================
 
@@ -439,6 +519,10 @@ def get_all_table_definitions() -> Dict[str, str]:
         'QuickBackups': QUICK_BACKUPS_TABLE,
         'MetadataUpgradeHistory': METADATA_UPGRADE_HISTORY_TABLE,
         'SavedQueries': SAVED_QUERIES_TABLE,
+        # Schema v8: Cloud storage tables
+        'CloudSyncStatus': CLOUD_SYNC_STATUS_TABLE,
+        'FileLocations': FILE_LOCATIONS_TABLE,
+        'CloudUploadQueue': CLOUD_UPLOAD_QUEUE_TABLE,
     }
 
 
@@ -457,6 +541,10 @@ def get_all_indexes() -> List[str]:
     indexes.extend(DELETED_FILES_INDEXES)
     indexes.extend(THUMBNAIL_CACHE_INDEXES)
     indexes.extend(PENDING_OPERATIONS_INDEXES)
+    # Schema v8: Cloud storage indexes
+    indexes.extend(CLOUD_SYNC_STATUS_INDEXES)
+    indexes.extend(FILE_LOCATIONS_INDEXES)
+    indexes.extend(CLOUD_UPLOAD_QUEUE_INDEXES)
     return indexes
 
 

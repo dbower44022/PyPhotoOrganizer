@@ -20,6 +20,7 @@ from ui.import_history_tab import ImportHistoryTab
 from ui.archive_maintenance_tab import ArchiveMaintenanceTab
 from ui.database_selector_dialog import DatabaseSelectorDialog
 from ui.worker import ProcessingWorker
+from ui.upgrade_review_dialog import UpgradeReviewDialog
 from database_metadata import DatabaseMetadata
 from album_manager import AlbumManager
 
@@ -237,6 +238,7 @@ class MainWindow(QMainWindow):
             self.worker.completed.connect(self.processing_completed)
             self.worker.error_occurred.connect(self.processing_error)
             self.worker.status_update.connect(self.progress_tab.add_status_message)
+            self.worker.upgrade_review_needed.connect(self._on_upgrade_review_needed)
 
             # Switch to progress tab and start
             self.tabs.setCurrentWidget(self.progress_tab)
@@ -355,6 +357,43 @@ class MainWindow(QMainWindow):
         # Show error message
         QMessageBox.critical(self, "Processing Error",
                            f"An error occurred during processing:\n\n{error_msg}")
+
+    def _on_upgrade_review_needed(self, upgrade_candidates):
+        """
+        Handle upgrade candidates that need user review.
+
+        Shows the UpgradeReviewDialog for the user to review files with
+        different metadata and decide which to upgrade.
+
+        Args:
+            upgrade_candidates: List of upgrade candidate dicts from find_duplicates()
+        """
+        if not upgrade_candidates:
+            # No candidates to review - continue with empty list
+            if self.worker:
+                self.worker.set_approved_upgrades([])
+            return
+
+        self.status_bar.showMessage(f"Review needed: {len(upgrade_candidates)} files with different metadata")
+
+        # Show the review dialog
+        dialog = UpgradeReviewDialog(upgrade_candidates, self)
+
+        def on_review_completed(candidates_with_decisions):
+            """Handle review completion."""
+            # Get approved upgrades (decision == 'use_incoming')
+            approved = [c for c in candidates_with_decisions if c.get('decision') == 'use_incoming']
+
+            if self.worker:
+                self.worker.set_approved_upgrades(approved)
+
+            if approved:
+                self.status_bar.showMessage(f"Processing {len(approved)} approved upgrades...")
+            else:
+                self.status_bar.showMessage("No upgrades approved - continuing import...")
+
+        dialog.review_completed.connect(on_review_completed)
+        dialog.exec()
 
     def select_database_on_startup(self):
         """Show database selector on startup - user must select database."""

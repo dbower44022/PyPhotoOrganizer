@@ -9,13 +9,19 @@ The PathResolver reconstructs full paths at runtime by joining base locations wi
 
 Also provides path sanitization and validation utilities to handle special characters
 and prevent path traversal attacks.
+
+Supports both direct filesystem access (via DatabaseMetadata) and cloud storage
+(via StorageBackend) for flexible storage configurations.
 """
 
 import os
 import logging
 import re
 import unicodedata
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Optional, Tuple, Dict, Any, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from storage_backend import StorageManager, StorageBackend
 
 logger = logging.getLogger(__name__)
 
@@ -603,3 +609,253 @@ class PathResolver:
         """
         storage_type = self.get_storage_type_for_path(absolute_path)
         return storage_type != self.STORAGE_UNKNOWN
+
+
+class StorageBackendResolver:
+    """
+    Cloud-aware path resolver using StorageManager backends.
+
+    This class provides the same interface as PathResolver but uses
+    StorageBackend instances for file operations, enabling cloud storage support.
+
+    Usage:
+        from path_resolver import StorageBackendResolver
+        from storage_backend import StorageManager
+
+        storage_config = {
+            'archive': {'type': 'local', 'path': '/archive'},
+            'video_archive': {'type': 's3', 'bucket': 'videos', ...}
+        }
+        manager = StorageManager(storage_config)
+        resolver = StorageBackendResolver(manager)
+
+        # Get backend for a storage type
+        backend = resolver.get_backend('archive')
+        if backend.exists('2024/01/photo.jpg'):
+            data = backend.read_file('2024/01/photo.jpg')
+    """
+
+    # Storage type constants (mirror PathResolver)
+    STORAGE_ARCHIVE = 'archive'
+    STORAGE_VIDEO_ARCHIVE = 'video_archive'
+    STORAGE_PRIOR_REVISION = 'prior_revision'
+    STORAGE_DELETE_VAULT = 'delete_vault'
+    STORAGE_UNKNOWN = 'unknown'
+
+    VALID_STORAGE_TYPES = {
+        STORAGE_ARCHIVE, STORAGE_VIDEO_ARCHIVE,
+        STORAGE_PRIOR_REVISION, STORAGE_DELETE_VAULT
+    }
+
+    def __init__(self, storage_manager: 'StorageManager'):
+        """
+        Initialize with a StorageManager instance.
+
+        Args:
+            storage_manager: StorageManager with configured backends
+        """
+        self.storage_manager = storage_manager
+
+    def get_backend(self, storage_type: str) -> Optional['StorageBackend']:
+        """
+        Get the storage backend for a given storage type.
+
+        Args:
+            storage_type: One of 'archive', 'video_archive', 'prior_revision', 'delete_vault'
+
+        Returns:
+            StorageBackend instance or None if not configured
+        """
+        return self.storage_manager.get_backend(storage_type)
+
+    def resolve(self, relative_path: str, storage_type: str) -> Optional[str]:
+        """
+        Convert relative path to full path for the storage backend.
+
+        For local storage, returns absolute filesystem path.
+        For cloud storage, returns the full URI (e.g., s3://bucket/path).
+
+        Args:
+            relative_path: Path relative to storage base
+            storage_type: Storage type identifier
+
+        Returns:
+            Full resolved path, or None if backend not configured
+        """
+        backend = self.get_backend(storage_type)
+        if not backend:
+            return None
+
+        return backend.resolve_path(relative_path)
+
+    def exists(self, relative_path: str, storage_type: str) -> bool:
+        """
+        Check if a file exists in the specified storage.
+
+        Args:
+            relative_path: Path relative to storage base
+            storage_type: Storage type identifier
+
+        Returns:
+            True if file exists
+        """
+        backend = self.get_backend(storage_type)
+        if not backend:
+            return False
+
+        return backend.exists(relative_path)
+
+    def get_storage_type(self, storage_type: str) -> str:
+        """
+        Get the backend type (local, s3, azure, etc.) for a storage type.
+
+        Args:
+            storage_type: Storage type identifier (archive, video_archive, etc.)
+
+        Returns:
+            Backend type string or 'unknown' if not configured
+        """
+        backend = self.get_backend(storage_type)
+        if not backend:
+            return self.STORAGE_UNKNOWN
+
+        return backend.storage_type
+
+    def is_cloud_storage(self, storage_type: str) -> bool:
+        """
+        Check if a storage type uses cloud backend.
+
+        Args:
+            storage_type: Storage type identifier
+
+        Returns:
+            True if storage uses cloud backend (s3, azure, gcs, etc.)
+        """
+        backend_type = self.get_storage_type(storage_type)
+        return backend_type not in ('local', self.STORAGE_UNKNOWN)
+
+    def get_configured_vaults(self) -> List[str]:
+        """
+        Get list of configured vault types.
+
+        Returns:
+            List of storage type strings that are configured
+        """
+        return self.storage_manager.configured_vaults
+
+    def copy_to_storage(self, local_path: str, relative_path: str,
+                        storage_type: str, verify: bool = True) -> bool:
+        """
+        Copy a local file to storage.
+
+        Args:
+            local_path: Absolute path to local source file
+            relative_path: Destination path relative to storage base
+            storage_type: Target storage type
+            verify: If True, verify integrity after copy
+
+        Returns:
+            True if copy successful
+        """
+        backend = self.get_backend(storage_type)
+        if not backend:
+            logger.error(f"No backend configured for storage type: {storage_type}")
+            return False
+
+        try:
+            result = backend.copy_from_local(local_path, relative_path)
+
+            if result and verify:
+                # Verify file exists and has content
+                if not backend.exists(relative_path):
+                    logger.error(f"Verification failed: file not found after copy: {relative_path}")
+                    return False
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to copy to storage: {e}")
+            return False
+
+    def copy_from_storage(self, relative_path: str, local_path: str,
+                          storage_type: str) -> bool:
+        """
+        Copy a file from storage to local filesystem.
+
+        Args:
+            relative_path: Source path relative to storage base
+            local_path: Absolute destination path on local filesystem
+            storage_type: Source storage type
+
+        Returns:
+            True if copy successful
+        """
+        backend = self.get_backend(storage_type)
+        if not backend:
+            logger.error(f"No backend configured for storage type: {storage_type}")
+            return False
+
+        try:
+            return backend.copy_to_local(relative_path, local_path)
+        except Exception as e:
+            logger.error(f"Failed to copy from storage: {e}")
+            return False
+
+    def delete_from_storage(self, relative_path: str, storage_type: str) -> bool:
+        """
+        Delete a file from storage.
+
+        Args:
+            relative_path: Path relative to storage base
+            storage_type: Storage type identifier
+
+        Returns:
+            True if deleted (or didn't exist), False on error
+        """
+        backend = self.get_backend(storage_type)
+        if not backend:
+            logger.error(f"No backend configured for storage type: {storage_type}")
+            return False
+
+        try:
+            return backend.delete(relative_path)
+        except Exception as e:
+            logger.error(f"Failed to delete from storage: {e}")
+            return False
+
+    def verify_integrity(self, relative_path: str, expected_hash: str,
+                        storage_type: str, full_verify: bool = False) -> bool:
+        """
+        Verify file integrity in storage.
+
+        Args:
+            relative_path: Path relative to storage base
+            expected_hash: Expected SHA-256 hash
+            storage_type: Storage type identifier
+            full_verify: If True, compute full hash; if False, use partial
+
+        Returns:
+            True if hash matches
+        """
+        backend = self.get_backend(storage_type)
+        if not backend:
+            return False
+
+        return backend.verify_integrity(relative_path, expected_hash, full_verify)
+
+
+def create_resolver_from_config(config: 'Config') -> StorageBackendResolver:
+    """
+    Create a StorageBackendResolver from a Config instance.
+
+    This is a convenience function for creating a cloud-aware resolver
+    from application configuration.
+
+    Args:
+        config: Config instance with storage configuration
+
+    Returns:
+        StorageBackendResolver ready for use
+    """
+    storage_manager = config.create_storage_manager()
+    return StorageBackendResolver(storage_manager)

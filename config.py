@@ -3,14 +3,20 @@ Configuration management for the PhotoOrganizer application.
 
 This module provides a centralized configuration system that handles loading,
 validating, and accessing application settings with proper defaults.
+
+Supports both legacy single-path configuration and new multi-vault storage
+configuration for cloud storage integration.
 """
 
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import constants
+
+if TYPE_CHECKING:
+    from storage_backend import StorageManager
 
 
 class Config:
@@ -58,6 +64,20 @@ class Config:
         'excluded_filename_patterns': ['favicon', 'icon', 'logo', 'thumb', 'button', 'badge', 'sprite'],
         'move_filtered_files': False,  # If True, move filtered files to separate folder
         'filtered_files_folder': 'filtered_non_photos',  # Where to move filtered files
+        # Metadata upgrade review (when duplicates have different metadata)
+        'review_metadata_upgrades': True,  # If True, show review dialog before metadata upgrades
+        # Cloud storage configuration (new format - see CLOUD_STORAGE_PLAN.md)
+        # If 'storage' key is present, it takes precedence over destination_directory
+        # 'storage': {
+        #     'archive': {'type': 'local', 'path': '/path/to/archive'},
+        #     'video_archive': {'type': 's3', 'bucket': 'my-bucket', ...},
+        # }
+        'cloud_defaults': {
+            'upload_threads': 4,
+            'chunk_size_mb': 8,
+            'retry_attempts': 3,
+            'retry_delay_seconds': 5
+        },
     }
 
     # Required settings that must be provided (no defaults)
@@ -387,6 +407,100 @@ class Config:
     def partial_hash_min_file_size(self) -> int:
         """Get minimum file size to use partial hashing (bytes)."""
         return self._settings['partial_hash_min_file_size']
+
+    # Storage configuration methods for cloud integration
+
+    def has_storage_config(self) -> bool:
+        """
+        Check if new-style storage configuration is present.
+
+        Returns:
+            True if 'storage' key exists with vault configurations
+        """
+        storage = self._settings.get('storage')
+        return isinstance(storage, dict) and len(storage) > 0
+
+    def get_storage_config(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get storage configuration for all vaults.
+
+        Returns new-style storage config if present, otherwise creates
+        backward-compatible config from legacy destination_directory setting.
+
+        Returns:
+            Dictionary mapping vault types to storage configurations
+            Example:
+            {
+                'archive': {'type': 'local', 'path': '/archive'},
+                'video_archive': {'type': 's3', 'bucket': 'videos', ...}
+            }
+        """
+        # Check for new-style storage configuration
+        if self.has_storage_config():
+            return self._settings['storage']
+
+        # Create backward-compatible config from legacy settings
+        from storage_backend import create_storage_config_from_legacy
+
+        # Get paths from database metadata if available, otherwise use defaults
+        video_archive = self._settings.get('video_archive_location')
+        prior_revision = self._settings.get('prior_revision_archive_location')
+        delete_vault = self._settings.get('delete_vault_location')
+
+        return create_storage_config_from_legacy(
+            destination_directory=self.destination_directory,
+            video_archive_location=video_archive,
+            prior_revision_location=prior_revision,
+            delete_vault_location=delete_vault
+        )
+
+    def create_storage_manager(self) -> 'StorageManager':
+        """
+        Create a StorageManager instance from this configuration.
+
+        Returns:
+            StorageManager with all configured vaults
+        """
+        from storage_backend import StorageManager
+
+        storage_config = self.get_storage_config()
+        return StorageManager(storage_config)
+
+    def get_vault_storage_type(self, vault_type: str) -> str:
+        """
+        Get the storage type for a specific vault.
+
+        Args:
+            vault_type: One of 'archive', 'video_archive', 'prior_revision', 'delete_vault'
+
+        Returns:
+            Storage type string ('local', 's3', 'azure', etc.) or 'local' if not configured
+        """
+        storage_config = self.get_storage_config()
+        vault_config = storage_config.get(vault_type, {})
+        return vault_config.get('type', 'local')
+
+    def is_vault_cloud_storage(self, vault_type: str) -> bool:
+        """
+        Check if a vault uses cloud storage.
+
+        Args:
+            vault_type: One of 'archive', 'video_archive', 'prior_revision', 'delete_vault'
+
+        Returns:
+            True if vault uses cloud storage (s3, azure, gcs, etc.)
+        """
+        storage_type = self.get_vault_storage_type(vault_type)
+        return storage_type != 'local'
+
+    def get_cloud_defaults(self) -> Dict[str, Any]:
+        """
+        Get default settings for cloud operations.
+
+        Returns:
+            Dictionary with upload_threads, chunk_size_mb, retry settings, etc.
+        """
+        return self._settings.get('cloud_defaults', self.DEFAULTS['cloud_defaults'])
 
     def __getitem__(self, key: str) -> Any:
         """Allow dictionary-style access: config['key']"""

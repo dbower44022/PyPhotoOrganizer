@@ -399,6 +399,27 @@ class DatabaseMetadata:
                     # Set default value for existing rows (feature enabled by default)
                     cursor.execute("UPDATE DatabaseMetadata SET metadata_upgrade_enabled = 1 WHERE metadata_upgrade_enabled IS NULL")
 
+                # Schema v8: Cloud storage support columns
+                # Add storage_config column if missing (JSON config for per-vault storage backends)
+                if 'storage_config' not in columns:
+                    logger.info("Upgrading database: adding storage_config column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN storage_config TEXT")
+
+                # Add cloud_sync_enabled column if missing
+                if 'cloud_sync_enabled' not in columns:
+                    logger.info("Upgrading database: adding cloud_sync_enabled column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN cloud_sync_enabled INTEGER DEFAULT 0")
+
+                # Add cloud_last_sync column if missing
+                if 'cloud_last_sync' not in columns:
+                    logger.info("Upgrading database: adding cloud_last_sync column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN cloud_last_sync TEXT")
+
+                # Add cloud_defaults column if missing (default settings for new cloud configs)
+                if 'cloud_defaults' not in columns:
+                    logger.info("Upgrading database: adding cloud_defaults column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN cloud_defaults TEXT")
+
                 conn.commit()
                 logger.debug(f"Metadata table ensured in {self.database_path}")
 
@@ -4967,3 +4988,317 @@ class DatabaseMetadata:
             logger.error(f"Failed to process queued unreliable dates: {e}")
 
         return results
+
+    # ========== Cloud Storage Methods (Schema v8) ==========
+
+    def get_storage_config(self) -> Dict[str, Any]:
+        """
+        Get the storage configuration for all vaults.
+
+        Returns:
+            Dictionary with per-vault storage configuration:
+            {
+                'archive': {'provider': 'local', 'path': '/path/to/archive'},
+                'video_archive': {'provider': 's3', 'bucket': 'my-bucket', ...},
+                ...
+            }
+            Returns empty dict if not configured.
+        """
+        import json
+
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT storage_config
+                FROM DatabaseMetadata
+                WHERE id = 1
+            """)
+
+            result = cursor.fetchone()
+            conn.close()
+
+            if result and result[0]:
+                try:
+                    config = json.loads(result[0])
+                    logger.debug(f"Storage config retrieved: {len(config)} vault(s) configured")
+                    return config
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse storage config JSON: {e}")
+                    return {}
+
+            return {}
+
+        except Exception as e:
+            logger.error(f"Failed to get storage config: {e}")
+            return {}
+
+    def set_storage_config(self, config: Dict[str, Any]) -> bool:
+        """
+        Save the storage configuration for all vaults.
+
+        Args:
+            config: Dictionary with per-vault storage configuration:
+                {
+                    'archive': {'provider': 'local', 'path': '/path/to/archive'},
+                    'video_archive': {'provider': 's3', 'bucket': 'my-bucket', ...},
+                    ...
+                }
+
+        Returns:
+            True if saved successfully, False otherwise
+        """
+        import json
+
+        logger.info(f"Setting storage config for {len(config)} vault(s)")
+
+        try:
+            config_json = json.dumps(config, indent=2)
+
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                UPDATE DatabaseMetadata
+                SET storage_config = ?
+                WHERE id = 1
+            """, (config_json,))
+
+            conn.commit()
+            conn.close()
+
+            logger.info("Storage config saved successfully")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to save storage config: {e}")
+            return False
+
+    def get_cloud_defaults(self) -> Dict[str, Any]:
+        """
+        Get default settings for cloud storage configuration.
+
+        Returns:
+            Dictionary with default cloud settings:
+            {
+                'region': 'us-east-1',
+                'storage_class': 'INTELLIGENT_TIERING',
+                'multipart_threshold_mb': 8,
+                ...
+            }
+            Returns sensible defaults if not configured.
+        """
+        import json
+
+        # Default values if not configured
+        defaults = {
+            'region': 'us-east-1',
+            'storage_class': 'INTELLIGENT_TIERING',
+            'multipart_threshold_mb': 8,
+            'multipart_chunksize_mb': 8,
+            'max_retries': 3,
+            'retry_delay': 1.0,
+            'verify_uploads': True
+        }
+
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT cloud_defaults
+                FROM DatabaseMetadata
+                WHERE id = 1
+            """)
+
+            result = cursor.fetchone()
+            conn.close()
+
+            if result and result[0]:
+                try:
+                    stored = json.loads(result[0])
+                    # Merge with defaults (stored values override defaults)
+                    defaults.update(stored)
+                    logger.debug(f"Cloud defaults retrieved")
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse cloud defaults JSON: {e}")
+
+            return defaults
+
+        except Exception as e:
+            logger.error(f"Failed to get cloud defaults: {e}")
+            return defaults
+
+    def set_cloud_defaults(self, defaults: Dict[str, Any]) -> bool:
+        """
+        Save default settings for cloud storage configuration.
+
+        Args:
+            defaults: Dictionary with default cloud settings
+
+        Returns:
+            True if saved successfully, False otherwise
+        """
+        import json
+
+        logger.info("Setting cloud defaults")
+
+        try:
+            defaults_json = json.dumps(defaults, indent=2)
+
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                UPDATE DatabaseMetadata
+                SET cloud_defaults = ?
+                WHERE id = 1
+            """, (defaults_json,))
+
+            conn.commit()
+            conn.close()
+
+            logger.info("Cloud defaults saved successfully")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to save cloud defaults: {e}")
+            return False
+
+    def get_cloud_sync_enabled(self) -> bool:
+        """
+        Check if cloud sync is enabled.
+
+        Returns:
+            True if cloud sync is enabled, False otherwise
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT cloud_sync_enabled
+                FROM DatabaseMetadata
+                WHERE id = 1
+            """)
+
+            result = cursor.fetchone()
+            conn.close()
+
+            return bool(result[0]) if result and result[0] else False
+
+        except Exception as e:
+            logger.error(f"Failed to get cloud sync enabled: {e}")
+            return False
+
+    def set_cloud_sync_enabled(self, enabled: bool) -> bool:
+        """
+        Enable or disable cloud sync.
+
+        Args:
+            enabled: True to enable cloud sync, False to disable
+
+        Returns:
+            True if saved successfully, False otherwise
+        """
+        logger.info(f"Setting cloud sync enabled: {enabled}")
+
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                UPDATE DatabaseMetadata
+                SET cloud_sync_enabled = ?
+                WHERE id = 1
+            """, (1 if enabled else 0,))
+
+            conn.commit()
+            conn.close()
+
+            logger.info(f"Cloud sync {'enabled' if enabled else 'disabled'}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to set cloud sync enabled: {e}")
+            return False
+
+    def get_cloud_last_sync(self) -> Optional[str]:
+        """
+        Get timestamp of the last cloud sync.
+
+        Returns:
+            ISO format timestamp string or None if never synced
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT cloud_last_sync
+                FROM DatabaseMetadata
+                WHERE id = 1
+            """)
+
+            result = cursor.fetchone()
+            conn.close()
+
+            return result[0] if result and result[0] else None
+
+        except Exception as e:
+            logger.error(f"Failed to get cloud last sync: {e}")
+            return None
+
+    def set_cloud_last_sync(self, timestamp: Optional[str] = None) -> bool:
+        """
+        Set the timestamp of the last cloud sync.
+
+        Args:
+            timestamp: ISO format timestamp string, or None to use current time
+
+        Returns:
+            True if saved successfully, False otherwise
+        """
+        if timestamp is None:
+            timestamp = datetime.now().isoformat()
+
+        logger.debug(f"Setting cloud last sync: {timestamp}")
+
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                UPDATE DatabaseMetadata
+                SET cloud_last_sync = ?
+                WHERE id = 1
+            """, (timestamp,))
+
+            conn.commit()
+            conn.close()
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to set cloud last sync: {e}")
+            return False
+
+    def has_cloud_storage(self) -> bool:
+        """
+        Check if any vault is configured for cloud storage.
+
+        Returns:
+            True if at least one vault uses cloud storage, False otherwise
+        """
+        config = self.get_storage_config()
+        if not config:
+            return False
+
+        for vault_config in config.values():
+            if isinstance(vault_config, dict):
+                provider = vault_config.get('provider', 'local')
+                if provider != 'local':
+                    return True
+
+        return False

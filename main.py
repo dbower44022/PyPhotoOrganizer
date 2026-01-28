@@ -423,7 +423,7 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME, batch_size=constants.DEFAULT_BATCH_SIZE, progress_callback=None, audit_manager=None, session_id=None, should_stop=None, album_manager=None, source_album_mapping=None):
+def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME, batch_size=constants.DEFAULT_BATCH_SIZE, progress_callback=None, audit_manager=None, session_id=None, should_stop=None, album_manager=None, source_album_mapping=None, defer_upgrades=False):
     """
     Organize files by moving or copying them to the Destination directory.
 
@@ -441,6 +441,8 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
     album_manager (AlbumManager): Optional album manager for adding files to albums during import
     source_album_mapping (dict): Optional mapping of source paths to album associations
         Format: {source_path: {'album_id': int, 'enable_sub_albums': bool}}
+    defer_upgrades (bool): If True, skip automatic metadata upgrades and return candidates list
+        for external review. The caller should call perform_metadata_upgrades() with approved candidates.
 
     Returns:
     dict: Dictionary containing:
@@ -448,6 +450,7 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
         total_new_original_files - Integer containing the total number of NEW photos detected.
         was_cancelled - Boolean indicating if processing was stopped before completion.
         total_album_additions - Integer containing the number of files added to albums.
+        upgrade_candidates_list - (when defer_upgrades=True) List of upgrade candidate dicts for review.
 
     """
     try:
@@ -1087,27 +1090,32 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
         }
 
         if upgrade_candidates and not was_cancelled:
-            logger.info(f"Processing {len(upgrade_candidates)} metadata upgrade candidates...")
+            if defer_upgrades:
+                # Defer upgrades for external review - caller will process approved candidates
+                logger.info(f"Found {len(upgrade_candidates)} upgrade candidates - deferring for review")
+            else:
+                # Process upgrades automatically
+                logger.info(f"Processing {len(upgrade_candidates)} metadata upgrade candidates...")
 
-            # Get organization template for potential file reorganization
-            org_template = OrganizationTemplate(organization_template)
+                # Get organization template for potential file reorganization
+                org_template = OrganizationTemplate(organization_template)
 
-            upgrade_results = perform_metadata_upgrades(
-                upgrade_candidates=upgrade_candidates,
-                database_path=database_path,
-                db_metadata=db_metadata,
-                organization_template=org_template,
-                progress_callback=None,  # Could add progress callback support later
-                audit_manager=audit_manager,
-                session_id=session_id,
-                should_stop=should_stop
-            )
+                upgrade_results = perform_metadata_upgrades(
+                    upgrade_candidates=upgrade_candidates,
+                    database_path=database_path,
+                    db_metadata=db_metadata,
+                    organization_template=org_template,
+                    progress_callback=None,  # Could add progress callback support later
+                    audit_manager=audit_manager,
+                    session_id=session_id,
+                    should_stop=should_stop
+                )
 
-            if upgrade_results.get('was_cancelled'):
-                was_cancelled = True
+                if upgrade_results.get('was_cancelled'):
+                    was_cancelled = True
 
-            logger.info(f"Metadata upgrades complete: {upgrade_results['upgrades_completed']} completed, "
-                        f"{upgrade_results['upgrades_failed']} failed, {upgrade_results['upgrades_skipped']} skipped")
+                logger.info(f"Metadata upgrades complete: {upgrade_results['upgrades_completed']} completed, "
+                            f"{upgrade_results['upgrades_failed']} failed, {upgrade_results['upgrades_skipped']} skipped")
 
         organize_files_return = {
             "total_files_processed": total_files_processed,
@@ -1128,7 +1136,9 @@ def organize_files(config, files, database_path=constants.DEFAULT_DATABASE_NAME,
             "filter_statistics": filter_stats or {},
             "filtered_files": filtered_files,
             "content_duplicate_files": content_duplicate_files if 'content_duplicate_files' in dir() else [],
-            "was_cancelled": was_cancelled if 'was_cancelled' in dir() else False
+            "was_cancelled": was_cancelled if 'was_cancelled' in dir() else False,
+            # Include upgrade candidates list when deferring for review
+            "upgrade_candidates_list": upgrade_candidates if defer_upgrades and 'upgrade_candidates' in dir() else []
         }
         return organize_files_return
 

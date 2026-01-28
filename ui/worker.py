@@ -32,6 +32,10 @@ class ProcessingWorker(QThread):
     completed = Signal(dict)  # final_results
     error_occurred = Signal(str)  # error_message
 
+    # Upgrade review signal - emitted when upgrade candidates need user review
+    # Args: list of upgrade candidate dicts
+    upgrade_review_needed = Signal(list)
+
     def __init__(self, config_dict):
         super().__init__()
         self.config_dict = config_dict
@@ -41,6 +45,11 @@ class ProcessingWorker(QThread):
         self.start_time = None
         self.audit_manager = None
         self.session_id = None
+
+        # Upgrade review state
+        self._awaiting_review = False
+        self._approved_upgrades = None  # Set by main thread after review
+
         # Track partial progress for graceful shutdown
         self._partial_results = {
             'total_files_examined': 0,
@@ -310,6 +319,9 @@ class ProcessingWorker(QThread):
                 album_manager = AlbumManager(self.config.database_path)
                 self.status_update.emit("info", f"Album integration enabled for {len(source_album_mapping)} source(s)")
 
+            # Check if upgrade review is enabled
+            review_upgrades = self.config.get('review_metadata_upgrades', True)
+
             results = main_module.organize_files(
                 config=self.config,
                 files=files,
@@ -320,8 +332,60 @@ class ProcessingWorker(QThread):
                 session_id=self.session_id,
                 should_stop=self._check_should_stop,  # Pass stop check callable
                 album_manager=album_manager,
-                source_album_mapping=source_album_mapping
+                source_album_mapping=source_album_mapping,
+                defer_upgrades=review_upgrades  # Defer upgrades if review is enabled
             )
+
+            # Handle upgrade review workflow
+            upgrade_candidates = results.get('upgrade_candidates_list', [])
+            if upgrade_candidates and review_upgrades and not results.get('was_cancelled'):
+                self.status_update.emit("info", f"Found {len(upgrade_candidates)} files with different metadata - awaiting review")
+
+                # Emit signal for main thread to show review dialog
+                self._awaiting_review = True
+                self.upgrade_review_needed.emit(upgrade_candidates)
+
+                # Wait for review to complete (main thread will call set_approved_upgrades)
+                while self._awaiting_review and not self._should_stop:
+                    self.msleep(100)  # Check every 100ms
+
+                if self._should_stop:
+                    results['was_cancelled'] = True
+                    return results
+
+                # Process approved upgrades
+                approved = self._approved_upgrades or []
+                if approved:
+                    self.status_update.emit("info", f"Processing {len(approved)} approved metadata upgrades...")
+                    self.stage_changed.emit("Processing Metadata Upgrades")
+
+                    from database_metadata import DatabaseMetadata
+                    from organization_template import OrganizationTemplate
+
+                    db_metadata = DatabaseMetadata(self.config.database_path)
+                    org_template = OrganizationTemplate(self.config.get('organization_template', '{year}/{month}/{day}'))
+
+                    upgrade_results = main_module.perform_metadata_upgrades(
+                        upgrade_candidates=approved,
+                        database_path=self.config.database_path,
+                        db_metadata=db_metadata,
+                        organization_template=org_template,
+                        audit_manager=self.audit_manager,
+                        session_id=self.session_id,
+                        should_stop=self._check_should_stop
+                    )
+
+                    # Update results with upgrade outcomes
+                    results['upgrades_completed'] = upgrade_results.get('upgrades_completed', 0)
+                    results['upgrades_failed'] = upgrade_results.get('upgrades_failed', 0)
+                    results['upgrades_skipped'] = len(upgrade_candidates) - len(approved) + upgrade_results.get('upgrades_skipped', 0)
+                    results['files_reorganized'] = upgrade_results.get('files_reorganized', 0)
+
+                    self.status_update.emit("info", f"Metadata upgrades: {results['upgrades_completed']} completed, {results['upgrades_skipped']} skipped")
+                else:
+                    # User rejected all upgrades
+                    results['upgrades_skipped'] = len(upgrade_candidates)
+                    self.status_update.emit("info", "All metadata upgrades skipped by user")
 
             return results
 
@@ -360,3 +424,21 @@ class ProcessingWorker(QThread):
         """Resume processing."""
         self._is_paused = False
         self.status_update.emit("info", "Processing resumed")
+
+    def set_approved_upgrades(self, approved_upgrades):
+        """
+        Set the list of approved upgrade candidates after user review.
+
+        Called by the main thread after the user reviews upgrade candidates
+        in the UpgradeReviewDialog.
+
+        Args:
+            approved_upgrades: List of upgrade candidate dicts that user approved
+        """
+        self._approved_upgrades = approved_upgrades
+        self._awaiting_review = False
+        logger.info(f"Received {len(approved_upgrades)} approved upgrades from review")
+
+    def is_awaiting_review(self):
+        """Check if worker is waiting for upgrade review."""
+        return self._awaiting_review

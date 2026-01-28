@@ -20,10 +20,11 @@
 16. [Archive Change Detection](#archive-change-detection)
 17. [Bulk Delete Matching Files](#bulk-delete-matching-files)
 18. [Delete Vault and File Recovery](#delete-vault-and-file-recovery)
-19. [Settings](#settings)
-20. [Troubleshooting](#troubleshooting)
-21. [Recovering from Data or Storage Corruption](#recovering-from-data-or-storage-corruption)
-22. [FAQ](#faq)
+19. [Cloud Storage](#cloud-storage)
+20. [Settings](#settings)
+21. [Troubleshooting](#troubleshooting)
+22. [Recovering from Data or Storage Corruption](#recovering-from-data-or-storage-corruption)
+23. [FAQ](#faq)
 
 ---
 
@@ -2246,6 +2247,261 @@ Control how long history is kept (in Settings tab):
 - **Keep All**: Never delete (may grow large)
 - **Keep Last N Sessions**: Delete older sessions
 - **Keep Last N Days**: Time-based cleanup
+
+---
+
+## Cloud Storage
+
+PyPhotoOrganizer supports storing your photo archive in cloud storage services like Amazon S3. This allows you to:
+
+- **Off-site backup**: Keep a copy of your archive in the cloud for disaster recovery
+- **Cost-effective archival**: Use cloud storage tiers like S3 Intelligent-Tiering or Glacier for long-term storage
+- **Multi-location access**: Access your archive from anywhere with cloud storage
+
+> **Note**: Cloud storage is currently in beta. Local storage remains the recommended option for most users.
+
+### Supported Cloud Providers
+
+| Provider | Status | Notes |
+|----------|--------|-------|
+| **Amazon S3** | Supported | Full support including storage classes |
+| **Azure Blob Storage** | Planned | Coming in future release |
+| **Google Cloud Storage** | Planned | Coming in future release |
+| **Backblaze B2** | Planned | S3-compatible API |
+
+### Prerequisites for S3
+
+Before using Amazon S3 storage, you need:
+
+1. **AWS Account**: Sign up at [aws.amazon.com](https://aws.amazon.com)
+2. **S3 Bucket**: Create a bucket in your preferred region
+3. **AWS Credentials**: Configure one of:
+   - AWS CLI credentials (`~/.aws/credentials`)
+   - Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
+   - IAM role (if running on AWS infrastructure)
+4. **Python Package**: Install boto3 (`pip install boto3`)
+
+#### Setting Up AWS Credentials
+
+**Option 1: AWS CLI (Recommended)**
+```bash
+# Install AWS CLI
+pip install awscli
+
+# Configure credentials
+aws configure
+# Enter: Access Key ID, Secret Access Key, Region, Output format
+```
+
+**Option 2: Environment Variables**
+```bash
+export AWS_ACCESS_KEY_ID=your_access_key
+export AWS_SECRET_ACCESS_KEY=your_secret_key
+export AWS_DEFAULT_REGION=us-east-1
+```
+
+**Option 3: Credentials File**
+
+Create `~/.aws/credentials`:
+```ini
+[default]
+aws_access_key_id = your_access_key
+aws_secret_access_key = your_secret_key
+
+[photo-archive]
+aws_access_key_id = another_key
+aws_secret_access_key = another_secret
+```
+
+#### Required S3 Permissions
+
+Your AWS user/role needs these permissions on the target bucket:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject",
+                "s3:ListBucket",
+                "s3:GetBucketLocation"
+            ],
+            "Resource": [
+                "arn:aws:s3:::your-bucket-name",
+                "arn:aws:s3:::your-bucket-name/*"
+            ]
+        }
+    ]
+}
+```
+
+### Configuring Cloud Storage
+
+Cloud storage is configured per-vault in the **Archive Settings** tab.
+
+#### Available Vaults
+
+| Vault | Description | Cloud Recommended |
+|-------|-------------|-------------------|
+| **Main Archive** | Your organized photo collection | Yes |
+| **Video Archive** | Separate storage for videos | Yes |
+| **Prior Revision Archive** | Original versions before edits | Optional |
+| **Delete Vault** | Soft-deleted files | No (keep local) |
+
+#### Configuration Steps
+
+1. Open the **Archive Settings** tab
+2. Scroll to **Cloud Storage (Beta)** section
+3. For each vault you want to configure:
+   - Select **Provider**: Local, Amazon S3, etc.
+   - Enter provider-specific settings (see below)
+4. Click **Test Connection** to verify settings
+5. Settings are saved automatically
+
+#### S3 Configuration Options
+
+| Setting | Description | Example |
+|---------|-------------|---------|
+| **Bucket** | S3 bucket name | `my-photo-archive` |
+| **Prefix** | Folder path within bucket | `photos/archive` |
+| **Region** | AWS region | `us-east-1`, `eu-west-1` |
+| **Storage Class** | S3 storage tier | See table below |
+| **AWS Profile** | Named profile from credentials | `default`, `photo-archive` |
+
+#### S3 Storage Classes
+
+| Class | Use Case | Cost | Access Time |
+|-------|----------|------|-------------|
+| **STANDARD** | Frequently accessed | Higher | Immediate |
+| **INTELLIGENT_TIERING** | Unknown access patterns | Auto-optimized | Immediate |
+| **STANDARD_IA** | Infrequent access (monthly) | Lower | Immediate |
+| **ONEZONE_IA** | Non-critical, infrequent | Lowest IA | Immediate |
+| **GLACIER_IR** | Archive, rare access | Lower | Minutes |
+| **GLACIER** | Long-term archive | Very low | Hours |
+| **DEEP_ARCHIVE** | Compliance/backup | Lowest | 12+ hours |
+
+**Recommendation**: Use `INTELLIGENT_TIERING` for most photo archives. It automatically moves objects between tiers based on access patterns.
+
+### Syncing to Cloud
+
+Once configured, you can sync your local archive to cloud storage.
+
+#### Manual Sync
+
+1. Go to **Archive Settings** tab
+2. In the **Cloud Sync** section, click **Sync Now**
+3. Progress bar shows upload status
+4. Click **Stop** to pause at any time
+
+#### Sync Status
+
+Click **Check Status** to see sync statistics:
+
+```
+Main Archive:
+  Total files: 15,234
+  Synced: 12,100 (79.4%)
+  Pending: 500
+  Failed: 12
+  Needs sync: 2,622
+```
+
+#### What Gets Synced
+
+- New photos imported to the archive
+- Photos not yet uploaded to cloud
+- Sync is additive - cloud files are never deleted automatically
+
+#### Failed Uploads
+
+If uploads fail (network issues, permissions):
+
+1. Click **Check Status** to see failed count
+2. Fix the underlying issue (network, credentials)
+3. Click **Sync Now** to retry failed uploads
+
+### Downloading from Cloud
+
+You can download files from cloud storage to local:
+
+- **On-demand**: Files are downloaded when accessed in Photo Review
+- **Batch download**: Coming in future release
+
+### Conflict Resolution
+
+When files differ between local and cloud:
+
+| Conflict Type | Description | Resolution Options |
+|---------------|-------------|-------------------|
+| **Size Mismatch** | Same file, different sizes | Keep Local / Keep Cloud / Keep Both |
+| **Missing Local** | File in cloud but not local | Download / Skip |
+| **Missing Cloud** | File local but not in cloud | Upload / Skip |
+
+### Best Practices
+
+#### For Archive Storage
+
+1. **Use Intelligent-Tiering** for the main archive
+2. **Keep Delete Vault local** - you need quick access to recover files
+3. **Test connection** before large syncs
+4. **Monitor costs** in AWS Console
+
+#### For Backup Strategy
+
+1. **Local + Cloud**: Keep local copy as primary, cloud as backup
+2. **Sync regularly**: Run sync after each import session
+3. **Verify uploads**: System automatically verifies file hashes
+
+#### For Cost Management
+
+1. **Choose appropriate storage class** based on access patterns
+2. **Use lifecycle policies** in S3 to transition old files to Glacier
+3. **Set bucket policies** to prevent accidental public access
+4. **Enable versioning** in S3 for additional protection
+
+### Troubleshooting Cloud Storage
+
+#### "Connection failed" Error
+
+1. Verify AWS credentials are configured correctly
+2. Check bucket name and region are correct
+3. Ensure your network allows HTTPS to AWS
+4. Verify IAM permissions include required S3 actions
+
+#### "Access Denied" Error
+
+1. Check bucket policy allows your IAM user
+2. Verify bucket name is spelled correctly
+3. Check if bucket is in expected region
+4. Ensure credentials are for correct AWS account
+
+#### Slow Upload Speeds
+
+1. Files are uploaded sequentially for reliability
+2. Large files (>8MB) use multipart upload automatically
+3. Check network bandwidth to AWS region
+4. Consider using a closer AWS region
+
+#### Sync Stuck or Not Progressing
+
+1. Click **Stop** to halt current sync
+2. Check **Check Status** for error counts
+3. Review application logs for detailed errors
+4. Retry with **Sync Now**
+
+### Cloud Storage Limitations (Beta)
+
+Current limitations that will be addressed in future releases:
+
+1. **S3 only**: Azure and GCS support coming soon
+2. **Upload only**: Batch download interface pending
+3. **No automatic sync**: Must manually trigger sync
+4. **No bandwidth throttling**: Uses full available bandwidth
+5. **No encryption options**: Uses server-side encryption only
 
 ---
 

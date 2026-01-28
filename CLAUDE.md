@@ -62,6 +62,10 @@ python main.py              # CLI mode
 | `audit_manager.py` | `AuditManager`: session tracking, file operation logging |
 | `album_manager.py` | `AlbumManager`: album CRUD, photo-to-album operations |
 | `path_resolver.py` | `PathResolver`: relative↔absolute path resolution |
+| `storage_backend.py` | `StorageBackend` ABC, `LocalStorageBackend`, `StorageManager` |
+| `storage_backend_s3.py` | `S3StorageBackend`: Amazon S3 cloud storage |
+| `cloud_sync_manager.py` | `CloudSyncManager`: upload queue, sync tracking |
+| `cloud_sync.py` | `CloudSync`: high-level sync orchestration, conflict resolution |
 
 ### GUI Modules (ui/)
 
@@ -75,6 +79,8 @@ python main.py              # CLI mode
 | `import_history_tab.py` | Session history, file preview, export |
 | `worker.py` | `ProcessingWorker` background thread |
 | `theme.py` | `ThemeManager`, light/dark mode |
+| `cloud_settings_widget.py` | Cloud storage configuration per vault |
+| `cloud_sync_worker.py` | `CloudSyncWorker`: background sync with pause/resume |
 
 See [CLAUDE_WORKERS.md](CLAUDE_WORKERS.md) for full worker list and patterns.
 

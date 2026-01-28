@@ -12,13 +12,30 @@ Manages archive-related settings including:
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QCheckBox, QLineEdit, QPushButton, QLabel,
                                QMessageBox, QScrollArea, QFormLayout, QComboBox,
-                               QTextEdit, QRadioButton, QButtonGroup, QFileDialog)
-from PySide6.QtCore import Qt
+                               QTextEdit, QRadioButton, QButtonGroup, QFileDialog,
+                               QFrame, QProgressBar)
+from PySide6.QtCore import Qt, Signal
 import os
+import json
 from organization_template import OrganizationTemplate
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Import cloud settings widget and sync worker
+try:
+    from ui.cloud_settings_widget import CloudSettingsWidget
+    CLOUD_SETTINGS_AVAILABLE = True
+except ImportError:
+    CLOUD_SETTINGS_AVAILABLE = False
+    logger.warning("CloudSettingsWidget not available")
+
+try:
+    from ui.cloud_sync_worker import CloudSyncWorker, SyncStatusPoller
+    CLOUD_SYNC_AVAILABLE = True
+except ImportError:
+    CLOUD_SYNC_AVAILABLE = False
+    logger.warning("CloudSyncWorker not available")
 
 
 class ArchiveSettingsTab(QWidget):
@@ -343,6 +360,82 @@ class ArchiveSettingsTab(QWidget):
         layout.addWidget(file_type_group)
 
         self.update_organization_preview()
+
+        # Cloud Storage Settings (Beta)
+        if CLOUD_SETTINGS_AVAILABLE:
+            cloud_group = QGroupBox("Cloud Storage (Beta)")
+            cloud_group.setStyleSheet(self.groupbox_style)
+            cloud_layout = QVBoxLayout()
+
+            # Beta notice
+            beta_notice = QLabel(
+                "Configure cloud storage backends for your archive. "
+                "This feature is in beta - local storage is recommended for most users."
+            )
+            beta_notice.setWordWrap(True)
+            beta_notice.setStyleSheet("color: #856404; background-color: #fff3cd; padding: 8px; border-radius: 4px; margin-bottom: 10px;")
+            cloud_layout.addWidget(beta_notice)
+
+            # Cloud settings widget
+            self.cloud_settings_widget = CloudSettingsWidget()
+            self.cloud_settings_widget.config_changed.connect(self._on_cloud_config_changed)
+            cloud_layout.addWidget(self.cloud_settings_widget)
+
+            # Sync controls section
+            sync_frame = QFrame()
+            sync_frame.setStyleSheet("QFrame { border: 1px solid #ddd; border-radius: 4px; padding: 10px; margin-top: 10px; }")
+            sync_layout = QVBoxLayout(sync_frame)
+            sync_layout.setContentsMargins(10, 10, 10, 10)
+
+            sync_header = QLabel("Cloud Sync")
+            sync_header.setStyleSheet("font-weight: bold; font-size: 12px;")
+            sync_layout.addWidget(sync_header)
+
+            # Sync status
+            self.sync_status_label = QLabel("Not syncing")
+            self.sync_status_label.setStyleSheet("color: #666;")
+            sync_layout.addWidget(self.sync_status_label)
+
+            # Progress bar
+            self.sync_progress_bar = QProgressBar()
+            self.sync_progress_bar.setVisible(False)
+            self.sync_progress_bar.setTextVisible(True)
+            sync_layout.addWidget(self.sync_progress_bar)
+
+            # Sync buttons
+            sync_btn_layout = QHBoxLayout()
+
+            self.sync_now_btn = QPushButton("Sync Now")
+            self.sync_now_btn.setToolTip("Upload all un-synced files to cloud storage")
+            self.sync_now_btn.clicked.connect(self._on_sync_now_clicked)
+            sync_btn_layout.addWidget(self.sync_now_btn)
+
+            self.stop_sync_btn = QPushButton("Stop")
+            self.stop_sync_btn.setToolTip("Stop the current sync operation")
+            self.stop_sync_btn.clicked.connect(self._on_stop_sync_clicked)
+            self.stop_sync_btn.setVisible(False)
+            sync_btn_layout.addWidget(self.stop_sync_btn)
+
+            self.check_status_btn = QPushButton("Check Status")
+            self.check_status_btn.setToolTip("Check sync status for all vaults")
+            self.check_status_btn.clicked.connect(self._on_check_status_clicked)
+            sync_btn_layout.addWidget(self.check_status_btn)
+
+            sync_btn_layout.addStretch()
+            sync_layout.addLayout(sync_btn_layout)
+
+            cloud_layout.addWidget(sync_frame)
+
+            # Initialize sync worker reference
+            self.sync_worker = None
+            self.status_poller = None
+
+            cloud_group.setLayout(cloud_layout)
+            layout.addWidget(cloud_group)
+        else:
+            self.cloud_settings_widget = None
+            self.sync_worker = None
+            self.status_poller = None
 
         # File Renaming Settings
         rename_group = QGroupBox("File Renaming")
@@ -1218,6 +1311,278 @@ class ArchiveSettingsTab(QWidget):
             "This will allow you to rename all files in the archive using the new template."
         )
 
+    # ========== Cloud Storage Methods ==========
+
+    def _on_cloud_config_changed(self, config: dict):
+        """Handle cloud configuration changes."""
+        if self.db_metadata is None:
+            return
+
+        try:
+            # Save cloud config to database metadata
+            # The database methods handle JSON serialization internally
+            storage_config = config.get('storage', {})
+            cloud_defaults = config.get('cloud_defaults', {})
+
+            # Update database metadata
+            self.db_metadata.set_storage_config(storage_config)
+            self.db_metadata.set_cloud_defaults(cloud_defaults)
+
+            logger.info("Cloud storage configuration saved")
+
+        except Exception as e:
+            logger.error(f"Failed to save cloud config: {e}", exc_info=True)
+
+    def get_cloud_storage_config(self) -> dict:
+        """Get the current cloud storage configuration."""
+        if self.cloud_settings_widget:
+            return self.cloud_settings_widget.get_storage_config()
+        return {'storage': {}, 'cloud_defaults': {}}
+
+    # ========== Cloud Sync Methods ==========
+
+    def _on_sync_now_clicked(self):
+        """Start cloud sync operation."""
+        if not CLOUD_SYNC_AVAILABLE:
+            QMessageBox.warning(
+                self,
+                "Cloud Sync Unavailable",
+                "Cloud sync functionality is not available.\n"
+                "Please check that all dependencies are installed."
+            )
+            return
+
+        if not self.db_metadata:
+            QMessageBox.information(
+                self,
+                "No Database",
+                "Please open a database first before syncing."
+            )
+            return
+
+        # Check if any vault has cloud storage configured
+        storage_config = self.db_metadata.get_storage_config()
+        if not storage_config:
+            QMessageBox.information(
+                self,
+                "No Cloud Storage Configured",
+                "No cloud storage has been configured.\n\n"
+                "Please configure a cloud storage provider for at least one vault "
+                "before syncing."
+            )
+            return
+
+        # Check for cloud vaults
+        has_cloud = False
+        for vault, config in storage_config.items():
+            if isinstance(config, dict) and config.get('provider', 'local') != 'local':
+                has_cloud = True
+                break
+
+        if not has_cloud:
+            QMessageBox.information(
+                self,
+                "No Cloud Storage",
+                "All vaults are configured for local storage.\n\n"
+                "Configure a cloud provider (e.g., S3) for a vault to enable sync."
+            )
+            return
+
+        # Start sync
+        self._start_sync()
+
+    def _start_sync(self):
+        """Initialize and start the sync worker."""
+        try:
+            from storage_backend import StorageManager
+
+            # Create storage manager from config
+            storage_config = self.db_metadata.get_storage_config()
+            storage_manager = StorageManager(storage_config)
+
+            # Create and configure worker
+            self.sync_worker = CloudSyncWorker(
+                self.db_metadata.database_path,
+                storage_manager,
+                parent=self
+            )
+            self.sync_worker.configure(
+                vault_type='archive',
+                operation='sync_to_cloud'
+            )
+
+            # Connect signals
+            self.sync_worker.progress.connect(self._on_sync_progress)
+            self.sync_worker.sync_completed.connect(self._on_sync_completed)
+            self.sync_worker.error.connect(self._on_sync_error)
+
+            # Update UI
+            self.sync_now_btn.setVisible(False)
+            self.stop_sync_btn.setVisible(True)
+            self.check_status_btn.setEnabled(False)
+            self.sync_progress_bar.setVisible(True)
+            self.sync_progress_bar.setValue(0)
+            self.sync_status_label.setText("Starting sync...")
+            self.sync_status_label.setStyleSheet("color: #0066cc;")
+
+            # Start worker
+            self.sync_worker.start()
+
+            logger.info("Cloud sync started")
+
+        except Exception as e:
+            logger.error(f"Failed to start sync: {e}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Sync Error",
+                f"Failed to start sync:\n{str(e)}"
+            )
+
+    def _on_stop_sync_clicked(self):
+        """Stop the current sync operation."""
+        if self.sync_worker and self.sync_worker.isRunning():
+            self.sync_worker.request_stop()
+            self.sync_status_label.setText("Stopping sync...")
+            self.stop_sync_btn.setEnabled(False)
+
+    def _on_sync_progress(self, progress):
+        """Handle sync progress updates."""
+        if progress.total_files > 0:
+            percent = int((progress.current_file / progress.total_files) * 100)
+            self.sync_progress_bar.setValue(percent)
+            self.sync_progress_bar.setFormat(f"{progress.current_file}/{progress.total_files} files")
+
+        self.sync_status_label.setText(progress.message)
+
+    def _on_sync_completed(self, stats: dict):
+        """Handle sync completion."""
+        # Update UI
+        self.sync_now_btn.setVisible(True)
+        self.stop_sync_btn.setVisible(False)
+        self.check_status_btn.setEnabled(True)
+        self.sync_progress_bar.setVisible(False)
+
+        # Show completion message
+        uploaded = stats.get('files_uploaded', 0)
+        failed = stats.get('files_failed', 0)
+        duration = stats.get('duration_seconds', 0)
+
+        if failed > 0:
+            self.sync_status_label.setText(
+                f"Sync completed: {uploaded} uploaded, {failed} failed"
+            )
+            self.sync_status_label.setStyleSheet("color: #cc6600;")
+        else:
+            self.sync_status_label.setText(
+                f"Sync completed: {uploaded} files uploaded in {duration:.1f}s"
+            )
+            self.sync_status_label.setStyleSheet("color: #28a745;")
+
+        # Update last sync time
+        if self.db_metadata:
+            self.db_metadata.set_cloud_last_sync()
+
+        logger.info(f"Cloud sync completed: {stats}")
+
+        # Clean up worker
+        if self.sync_worker:
+            self.sync_worker.deleteLater()
+            self.sync_worker = None
+
+    def _on_sync_error(self, error_message: str):
+        """Handle sync error."""
+        # Update UI
+        self.sync_now_btn.setVisible(True)
+        self.stop_sync_btn.setVisible(False)
+        self.check_status_btn.setEnabled(True)
+        self.sync_progress_bar.setVisible(False)
+
+        self.sync_status_label.setText(f"Sync error: {error_message}")
+        self.sync_status_label.setStyleSheet("color: #dc3545;")
+
+        logger.error(f"Cloud sync error: {error_message}")
+
+        # Clean up worker
+        if self.sync_worker:
+            self.sync_worker.deleteLater()
+            self.sync_worker = None
+
+    def _on_check_status_clicked(self):
+        """Check sync status for all vaults."""
+        if not self.db_metadata:
+            QMessageBox.information(
+                self,
+                "No Database",
+                "Please open a database first."
+            )
+            return
+
+        storage_config = self.db_metadata.get_storage_config()
+        if not storage_config:
+            QMessageBox.information(
+                self,
+                "No Cloud Storage",
+                "No cloud storage has been configured."
+            )
+            return
+
+        try:
+            from storage_backend import StorageManager
+            from cloud_sync_manager import CloudSyncManager
+            from cloud_sync import CloudSync
+
+            storage_manager = StorageManager(storage_config)
+            sync_manager = CloudSyncManager(self.db_metadata.database_path, storage_manager)
+            cloud_sync = CloudSync(self.db_metadata.database_path, sync_manager)
+
+            # Get status for each cloud vault
+            status_lines = []
+            for vault_type in ['archive', 'video_archive', 'prior_revision', 'delete_vault']:
+                backend = storage_manager.get_backend(vault_type)
+                if backend and backend.storage_type != 'local':
+                    summary = cloud_sync.get_sync_status_summary(vault_type)
+                    status_lines.append(
+                        f"{vault_type.replace('_', ' ').title()}:\n"
+                        f"  Total files: {summary['total_files']}\n"
+                        f"  Synced: {summary['synced_files']} ({summary['sync_percentage']:.1f}%)\n"
+                        f"  Pending: {summary['pending_uploads']}\n"
+                        f"  Failed: {summary['failed_uploads']}\n"
+                        f"  Needs sync: {summary['needs_sync']}"
+                    )
+
+            if status_lines:
+                QMessageBox.information(
+                    self,
+                    "Cloud Sync Status",
+                    "\n\n".join(status_lines)
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "Cloud Sync Status",
+                    "No cloud storage configured for any vault."
+                )
+
+        except Exception as e:
+            logger.error(f"Failed to check sync status: {e}", exc_info=True)
+            QMessageBox.warning(
+                self,
+                "Status Error",
+                f"Failed to check sync status:\n{str(e)}"
+            )
+
+    def closeEvent(self, event):
+        """Clean up workers on close."""
+        if self.sync_worker and self.sync_worker.isRunning():
+            self.sync_worker.request_stop()
+            self.sync_worker.wait(5000)  # Wait up to 5 seconds
+
+        if self.status_poller and self.status_poller.isRunning():
+            self.status_poller.request_stop()
+            self.status_poller.wait(2000)
+
+        super().closeEvent(event) if hasattr(super(), 'closeEvent') else None
+
     # ========== Database Integration Methods ==========
 
     def set_database(self, db_metadata):
@@ -1295,3 +1660,27 @@ class ArchiveSettingsTab(QWidget):
         self.filename_template_edit.setText(filename_template)
 
         self.on_filename_template_changed(filename_template)
+
+        # Load cloud storage settings
+        if self.cloud_settings_widget and hasattr(db_metadata, 'get_storage_config'):
+            try:
+                # Database methods return dicts directly (handle JSON internally)
+                storage_config = db_metadata.get_storage_config()
+                cloud_defaults = db_metadata.get_cloud_defaults()
+
+                config = {
+                    'storage': storage_config if storage_config else {},
+                    'cloud_defaults': cloud_defaults if cloud_defaults else {}
+                }
+
+                # If no storage config, create from archive location
+                if not config['storage'] and archive_location:
+                    config['storage'] = {
+                        'archive': {'type': 'local', 'path': archive_location}
+                    }
+
+                self.cloud_settings_widget.set_storage_config(config)
+                logger.info("Cloud storage configuration loaded")
+
+            except Exception as e:
+                logger.error(f"Failed to load cloud config: {e}", exc_info=True)
