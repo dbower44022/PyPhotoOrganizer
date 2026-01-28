@@ -447,6 +447,296 @@ def parse_xmp_date(date_str: str) -> Optional[datetime.datetime]:
 
 
 # ============================================================================
+# Filename/Path Date Extraction
+# ============================================================================
+
+# Common filename date patterns (ordered by specificity - most specific first)
+# Each tuple: (compiled_regex, strptime_format_or_callable, has_time)
+_FILENAME_DATE_PATTERNS = None  # Lazily initialized
+
+
+def _get_filename_patterns():
+    """
+    Get compiled filename date patterns (lazy initialization).
+
+    Returns:
+        List of tuples: (compiled_regex, format_string_or_groups, has_time)
+    """
+    global _FILENAME_DATE_PATTERNS
+    if _FILENAME_DATE_PATTERNS is not None:
+        return _FILENAME_DATE_PATTERNS
+
+    _FILENAME_DATE_PATTERNS = [
+        # IMG_YYYYMMDD_HHMMSS (Android cameras, very common)
+        (re.compile(r'(?:IMG|VID|PXL|MVIMG|SAVE)_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})'),
+         'groups_datetime', True),
+
+        # YYYYMMDD_HHMMSS (generic with underscore)
+        (re.compile(r'(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})'),
+         'groups_datetime', True),
+
+        # YYYYMMDD-HHMMSS (generic with hyphen)
+        (re.compile(r'(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})'),
+         'groups_datetime', True),
+
+        # YYYY-MM-DD_HH-MM-SS (ISO-like with underscores/hyphens)
+        (re.compile(r'(\d{4})-(\d{2})-(\d{2})[_\s](\d{2})-(\d{2})-(\d{2})'),
+         'groups_datetime', True),
+
+        # YYYY-MM-DD HH.MM.SS (iOS sharing format)
+        (re.compile(r'(\d{4})-(\d{2})-(\d{2})\s+(?:at\s+)?(\d{2})\.(\d{2})\.(\d{2})'),
+         'groups_datetime', True),
+
+        # Screenshot_YYYYMMDD-HHMMSS (Android screenshots)
+        (re.compile(r'Screenshot_(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})'),
+         'groups_datetime', True),
+
+        # Screenshot_YYYY-MM-DD-HH-MM-SS (iOS screenshots)
+        (re.compile(r'Screenshot[_\s](\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})'),
+         'groups_datetime', True),
+
+        # IMG-YYYYMMDD-WA (WhatsApp images)
+        (re.compile(r'IMG-(\d{4})(\d{2})(\d{2})-WA'),
+         'groups_date', False),
+
+        # YYYY-MM-DD (ISO date, standalone or with non-digit suffix)
+        (re.compile(r'(\d{4})-(\d{2})-(\d{2})(?!\d)'),
+         'groups_date', False),
+
+        # YYYYMMDD (compact date - be careful, must be validated)
+        (re.compile(r'(?:^|[^\d])(\d{4})(\d{2})(\d{2})(?:[^\d]|$)'),
+         'groups_date', False),
+    ]
+
+    return _FILENAME_DATE_PATTERNS
+
+
+def _parse_filename_date_groups(
+    match: re.Match,
+    format_type: str,
+    has_time: bool
+) -> Optional[datetime.datetime]:
+    """
+    Parse date from regex match groups.
+
+    Parameters:
+        match: Regex match object with captured groups
+        format_type: Either 'groups_datetime' (6 groups) or 'groups_date' (3 groups)
+        has_time: Whether time components are present
+
+    Returns:
+        datetime.datetime or None if invalid
+    """
+    try:
+        groups = match.groups()
+
+        if format_type == 'groups_datetime' and len(groups) >= 6:
+            year = int(groups[0])
+            month = int(groups[1])
+            day = int(groups[2])
+            hour = int(groups[3])
+            minute = int(groups[4])
+            second = int(groups[5])
+        elif format_type == 'groups_date' and len(groups) >= 3:
+            year = int(groups[0])
+            month = int(groups[1])
+            day = int(groups[2])
+            hour, minute, second = 12, 0, 0  # Default to noon
+        else:
+            return None
+
+        # Validate ranges
+        if not (constants.MIN_REASONABLE_YEAR <= year <= constants.MAX_REASONABLE_YEAR):
+            return None
+        if not (1 <= month <= 12):
+            return None
+        if not (1 <= day <= 31):
+            return None
+        if has_time:
+            if not (0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59):
+                return None
+
+        return datetime.datetime(year, month, day, hour, minute, second)
+
+    except (ValueError, TypeError):
+        return None
+
+
+def extract_filename_date(file_path: str) -> Optional[datetime.datetime]:
+    """
+    Extract date from filename using common patterns.
+
+    Recognizes patterns like:
+    - IMG_20230415_123456.jpg (Android cameras)
+    - VID_20230415_123456.mp4 (Android video)
+    - 2023-04-15_12-34-56.jpg (ISO-like)
+    - Screenshot_20230415-123456.png
+    - IMG-20230415-WA0001.jpg (WhatsApp)
+    - 2023-04-15.jpg
+    - 20230415.jpg
+
+    Parameters:
+        file_path (str): Full path to the file
+
+    Returns:
+        datetime.datetime or None if no valid date found
+    """
+    # Get just the filename without extension
+    filename = os.path.basename(file_path)
+    filename_no_ext = os.path.splitext(filename)[0]
+
+    patterns = _get_filename_patterns()
+
+    for pattern, format_type, has_time in patterns:
+        match = pattern.search(filename_no_ext)
+        if match:
+            parsed = _parse_filename_date_groups(match, format_type, has_time)
+            if parsed:
+                logger.debug(f"Extracted date {parsed} from filename: {filename}")
+                return parsed
+
+    return None
+
+
+# Path date patterns (for extracting dates from directory structure)
+_PATH_DATE_PATTERNS = None  # Lazily initialized
+
+
+def _get_path_patterns():
+    """
+    Get compiled path date patterns (lazy initialization).
+
+    Returns:
+        List of tuples: (compiled_regex, extraction_callable)
+    """
+    global _PATH_DATE_PATTERNS
+    if _PATH_DATE_PATTERNS is not None:
+        return _PATH_DATE_PATTERNS
+
+    # Platform-independent path separator pattern
+    sep = r'[\\/]'
+
+    _PATH_DATE_PATTERNS = [
+        # /YYYY/MM/DD/ (full date path)
+        (re.compile(f'{sep}(\\d{{4}}){sep}(\\d{{2}}){sep}(\\d{{2}}){sep}'),
+         'ymd'),
+
+        # /YYYY-MM-DD/ (ISO date folder)
+        (re.compile(f'{sep}(\\d{{4}})-(\\d{{2}})-(\\d{{2}}){sep}'),
+         'ymd'),
+
+        # /YYYY/MM/ (year and month)
+        (re.compile(f'{sep}(\\d{{4}}){sep}(\\d{{2}}){sep}(?!\\d)'),
+         'ym'),
+
+        # /YYYY-MM/ (year-month folder)
+        (re.compile(f'{sep}(\\d{{4}})-(\\d{{2}}){sep}'),
+         'ym'),
+
+        # /YYYY/ (year only - less reliable, use with caution)
+        (re.compile(f'{sep}(\\d{{4}}){sep}(?!\\d)'),
+         'y'),
+    ]
+
+    return _PATH_DATE_PATTERNS
+
+
+def extract_path_date(file_path: str) -> Tuple[Optional[datetime.datetime], str]:
+    """
+    Extract date from directory path.
+
+    Recognizes folder structures like:
+    - /Photos/2023/04/15/photo.jpg -> 2023-04-15
+    - /Archive/2023-04-15/photo.jpg -> 2023-04-15
+    - /Photos/2023/04/photo.jpg -> 2023-04-01 (day defaults to 1)
+    - /Photos/2023/photo.jpg -> 2023-01-01 (month/day default to 1)
+
+    Parameters:
+        file_path (str): Full path to the file
+
+    Returns:
+        Tuple of (datetime, precision) where precision is:
+        - 'ymd': Full date extracted
+        - 'ym': Year and month extracted (day=1)
+        - 'y': Year only extracted (month=1, day=1)
+        - (None, '') if no date found
+    """
+    # Normalize path separators for consistent matching
+    normalized_path = file_path.replace('\\', '/')
+
+    patterns = _get_path_patterns()
+
+    for pattern, precision in patterns:
+        match = pattern.search(normalized_path)
+        if match:
+            try:
+                groups = match.groups()
+                year = int(groups[0])
+
+                # Validate year
+                if not (constants.MIN_REASONABLE_YEAR <= year <= constants.MAX_REASONABLE_YEAR):
+                    continue
+
+                if precision == 'ymd' and len(groups) >= 3:
+                    month = int(groups[1])
+                    day = int(groups[2])
+                    if 1 <= month <= 12 and 1 <= day <= 31:
+                        dt = datetime.datetime(year, month, day, 12, 0, 0)
+                        logger.debug(f"Extracted date {dt} from path (ymd): {file_path}")
+                        return (dt, 'ymd')
+
+                elif precision == 'ym' and len(groups) >= 2:
+                    month = int(groups[1])
+                    if 1 <= month <= 12:
+                        dt = datetime.datetime(year, month, 1, 12, 0, 0)
+                        logger.debug(f"Extracted date {dt} from path (ym): {file_path}")
+                        return (dt, 'ym')
+
+                elif precision == 'y':
+                    dt = datetime.datetime(year, 1, 1, 12, 0, 0)
+                    logger.debug(f"Extracted date {dt} from path (y): {file_path}")
+                    return (dt, 'y')
+
+            except (ValueError, TypeError):
+                continue
+
+    return (None, '')
+
+
+def extract_filename_or_path_date(
+    file_path: str
+) -> Tuple[Optional[datetime.datetime], str]:
+    """
+    Extract date from filename first, then fall back to path.
+
+    Filename dates are preferred as they're typically more specific
+    (often include time). Path dates are used as fallback.
+
+    Parameters:
+        file_path (str): Full path to the file
+
+    Returns:
+        Tuple of (datetime, source) where source is:
+        - 'filename': Date extracted from filename
+        - 'path_ymd': Full date from path
+        - 'path_ym': Year/month from path
+        - 'path_y': Year only from path
+        - (None, '') if no date found
+    """
+    # Try filename first (more specific, often has time)
+    filename_date = extract_filename_date(file_path)
+    if filename_date:
+        return (filename_date, 'filename')
+
+    # Fall back to path
+    path_date, precision = extract_path_date(file_path)
+    if path_date:
+        return (path_date, f'path_{precision}')
+
+    return (None, '')
+
+
+# ============================================================================
 # Video Date Extraction
 # ============================================================================
 
@@ -680,14 +970,18 @@ def get_creation_date(
     2. Other EXIF dates (earliest wins)
     3. IPTC Date Created
     4. XMP CreateDate
-    5. OS file timestamp
-    6. Fallback date (year 1000)
+    5. Filename date (e.g., IMG_20230415_123456.jpg)
+    6. Path date (e.g., /Photos/2023/04/15/)
+    7. OS file timestamp
+    8. Fallback date (year 1000)
 
     Priority for videos:
     1. Video metadata (ffprobe)
     2. QuickTime atom
-    3. OS file timestamp
-    4. Fallback date
+    3. Filename date
+    4. Path date
+    5. OS file timestamp
+    6. Fallback date
 
     Parameters:
         file_path (str): Path to the file
@@ -698,7 +992,7 @@ def get_creation_date(
             - year: Year as string (e.g., "2024")
             - month: Month as zero-padded string (e.g., "01")
             - day: Day as zero-padded string (e.g., "15")
-            - date_source: Source of the date ('exif', 'iptc', etc.)
+            - date_source: Source of the date ('exif', 'iptc', 'filename', 'path', etc.)
             - is_reliable: Whether the date is considered reliable
     """
     import pillow_heif
@@ -716,6 +1010,14 @@ def get_creation_date(
                 creation_date = video_date
                 date_source = video_source
                 has_metadata = True
+
+            # If no video metadata, try filename/path
+            if not has_metadata:
+                fp_date, fp_source = extract_filename_or_path_date(file_path)
+                if fp_date:
+                    creation_date = fp_date
+                    date_source = fp_source
+                    has_metadata = True
 
         else:
             # Image file - try metadata sources
@@ -751,6 +1053,14 @@ def get_creation_date(
 
             except Exception as e:
                 logger.warning(f"Error reading metadata from {file_path}: {e}")
+
+            # If no image metadata, try filename/path
+            if not has_metadata:
+                fp_date, fp_source = extract_filename_or_path_date(file_path)
+                if fp_date:
+                    creation_date = fp_date
+                    date_source = fp_source
+                    has_metadata = True
 
         # Format output
         year = f"{creation_date:%Y}"

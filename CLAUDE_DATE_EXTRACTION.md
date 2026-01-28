@@ -45,17 +45,63 @@ gps_ifd = exif.get_ifd(IFD.GPSInfo)  # GPS IFD (contains GPSDateStamp)
 
 3. **IPTC Date Created** - Fallback for images without EXIF (tag 2:55)
 
-4. **OS Metadata** - File creation/modification time (least reliable)
+4. **XMP CreateDate** - Fallback for XMP-only files
 
-5. **Year 1000 Fallback** - Indicates complete failure
+5. **Filename Date** - Extract from filename patterns (e.g., `IMG_20230415_123456.jpg`)
+
+6. **Path Date** - Extract from folder structure (e.g., `/Photos/2023/04/15/`)
+
+7. **OS Metadata** - File creation/modification time (least reliable)
+
+8. **Year 1000 Fallback** - Indicates complete failure
 
 ## Video Date Priority
 
 1. **ffprobe** - `creation_time` tag from format metadata
 2. **mutagen** - `©day` tag for MP4/MOV files
 3. **QuickTime atoms** - `mvhd` atom creation_time (handles 1904 epoch)
-4. **OS Metadata** - File timestamps
-5. **Year 1000 Fallback**
+4. **Filename Date** - Extract from filename patterns (e.g., `VID_20230415_123456.mp4`)
+5. **Path Date** - Extract from folder structure
+6. **OS Metadata** - File timestamps
+7. **Year 1000 Fallback**
+
+## Filename Date Patterns
+
+The system recognizes these filename patterns (in priority order):
+
+| Pattern | Example | Captures |
+|---------|---------|----------|
+| `IMG_YYYYMMDD_HHMMSS` | `IMG_20230415_123456.jpg` | Full datetime |
+| `VID_YYYYMMDD_HHMMSS` | `VID_20230415_123456.mp4` | Full datetime |
+| `PXL_YYYYMMDD_HHMMSS` | `PXL_20230415_123456.jpg` | Full datetime (Pixel phones) |
+| `YYYYMMDD_HHMMSS` | `20230415_123456.jpg` | Full datetime |
+| `YYYYMMDD-HHMMSS` | `20230415-123456.jpg` | Full datetime |
+| `YYYY-MM-DD_HH-MM-SS` | `2023-04-15_12-34-56.jpg` | Full datetime |
+| `YYYY-MM-DD HH.MM.SS` | `2023-04-15 at 12.34.56.jpg` | Full datetime (iOS) |
+| `Screenshot_YYYYMMDD-HHMMSS` | `Screenshot_20230415-123456.png` | Full datetime |
+| `IMG-YYYYMMDD-WA` | `IMG-20230415-WA0001.jpg` | Date only (WhatsApp) |
+| `YYYY-MM-DD` | `2023-04-15.jpg` | Date only |
+| `YYYYMMDD` | `20230415.jpg` | Date only |
+
+Functions: `extract_filename_date()`, `_get_filename_patterns()` in `date_extraction.py`.
+
+## Path Date Patterns
+
+The system recognizes these folder structures:
+
+| Pattern | Example | Precision |
+|---------|---------|-----------|
+| `/YYYY/MM/DD/` | `/Photos/2023/04/15/photo.jpg` | Full date |
+| `/YYYY-MM-DD/` | `/Archive/2023-04-15/photo.jpg` | Full date |
+| `/YYYY/MM/` | `/Photos/2023/04/photo.jpg` | Year + month (day=1) |
+| `/YYYY-MM/` | `/Archive/2023-04/photo.jpg` | Year + month (day=1) |
+| `/YYYY/` | `/Photos/2023/photo.jpg` | Year only (month=1, day=1) |
+
+Path dates are less reliable than filename dates because:
+- Year-only paths provide no month/day information
+- Paths may represent organization date, not capture date
+
+Functions: `extract_path_date()`, `extract_filename_or_path_date()` in `date_extraction.py`.
 
 ## Date Validation
 
@@ -79,14 +125,19 @@ Dates flagged as unreliable when:
 
 | Function | Purpose |
 |----------|---------|
-| `get_creation_date()` | Main entry point - returns `(datetime, date_source, is_reliable)` |
-| `_validate_exif_date()` | Validates/parses EXIF date strings |
-| `_read_all_exif_dates()` | Reads dates from all IFDs |
-| `_select_best_exif_date()` | Implements priority + earliest-date algorithm |
-| `_try_iptc_date()` | IPTC date extraction fallback |
-| `_try_video_date()` | Video metadata extraction |
+| `get_creation_date()` | Main entry point - returns `(year, month, day, date_source, is_reliable)` |
+| `validate_exif_date()` | Validates/parses EXIF date strings |
+| `extract_exif_dates()` | Reads dates from all IFDs |
+| `select_best_exif_date()` | Implements priority + earliest-date algorithm |
+| `extract_iptc_date()` | IPTC date extraction |
+| `extract_xmp_date()` | XMP date extraction |
+| `extract_video_date()` | Video metadata extraction (ffprobe, mutagen, QuickTime) |
+| `extract_filename_date()` | Extract date from filename patterns |
+| `extract_path_date()` | Extract date from directory path structure |
+| `extract_filename_or_path_date()` | Try filename first, then path |
+| `get_os_timestamp()` | OS file creation/modification time |
 
-All functions located in `DuplicateFileDetection.py`.
+All functions located in `date_extraction.py`.
 
 ## Date Source Values
 
@@ -100,8 +151,13 @@ Stored in `UniquePhotos.date_source`:
 | `exif_datetime` | DateTime (modification) |
 | `exif_preview` | PreviewDateTime |
 | `iptc` | IPTC Date Created |
+| `xmp` | XMP CreateDate |
 | `video_metadata` | ffprobe creation_time |
 | `video_quicktime` | QuickTime atom |
+| `filename` | Date from filename pattern |
+| `path_ymd` | Full date from directory path |
+| `path_ym` | Year/month from directory path |
+| `path_y` | Year only from directory path |
 | `os_metadata` | OS file timestamps |
 | `fallback` | Year 1000 default |
 
@@ -119,6 +175,11 @@ METADATA_SOURCE_SCORES = {
     'exif_datetime': 50,
     'exif_preview': 45,
     'iptc': 40,
+    'xmp': 35,
+    'filename': 30,        # Date from filename
+    'path_ymd': 28,        # Full date from path
+    'path_ym': 25,         # Year/month from path
+    'path_y': 22,          # Year only from path
     'os_metadata': 20,
     'fallback': 0
 }
