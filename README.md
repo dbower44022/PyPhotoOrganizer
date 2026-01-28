@@ -4,7 +4,7 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-3.0.3-brightgreen.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-3.5.0-brightgreen.svg)](CHANGELOG.md)
 
 ## Overview
 
@@ -107,6 +107,20 @@ PyPhotoOrganizer helps you consolidate photos and videos from multiple devices a
 - ✅ **Square Icon Detection**: Filters small square images (likely icons)
 - ✅ **EXIF Requirement**: Optional requirement for EXIF data
 - ✅ **Detailed Filter Statistics**: Track and review why each file was filtered
+
+**Cloud Storage Features (v3.5.0+):**
+- ✅ **Amazon S3 Support**: Store your archive in S3 with full sync capability
+- ✅ **Per-Vault Configuration**: Each vault (archive, video, etc.) can use different storage backends
+- ✅ **Storage Backend Abstraction**: Unified interface for local and cloud storage operations
+- ✅ **Multipart Upload**: Large files (>8MB) uploaded efficiently in parallel chunks
+- ✅ **Storage Classes**: Support for all S3 storage tiers (STANDARD, INTELLIGENT_TIERING, GLACIER, etc.)
+- ✅ **Sync Operations**: Upload local files to cloud, with queue management and retry logic
+- ✅ **Background Sync Worker**: Non-blocking sync with pause/resume/stop support
+- ✅ **Conflict Detection**: Detect and resolve conflicts between local and cloud versions
+- ✅ **Hash Verification**: SHA-256 verification after upload ensures data integrity
+- ✅ **Offline Support**: Queue uploads when offline, process when connectivity restored
+- ⏳ **Azure Blob Storage**: Coming soon
+- ⏳ **Google Cloud Storage**: Coming soon
 
 ### Use Cases
 

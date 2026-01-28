@@ -21,10 +21,11 @@
 17. [Bulk Delete Matching Files](#bulk-delete-matching-files)
 18. [Delete Vault and File Recovery](#delete-vault-and-file-recovery)
 19. [Cloud Storage](#cloud-storage)
-20. [Settings](#settings)
-21. [Troubleshooting](#troubleshooting)
-22. [Recovering from Data or Storage Corruption](#recovering-from-data-or-storage-corruption)
-23. [FAQ](#faq)
+20. [Auto-Import Service](#auto-import-service)
+21. [Settings](#settings)
+22. [Troubleshooting](#troubleshooting)
+23. [Recovering from Data or Storage Corruption](#recovering-from-data-or-storage-corruption)
+24. [FAQ](#faq)
 
 ---
 
@@ -57,6 +58,7 @@ PyPhotoOrganizer helps you consolidate photos from multiple sources (phones, tab
 
 ### Python Dependencies
 
+**Required:**
 ```
 PySide6          # GUI framework
 Pillow           # Image processing
@@ -65,9 +67,19 @@ piexif           # EXIF metadata handling
 tqdm             # Progress bars (CLI mode)
 ```
 
-Install dependencies:
+**Optional (for cloud storage):**
+```
+boto3            # Amazon S3 support
+```
+
+Install required dependencies:
 ```bash
 pip install PySide6 Pillow pillow-heif piexif tqdm
+```
+
+Install with cloud storage support:
+```bash
+pip install PySide6 Pillow pillow-heif piexif tqdm boto3
 ```
 
 ---
@@ -2502,6 +2514,265 @@ Current limitations that will be addressed in future releases:
 3. **No automatic sync**: Must manually trigger sync
 4. **No bandwidth throttling**: Uses full available bandwidth
 5. **No encryption options**: Uses server-side encryption only
+
+---
+
+## Auto-Import Service
+
+The Auto-Import Service is a background service that automatically monitors directories for new photos and videos, imports them to your archive, and sends email reports. It's ideal for automated workflows like:
+
+- Automatically importing photos from phone sync folders
+- Processing photos dropped into a "to import" folder
+- Scheduled imports from network drives or cloud sync locations
+
+### Quick Start
+
+1. **Generate a configuration file**:
+   ```bash
+   python -m auto_import generate-config -o autoimport.yaml
+   ```
+
+2. **Edit the configuration** to set your database path and watch directories
+
+3. **Validate the configuration**:
+   ```bash
+   python -m auto_import validate -c autoimport.yaml
+   ```
+
+4. **Run a single import cycle** (test mode):
+   ```bash
+   python -m auto_import run-once -c autoimport.yaml
+   ```
+
+5. **Start the service**:
+   ```bash
+   python -m auto_import start -c autoimport.yaml
+   ```
+
+### Configuration File
+
+The service uses a YAML configuration file with these main sections:
+
+```yaml
+# Service settings
+service:
+  database_path: ~/Photos/PhotoDB.db  # Required: your PyPhotoOrganizer database
+  pid_file: /var/run/pyphoto-autoimport.pid  # For daemon mode
+  log_file: /var/log/pyphoto-autoimport.log  # Empty for stdout
+  log_level: INFO  # DEBUG, INFO, WARNING, ERROR
+
+# Schedule settings
+schedule:
+  mode: interval  # interval, cron, or continuous
+  interval_minutes: 60  # For interval mode
+  cron_expression: "0 2 * * *"  # For cron mode (2 AM daily)
+  quiet_hours:
+    start: "23:00"  # Skip imports during these hours
+    end: "06:00"
+  run_on_startup: true  # Run immediately when service starts
+
+# Directories to watch
+watch_directories:
+  - path: ~/PhoneBackup/DCIM
+    enabled: true
+    recursive: true  # Include subdirectories
+    min_file_age_seconds: 120  # Wait for sync to complete
+    album_id: 1  # Optional: auto-add to album
+    name: "Phone Photos"  # Friendly name for reports
+
+  - path: ~/Downloads/Photos
+    enabled: true
+    recursive: false
+    min_file_age_seconds: 60
+
+# Processing options
+processing:
+  copy_mode: true  # true=copy, false=move source files
+  max_files_per_run: 0  # 0=unlimited
+  max_bytes_per_run: 0  # 0=unlimited
+
+# Email notifications
+notifications:
+  enabled: true
+  email:
+    enabled: true
+    recipients:
+      - admin@example.com
+    smtp:
+      server: smtp.gmail.com
+      port: 587
+      username: your-email@gmail.com
+      password_env: SMTP_PASSWORD  # Read from environment variable
+      use_tls: true
+  reports:
+    on_success: true
+    on_failure: true
+    on_no_changes: false  # Don't spam when nothing happens
+    include_file_list: true
+    max_files_in_report: 50
+```
+
+### CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `generate-config` | Generate a default configuration file |
+| `validate` | Validate configuration and check watch directories |
+| `start` | Start the service (blocks until stopped) |
+| `run-once` | Run a single import cycle and exit |
+| `status` | Show service status and watch directory info |
+| `stop` | Stop a running service |
+| `test-email` | Send a test email to verify configuration |
+| `clear-state` | Clear processed file tracking (re-import files) |
+
+### Schedule Modes
+
+**Interval Mode** (default):
+- Runs every N minutes
+- Good for regular automated imports
+- Example: `interval_minutes: 60` runs every hour
+
+**Cron Mode**:
+- Runs at specific times using cron syntax
+- Good for scheduled maintenance windows
+- Example: `cron_expression: "0 2 * * *"` runs at 2 AM daily
+
+**Continuous Mode**:
+- Runs as fast as possible
+- Good for initial bulk imports
+- Use with caution on systems with limited resources
+
+### Quiet Hours
+
+Configure times when imports should be skipped:
+
+```yaml
+schedule:
+  quiet_hours:
+    start: "23:00"
+    end: "06:00"
+```
+
+This prevents imports during nighttime when:
+- Network drives might be unmounted
+- System backups might be running
+- You want to avoid disk activity
+
+### Album Integration
+
+Automatically add imported photos to albums by specifying `album_id`:
+
+```yaml
+watch_directories:
+  - path: ~/PhoneBackup/iPhone
+    album_id: 3  # Add all photos to album ID 3
+```
+
+Get album IDs from the Photo Review app's Albums panel.
+
+### Email Reports
+
+The service sends HTML email reports after each import cycle:
+
+**Successful Import Report**:
+- Number of files scanned, imported, duplicates, filtered, failed
+- List of imported files (configurable limit)
+- Processing duration and data size
+
+**Failure Report**:
+- Error messages
+- Files that failed to process
+- Suggested remediation steps
+
+**Test Email**:
+```bash
+python -m auto_import test-email -c autoimport.yaml
+```
+
+### Running as a System Service
+
+**Linux (systemd)**:
+
+Create `/etc/systemd/system/pyphoto-autoimport.service`:
+```ini
+[Unit]
+Description=PyPhotoOrganizer Auto-Import Service
+After=network.target
+
+[Service]
+Type=simple
+User=youruser
+WorkingDirectory=/path/to/PyPhotoOrganizer
+ExecStart=/usr/bin/python3 -m auto_import start -c /path/to/autoimport.yaml
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable pyphoto-autoimport
+sudo systemctl start pyphoto-autoimport
+```
+
+**macOS (launchd)**:
+
+Create `~/Library/LaunchAgents/com.pyphotoorganizer.autoimport.plist`:
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pyphotoorganizer.autoimport</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>-m</string>
+        <string>auto_import</string>
+        <string>start</string>
+        <string>-c</string>
+        <string>/path/to/autoimport.yaml</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/path/to/PyPhotoOrganizer</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+```
+
+Then:
+```bash
+launchctl load ~/Library/LaunchAgents/com.pyphotoorganizer.autoimport.plist
+```
+
+### Troubleshooting Auto-Import
+
+**Service won't start**:
+- Check configuration with `validate` command
+- Verify database path exists and is accessible
+- Check log file for detailed errors
+
+**Files not being imported**:
+- Check `min_file_age_seconds` - files must be older than this
+- Verify watch directory is `enabled: true`
+- Check if files match the file patterns (images/videos only)
+- Use `status` command to check directory availability
+
+**Duplicate emails or imports**:
+- Check if multiple service instances are running
+- Use `clear-state` to reset tracking database
+
+**Permission errors**:
+- Ensure service user has read access to watch directories
+- Ensure service user has write access to archive directory
+- Check database file permissions
 
 ---
 

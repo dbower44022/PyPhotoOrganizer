@@ -5,6 +5,166 @@ All notable changes to PyPhotoOrganizer will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.0] - 2026-01-28
+
+### Added
+
+**Auto-Import Background Service**
+
+A standalone background service that automatically monitors directories for new photos and videos, imports them to your archive, and sends email reports.
+
+**Core Features:**
+- **Directory Watching**: Monitor multiple directories for new files using configurable polling
+- **Scheduling**: Interval mode (every N minutes), cron mode (specific times), or continuous mode
+- **Quiet Hours**: Skip imports during specified time windows
+- **Email Reports**: HTML and plain text reports with import statistics
+- **Album Integration**: Auto-add imported files to specified albums
+- **State Persistence**: SQLite database tracks processed files across service restarts
+
+**Configuration (`auto_import/config.py`):**
+- `ServiceConfig` - Complete service configuration
+- `WatchConfig` - Per-directory settings (patterns, recursion, min age, album ID)
+- `ScheduleConfig` - Timing settings (interval/cron/continuous, quiet hours)
+- `EmailConfig` - SMTP settings with environment variable support
+- `NotificationConfig` - Report settings (when to send, what to include)
+- `ConfigManager` - YAML loading with validation and hot-reload support
+
+**Service Management (`auto_import/service.py`):**
+- `ServiceManager` - Lifecycle management, signal handling, main loop
+- Graceful shutdown on SIGTERM/SIGINT
+- Config reload on SIGHUP (Unix)
+- PID file support for daemon mode
+
+**Directory Monitoring (`auto_import/watcher.py`):**
+- `DirectoryWatcher` - File detection with pattern matching
+- `NewFile` - Dataclass for detected files
+- File age checking to avoid processing incomplete transfers
+- SQLite state persistence for tracking processed files
+
+**File Processing (`auto_import/processor.py`):**
+- `ImportProcessor` - Integrates with existing PyPhotoOrganizer import logic
+- `ImportResult` - Detailed statistics (scanned, imported, duplicate, filtered, failed)
+- Photo filtering, hash calculation, duplicate detection
+- Album assignment during import
+
+**Email Reporting (`auto_import/reporter.py`):**
+- `ReportManager` - HTML and plain text email generation
+- Success/failure reports with file lists
+- Test email functionality for configuration verification
+
+**Scheduling (`auto_import/scheduler.py`):**
+- `Scheduler` - Timing calculations for all modes
+- Simplified cron parser (minute, hour, day, month, day-of-week)
+- Supports wildcards, ranges, lists, and intervals
+
+**CLI (`auto_import/cli.py`):**
+- `start` - Start the service
+- `run-once` - Single import cycle
+- `status` - Show service and directory status
+- `stop` - Stop running service
+- `validate` - Validate configuration
+- `generate-config` - Create default config file
+- `test-email` - Verify email configuration
+- `clear-state` - Reset processed file tracking
+
+**Usage:**
+```bash
+# Generate default config
+python -m auto_import generate-config -o autoimport.yaml
+
+# Validate configuration
+python -m auto_import validate -c autoimport.yaml
+
+# Run single import
+python -m auto_import run-once -c autoimport.yaml
+
+# Start service
+python -m auto_import start -c autoimport.yaml
+```
+
+---
+
+## [3.5.0] - 2026-01-27
+
+### Added
+
+**Schema v8: Cloud Storage Integration**
+
+Store your photo archive in cloud storage services like Amazon S3, with full sync support and conflict resolution.
+
+**Core Features:**
+- **Storage Backend Abstraction**: Unified interface for local and cloud storage
+- **Amazon S3 Support**: Full implementation with multipart upload, storage classes
+- **Per-Vault Configuration**: Each vault (archive, video, etc.) can use different storage
+- **Sync Operations**: Upload local files to cloud, download from cloud, conflict resolution
+- **Background Sync Worker**: Non-blocking sync with pause/resume/stop support
+- **Upload Queue**: Offline-capable queue with retry logic and exponential backoff
+
+**Storage Backend (`storage_backend.py`):**
+- `StorageBackend` - Abstract base class defining storage operations
+- `LocalStorageBackend` - Local filesystem implementation
+- `StorageProviderRegistry` - Factory for creating backends from configuration
+- `StorageManager` - Multi-vault backend management
+
+**S3 Backend (`storage_backend_s3.py`):**
+- `S3StorageBackend` - Full Amazon S3 implementation
+- Multipart upload for files >8MB (configurable threshold)
+- Storage class support (STANDARD, INTELLIGENT_TIERING, GLACIER, etc.)
+- Retry logic with exponential backoff
+- Hash verification after upload
+- Presigned URL generation for temporary access
+
+**Sync Management:**
+- `CloudSyncManager` - Upload queue management with retry support
+- `CloudSync` - High-level sync orchestration
+  - `sync_vault_to_cloud()` - Full vault sync
+  - `download_from_cloud()` - Download with verification
+  - `find_conflicts()` - Detect sync conflicts
+  - `resolve_conflict()` - Multiple resolution strategies
+
+**UI Integration:**
+- `CloudSettingsWidget` - Per-vault configuration with provider selection
+- `VaultConfigWidget` - Individual vault configuration
+- `CloudSyncWorker` - Background thread with progress signals
+- Sync controls in Archive Settings: Sync Now, Stop, Check Status buttons
+- Progress bar and status display
+
+**Database Changes (Schema v8):**
+- Added `storage_config`, `cloud_sync_enabled`, `cloud_last_sync`, `cloud_defaults` columns to `DatabaseMetadata`
+- Added `CloudSyncStatus` table - Track upload status per file
+- Added `FileLocations` table - Track file locations across storage types
+- Added `CloudUploadQueue` table - Pending uploads with retry tracking
+
+**Conflict Resolution:**
+- `KEEP_LOCAL` - Upload local version to cloud
+- `KEEP_CLOUD` - Download cloud version
+- `KEEP_BOTH` - Keep both versions
+- `SKIP` - Skip conflicting file
+
+**Files Created:**
+- `storage_backend.py` - Storage abstraction layer
+- `storage_backend_s3.py` - S3 implementation
+- `cloud_sync_manager.py` - Upload queue management
+- `cloud_sync.py` - Sync orchestration
+- `ui/cloud_settings_widget.py` - Cloud configuration UI
+- `ui/cloud_sync_worker.py` - Background sync worker
+- `tests/unit/test_storage_backend.py` - 50 unit tests
+- `tests/unit/test_storage_backend_s3.py` - S3 tests (uses moto)
+- `tests/unit/test_cloud_sync.py` - 12 sync tests
+- `CLOUD_STORAGE_PLAN.md` - Implementation plan
+
+**Files Modified:**
+- `database_schema.py` - Schema v8 with cloud tables
+- `database_metadata.py` - Cloud config methods
+- `config.py` - Storage config support
+- `path_resolver.py` - StorageBackendResolver
+- `ui/archive_settings_tab.py` - Cloud settings and sync UI
+
+**Dependencies:**
+- `boto3` (optional) - Required for S3 support
+
+---
+
 ## [3.4.0] - 2026-01-23
 
 ### Added

@@ -67,6 +67,18 @@ python main.py              # CLI mode
 | `cloud_sync_manager.py` | `CloudSyncManager`: upload queue, sync tracking |
 | `cloud_sync.py` | `CloudSync`: high-level sync orchestration, conflict resolution |
 
+### Auto-Import Service (auto_import/)
+
+| Module | Purpose |
+|--------|---------|
+| `config.py` | `ServiceConfig`, `WatchConfig`, `ConfigManager`: YAML config loading |
+| `service.py` | `ServiceManager`: lifecycle, signals, main loop |
+| `watcher.py` | `DirectoryWatcher`: file detection, state tracking |
+| `processor.py` | `ImportProcessor`: file processing, database integration |
+| `reporter.py` | `ReportManager`: HTML/text email reports |
+| `scheduler.py` | `Scheduler`: interval/cron timing |
+| `cli.py` | CLI entry point: start, stop, status, run-once |
+
 ### GUI Modules (ui/)
 
 | Module | Purpose |
@@ -116,6 +128,7 @@ See [CLAUDE_DATABASE.md](CLAUDE_DATABASE.md) for full schema details.
 | Override Skip | Import previously filtered files | [CLAUDE_FEATURES.md](CLAUDE_FEATURES.md) |
 | Album Association | Auto-add to albums during import | [CLAUDE_FEATURES.md](CLAUDE_FEATURES.md) |
 | Archive Change Detection | Detect external file modifications | [CLAUDE_FEATURES.md](CLAUDE_FEATURES.md) |
+| Cloud Storage | Store archive in S3 with sync support | [CLAUDE_FEATURES.md](CLAUDE_FEATURES.md) |
 
 ## Photo Filtering
 

@@ -27,6 +27,9 @@ All tables in SQLite database (default: `PhotoDB.db`):
 | `PendingOperations` | Tracks in-flight copy/move operations for crash recovery |
 | `AuditQueue` | Queues failed audit log entries for retry |
 | `QuickBackups` | Tracks rolling database snapshots |
+| `CloudSyncStatus` | Cloud upload status per file (Schema v8) |
+| `FileLocations` | Track file locations across storage backends (Schema v8) |
+| `CloudUploadQueue` | Pending cloud uploads with retry support (Schema v8) |
 
 ## Schema Version History
 
@@ -45,6 +48,13 @@ All tables in SQLite database (default: `PhotoDB.db`):
 - New `UniquePhotos` columns: `date_source`, `date_reliable`, `metadata_quality_score`
 - New table `MetadataUpgradeHistory`
 - New setting `metadata_upgrade_enabled` in `DatabaseMetadata`
+
+### Schema v8
+- Added cloud storage support
+- New `DatabaseMetadata` columns: `storage_config`, `cloud_sync_enabled`, `cloud_last_sync`, `cloud_defaults`
+- New table `CloudSyncStatus`: tracks upload status per file/vault/provider
+- New table `FileLocations`: tracks where files exist (local, cloud, both)
+- New table `CloudUploadQueue`: offline-capable upload queue with retry logic
 
 ## Connection Pattern
 
@@ -292,3 +302,106 @@ Or CLI: `python -m migrations.schema_v6_relative_paths /path/to/PhotoDB.db`
 
 - `_get_wal_size()` - Get WAL file size in bytes
 - `checkpoint_wal(mode)` - Force checkpoint (PASSIVE, FULL, RESTART, TRUNCATE)
+
+## Cloud Storage Tables (Schema v8)
+
+### CloudSyncStatus
+
+Tracks upload status for each file in each cloud storage location.
+
+```sql
+CREATE TABLE CloudSyncStatus (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash TEXT NOT NULL,
+    storage_location TEXT NOT NULL,  -- 'archive', 'video_archive', etc.
+    cloud_provider TEXT,             -- 's3', 'azure', 'gcs'
+    cloud_path TEXT,                 -- Path in cloud storage
+    upload_status TEXT DEFAULT 'pending',  -- 'pending', 'uploading', 'completed', 'verified', 'failed'
+    upload_started TEXT,
+    upload_completed TEXT,
+    cloud_etag TEXT,                 -- Provider's ETag for integrity
+    cloud_storage_class TEXT,        -- S3 storage class
+    retry_count INTEGER DEFAULT 0,
+    last_error TEXT,
+    verified_at TEXT,
+    UNIQUE (file_hash, storage_location, cloud_provider)
+);
+```
+
+### FileLocations
+
+Tracks where files physically exist (supports hybrid local+cloud).
+
+```sql
+CREATE TABLE FileLocations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash TEXT NOT NULL,
+    location_type TEXT NOT NULL,     -- 'local', 'cloud'
+    storage_backend TEXT NOT NULL,   -- 'archive', 'video_archive', 's3', etc.
+    relative_path TEXT NOT NULL,
+    cloud_provider TEXT,
+    cloud_bucket TEXT,
+    verified_at TEXT,
+    UNIQUE (file_hash, location_type, storage_backend)
+);
+```
+
+### CloudUploadQueue
+
+Persistent queue for cloud uploads with offline support and retry logic.
+
+```sql
+CREATE TABLE CloudUploadQueue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash TEXT NOT NULL,
+    local_path TEXT NOT NULL,
+    target_storage TEXT NOT NULL,    -- 'archive', 'video_archive'
+    target_path TEXT NOT NULL,       -- Relative path in cloud
+    priority INTEGER DEFAULT 0,      -- Higher = sooner
+    queued_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    attempts INTEGER DEFAULT 0,
+    last_attempt TEXT,
+    last_error TEXT,
+    status TEXT DEFAULT 'queued'     -- 'queued', 'uploading', 'completed', 'failed'
+);
+```
+
+### DatabaseMetadata Cloud Columns
+
+```sql
+-- Added in Schema v8
+storage_config TEXT,           -- JSON: per-vault storage configuration
+cloud_sync_enabled INTEGER DEFAULT 0,
+cloud_last_sync TEXT,
+cloud_defaults TEXT            -- JSON: default cloud settings
+```
+
+### Storage Config Format
+
+```json
+{
+  "archive": {
+    "provider": "s3",
+    "bucket": "my-photos",
+    "prefix": "archive",
+    "region": "us-east-1",
+    "storage_class": "INTELLIGENT_TIERING"
+  },
+  "video_archive": {
+    "provider": "local",
+    "path": "/mnt/videos"
+  },
+  "delete_vault": {
+    "provider": "local",
+    "path": "/mnt/deleted"
+  }
+}
+```
+
+### Key Methods (DatabaseMetadata)
+
+- `get_storage_config()` / `set_storage_config()` - Per-vault storage configuration
+- `get_cloud_defaults()` / `set_cloud_defaults()` - Default cloud settings
+- `get_cloud_sync_enabled()` / `set_cloud_sync_enabled()` - Enable/disable sync
+- `get_cloud_last_sync()` / `set_cloud_last_sync()` - Last sync timestamp
+- `has_cloud_storage()` - Check if any vault uses cloud storage

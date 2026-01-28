@@ -334,3 +334,156 @@ After successful backup restoration.
 - Session: `operation_mode='archive_recovery'`
 - Operation: `'archive_recovery'`
 - Filter: "Archive Recovery"
+
+---
+
+## Cloud Storage (Schema v8)
+
+Store archive files in cloud storage services like Amazon S3.
+
+### Overview
+
+- **Default:** Disabled (local storage)
+- **Providers:** Amazon S3 (Azure, GCS planned)
+- **Per-vault:** Each vault can have different storage configuration
+- **Sync:** Manual or automatic sync to cloud
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Application Layer                       │
+├─────────────────────────────────────────────────────────────┤
+│  CloudSync          │  CloudSyncManager   │  UI Widgets     │
+│  (orchestration)    │  (upload queue)     │  (configuration)│
+├─────────────────────────────────────────────────────────────┤
+│                    StorageManager                            │
+│              (multi-vault backend management)                │
+├─────────────────────────────────────────────────────────────┤
+│  LocalStorageBackend │  S3StorageBackend  │  (Future: Azure)│
+├─────────────────────────────────────────────────────────────┤
+│      Local FS        │     boto3/S3       │  azure-storage  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Storage Backend Abstraction
+
+All storage operations go through `StorageBackend` ABC:
+
+```python
+class StorageBackend(ABC):
+    @abstractmethod
+    def exists(self, path: str) -> bool: ...
+    @abstractmethod
+    def read_file(self, path: str) -> bytes: ...
+    @abstractmethod
+    def write_file(self, path: str, data: bytes) -> bool: ...
+    @abstractmethod
+    def copy_from_local(self, local_path: str, remote_path: str) -> bool: ...
+    @abstractmethod
+    def copy_to_local(self, remote_path: str, local_path: str) -> bool: ...
+    @abstractmethod
+    def compute_hash(self, path: str, algorithm: str = 'sha256') -> str: ...
+```
+
+### Key Classes
+
+| Class | Module | Purpose |
+|-------|--------|---------|
+| `StorageBackend` | `storage_backend.py` | Abstract interface for storage |
+| `LocalStorageBackend` | `storage_backend.py` | Local filesystem implementation |
+| `StorageProviderRegistry` | `storage_backend.py` | Factory for creating backends |
+| `StorageManager` | `storage_backend.py` | Multi-vault management |
+| `S3StorageBackend` | `storage_backend_s3.py` | Amazon S3 implementation |
+| `CloudSyncManager` | `cloud_sync_manager.py` | Upload queue, retry logic |
+| `CloudSync` | `cloud_sync.py` | High-level sync operations |
+| `CloudSyncWorker` | `ui/cloud_sync_worker.py` | Background sync thread |
+| `CloudSettingsWidget` | `ui/cloud_settings_widget.py` | Per-vault UI config |
+
+### S3 Features
+
+- **Multipart upload** for files >8MB
+- **Storage classes**: STANDARD, INTELLIGENT_TIERING, GLACIER, etc.
+- **Retry logic** with exponential backoff
+- **Hash verification** after upload
+- **Presigned URLs** for temporary access
+
+### Database Tables (Schema v8)
+
+| Table | Purpose |
+|-------|---------|
+| `CloudSyncStatus` | Track upload status per file/vault |
+| `FileLocations` | Track file locations (local + cloud) |
+| `CloudUploadQueue` | Pending uploads with retry support |
+
+### Configuration Storage
+
+Storage config in `DatabaseMetadata.storage_config` (JSON):
+
+```json
+{
+  "archive": {
+    "provider": "s3",
+    "bucket": "my-photos",
+    "prefix": "archive",
+    "region": "us-east-1",
+    "storage_class": "INTELLIGENT_TIERING"
+  },
+  "video_archive": {
+    "provider": "local",
+    "path": "/mnt/videos"
+  }
+}
+```
+
+### Sync Operations
+
+| Operation | Class | Method |
+|-----------|-------|--------|
+| Find unsynced files | `CloudSync` | `find_files_needing_upload()` |
+| Sync vault to cloud | `CloudSync` | `sync_vault_to_cloud()` |
+| Download from cloud | `CloudSync` | `download_from_cloud()` |
+| Queue single file | `CloudSyncManager` | `queue_upload()` |
+| Process queue | `CloudSyncManager` | `process_queue()` |
+| Check sync status | `CloudSync` | `get_sync_status_summary()` |
+
+### Conflict Resolution
+
+When local and cloud differ:
+
+```python
+class ConflictResolution(Enum):
+    KEEP_LOCAL = 'keep_local'    # Upload local version
+    KEEP_CLOUD = 'keep_cloud'    # Download cloud version
+    KEEP_BOTH = 'keep_both'      # Keep both (rename one)
+    SKIP = 'skip'                # Skip this file
+    ASK = 'ask'                  # Ask user
+```
+
+### Worker Signals
+
+`CloudSyncWorker` emits:
+
+| Signal | Parameters | Description |
+|--------|------------|-------------|
+| `progress` | `SyncProgress` | Progress update |
+| `file_completed` | `file_hash, success, error` | Single file done |
+| `sync_completed` | `dict` (stats) | Sync finished |
+| `error` | `str` (message) | Critical error |
+| `paused` | - | Sync paused |
+| `resumed` | - | Sync resumed |
+
+### Key Gotchas
+
+1. **boto3 optional** - S3 features only work if boto3 installed
+2. **AWS credentials** - Must be configured via CLI, env vars, or IAM role
+3. **Local copy required** - Files must exist locally before cloud upload
+4. **Hash verification** - Uses SHA-256, not S3's MD5 ETag
+5. **Storage class transitions** - Use `set_storage_class()` for existing files
+6. **Worker cleanup** - Must call `worker.request_stop()` and `worker.wait()` on close
+
+### Testing
+
+- Unit tests: `tests/unit/test_storage_backend.py` (50 tests)
+- S3 tests: `tests/unit/test_storage_backend_s3.py` (uses moto mock)
+- Sync tests: `tests/unit/test_cloud_sync.py` (12 tests)
