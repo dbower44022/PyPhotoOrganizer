@@ -1584,7 +1584,7 @@ class PhotoReviewWindow(QMainWindow):
             self.query_panel.execute_query()
 
     def _restore_last_query(self):
-        """Restore the last query or folder from settings."""
+        """Restore the last query or folder from settings, or load Recent Imports by default."""
         state = self.database_metadata.get_photo_review_state()
         if state:
             last_query = state.get('last_query')
@@ -1599,9 +1599,29 @@ class PhotoReviewWindow(QMainWindow):
                     self.search_bar.set_text(last_query['search_text'])
 
                 self.query_panel.execute_query()
+                return
             elif last_folder:
                 logger.info(f"Restoring last folder: {last_folder}")
                 self.query_panel.set_folder(last_folder)
+                return
+
+        # No saved state - load Recent Imports query by default
+        self._load_recent_imports_query()
+
+    def _load_recent_imports_query(self):
+        """Load the Recent Imports system query as the default view."""
+        from datetime import datetime, timedelta
+
+        logger.info("Loading Recent Imports query as default")
+
+        # Build the recent imports filter (last 7 days)
+        recent_imports_filter = {
+            'import_date_from': (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'),
+            'import_date_to': datetime.now().strftime('%Y-%m-%d')
+        }
+
+        self.query_panel.set_filters(recent_imports_filter)
+        self.query_panel.execute_query()
 
     def _restore_splitter_states(self):
         """Restore splitter states from settings."""

@@ -146,6 +146,28 @@ class PhotoQueryBuilder:
             params.append(filters['correction_date_to'])
 
         # -----------------------------------------------------------------
+        # Import date range (uses FileProcessingLog.timestamp)
+        # -----------------------------------------------------------------
+        if filters.get('import_date_from'):
+            conditions.append("""
+                up.file_hash IN (
+                    SELECT DISTINCT file_hash FROM FileProcessingLog
+                    WHERE timestamp >= ? AND status = 'imported'
+                )
+            """)
+            params.append(filters['import_date_from'])
+
+        if filters.get('import_date_to'):
+            conditions.append("""
+                up.file_hash IN (
+                    SELECT DISTINCT file_hash FROM FileProcessingLog
+                    WHERE timestamp <= ? AND status = 'imported'
+                )
+            """)
+            # Add time component to include full day
+            params.append(filters['import_date_to'] + ' 23:59:59')
+
+        # -----------------------------------------------------------------
         # Status filters
         # -----------------------------------------------------------------
         if filters.get('has_unreliable_date'):
