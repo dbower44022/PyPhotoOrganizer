@@ -399,6 +399,13 @@ class DatabaseMetadata:
                     # Set default value for existing rows (feature enabled by default)
                     cursor.execute("UPDATE DatabaseMetadata SET metadata_upgrade_enabled = 1 WHERE metadata_upgrade_enabled IS NULL")
 
+                # Schema v9: Add video_content_hash_enabled column (for video content-based duplicate detection)
+                if 'video_content_hash_enabled' not in columns:
+                    logger.info("Upgrading database: adding video_content_hash_enabled column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN video_content_hash_enabled INTEGER DEFAULT 1")
+                    # Set default value for existing rows (feature enabled by default)
+                    cursor.execute("UPDATE DatabaseMetadata SET video_content_hash_enabled = 1 WHERE video_content_hash_enabled IS NULL")
+
                 # Schema v8: Cloud storage support columns
                 # Add storage_config column if missing (JSON config for per-vault storage backends)
                 if 'storage_config' not in columns:
@@ -3778,6 +3785,87 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to set content hash enabled state: {e}", exc_info=True)
+            return False
+
+    # -------------------------------------------------------------------------
+    # Video Content Hash Configuration Methods (Schema v9)
+    # -------------------------------------------------------------------------
+
+    def is_video_content_hash_enabled(self) -> bool:
+        """
+        Check if video content-based (perceptual) hashing is enabled for duplicate detection.
+
+        Video content hashing detects visually identical videos even when they have been
+        re-encoded, transcoded, or have different metadata. This is useful for finding
+        duplicates where one copy has been converted to a different format.
+
+        Returns:
+            True if enabled (default), False otherwise
+        """
+        try:
+            self._ensure_metadata_table()
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT video_content_hash_enabled FROM DatabaseMetadata WHERE id = 1
+                """)
+                result = cursor.fetchone()
+
+                if result is None or result[0] is None:
+                    return True  # Default to enabled
+                return bool(result[0])
+
+        except Exception as e:
+            logger.error(f"Error checking video content hash enabled status: {e}", exc_info=True)
+            return True  # Default to enabled on error
+
+    def set_video_content_hash_enabled(self, enabled: bool) -> bool:
+        """
+        Enable or disable video content-based (perceptual) hashing for duplicate detection.
+
+        Video content hashing detects visually identical videos even when they have been
+        re-encoded or have different metadata. This uses ffmpeg to extract key frames
+        and compute perceptual hashes.
+
+        Args:
+            enabled: True to enable video content hashing, False to disable
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            logger.info(f"→ set_video_content_hash_enabled({enabled}) called for database: {self.database_path}")
+            self._ensure_metadata_table()
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Check if row exists
+                cursor.execute("SELECT COUNT(*) FROM DatabaseMetadata WHERE id = 1")
+                count = cursor.fetchone()[0]
+                if count == 0:
+                    logger.error("Cannot set video content hash enabled: DatabaseMetadata row (id=1) does not exist!")
+                    return False
+
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET video_content_hash_enabled = ?
+                    WHERE id = 1
+                """, (1 if enabled else 0,))
+
+                rows_affected = cursor.rowcount
+                conn.commit()
+
+                if rows_affected > 0:
+                    logger.info(f"Video content hashing {'ENABLED' if enabled else 'DISABLED'} successfully")
+                    return True
+                else:
+                    logger.warning("UPDATE returned 0 rows affected - row may not exist")
+                    return False
+
+        except Exception as e:
+            logger.error(f"Failed to set video content hash enabled state: {e}", exc_info=True)
             return False
 
     # -------------------------------------------------------------------------

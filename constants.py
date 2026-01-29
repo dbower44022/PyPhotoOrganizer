@@ -274,3 +274,25 @@ PREFETCH_BEFORE_COUNT = 50
 
 # Number of items to prefetch after visible area
 PREFETCH_AFTER_COUNT = 100
+
+
+# ============================================================================
+# VIDEO CONTENT HASHING CONSTANTS
+# ============================================================================
+
+# Number of frames to extract for video content hashing
+VIDEO_CONTENT_HASH_FRAME_COUNT = 5
+
+# Timestamps (as percentage of video duration) for frame extraction
+# Extracts frames at 10%, 30%, 50%, 70%, and 90% of video duration
+VIDEO_CONTENT_HASH_TIMESTAMPS = [0.10, 0.30, 0.50, 0.70, 0.90]
+
+# Frame size for perceptual hashing (resized to NxN grayscale)
+VIDEO_CONTENT_HASH_FRAME_SIZE = 64
+
+# Duration tolerance in seconds for quick filter before visual comparison
+# Videos must have durations within this tolerance to be considered potential duplicates
+VIDEO_CONTENT_HASH_DURATION_TOLERANCE = 1.0
+
+# Timeout for frame extraction operations (in seconds)
+VIDEO_CONTENT_HASH_EXTRACTION_TIMEOUT = 30

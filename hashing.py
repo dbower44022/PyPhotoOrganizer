@@ -213,6 +213,106 @@ def hash_image_content(file_path: str) -> Optional[str]:
         return None
 
 
+def hash_video_content(file_path: str) -> Optional[str]:
+    """
+    Calculate a perceptual hash signature for video content.
+
+    This hash is based on visual content of the video, allowing detection of
+    duplicate videos even when they have been re-encoded, transcoded, or have
+    different metadata. The algorithm:
+
+    1. Extracts 5 frames at fixed timestamps (10%, 30%, 50%, 70%, 90% of duration)
+    2. Resizes each frame to 64x64 grayscale
+    3. Computes perceptual hash (pHash) for each frame using imagehash
+    4. Concatenates the pHash strings and computes SHA-256 of the result
+
+    Parameters:
+        file_path (str): Path to the video file
+
+    Returns:
+        str or None: SHA-256 hex digest of concatenated pHashes, or None for:
+            - Non-video files
+            - Files that fail to process
+            - Videos shorter than minimum duration
+            - ffmpeg not available
+    """
+    # Check if file is a video
+    video_extensions = set(ext.lower() for ext in constants.VIDEO_EXTENSIONS)
+    file_ext = os.path.splitext(file_path)[1].lower()
+    if file_ext not in video_extensions:
+        logger.debug(f"Skipping video content hash for non-video file: {file_path}")
+        return None
+
+    try:
+        # Import imagehash - gracefully handle if not installed
+        try:
+            import imagehash
+        except ImportError:
+            logger.warning("imagehash library not installed - video content hashing disabled")
+            return None
+
+        # Import video thumbnail extractor
+        from video_thumbnail import VideoThumbnailExtractor
+
+        extractor = VideoThumbnailExtractor()
+
+        # Check if ffmpeg is available
+        if not extractor.is_available():
+            logger.debug(f"ffmpeg not available - skipping video content hash for {file_path}")
+            return None
+
+        # Get video metadata to determine duration
+        metadata = extractor.get_video_metadata(file_path)
+        if not metadata or metadata.duration <= 0:
+            logger.debug(f"Could not get video duration for {file_path}")
+            return None
+
+        # Skip very short videos (less than 1 second)
+        if metadata.duration < 1.0:
+            logger.debug(f"Video too short for content hashing: {file_path} ({metadata.duration}s)")
+            return None
+
+        # Extract frames at specified timestamps and compute pHashes
+        frame_hashes = []
+        for timestamp_pct in constants.VIDEO_CONTENT_HASH_TIMESTAMPS:
+            timestamp = metadata.duration * timestamp_pct
+
+            # Extract frame as PIL Image
+            frame = extractor.extract_thumbnail_pil(
+                file_path,
+                size=constants.VIDEO_CONTENT_HASH_FRAME_SIZE,
+                timestamp=timestamp
+            )
+
+            if frame is None:
+                logger.debug(f"Failed to extract frame at {timestamp}s from {file_path}")
+                continue
+
+            # Convert to grayscale for consistent hashing
+            if frame.mode != 'L':
+                frame = frame.convert('L')
+
+            # Compute perceptual hash
+            phash = imagehash.phash(frame)
+            frame_hashes.append(str(phash))
+
+        # Need at least 3 frames for a valid signature
+        if len(frame_hashes) < 3:
+            logger.debug(f"Not enough frames extracted from {file_path} ({len(frame_hashes)}/{constants.VIDEO_CONTENT_HASH_FRAME_COUNT})")
+            return None
+
+        # Concatenate pHashes and compute final SHA-256
+        combined_hash_str = '|'.join(frame_hashes)
+        video_content_hash = hashlib.sha256(combined_hash_str.encode()).hexdigest()
+
+        logger.debug(f"Video content hash for {file_path}: {video_content_hash[:16]}... (from {len(frame_hashes)} frames)")
+        return video_content_hash
+
+    except Exception as e:
+        logger.warning(f"Failed to compute video content hash for {file_path}: {e}")
+        return None
+
+
 def should_use_partial_hash(file_size: int) -> bool:
     """
     Determine if partial hashing should be used for a file.

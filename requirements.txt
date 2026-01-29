@@ -13,6 +13,9 @@ pillow-heif>=0.13.0
 # Progress bars for long-running operations
 tqdm>=4.65.0
 
+# Perceptual image hashing for content-based duplicate detection
+imagehash>=4.3.1
+
 # GUI framework for graphical user interface
 PySide6>=6.4.0
 

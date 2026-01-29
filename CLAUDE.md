@@ -124,7 +124,8 @@ See [CLAUDE_DATABASE.md](CLAUDE_DATABASE.md) for full schema details.
 | Feature | Description | Details |
 |---------|-------------|---------|
 | Two-Stage Hashing | Partial hash (16KB) for large files, full hash on match | Built-in |
-| Content Hashing | Pixel-based duplicate detection | [CLAUDE_FEATURES.md](CLAUDE_FEATURES.md) |
+| Content Hashing | Pixel-based duplicate detection for images | [CLAUDE_FEATURES.md](CLAUDE_FEATURES.md) |
+| Video Content Hashing | Perceptual hash-based duplicate detection for videos | [CLAUDE_FEATURES.md](CLAUDE_FEATURES.md) |
 | Metadata Upgrades | Replace archive files when duplicate has better EXIF | [CLAUDE_FEATURES.md](CLAUDE_FEATURES.md) |
 | Override Skip | Import previously filtered files | [CLAUDE_FEATURES.md](CLAUDE_FEATURES.md) |
 | Album Association | Auto-add to albums during import | [CLAUDE_FEATURES.md](CLAUDE_FEATURES.md) |
@@ -216,7 +217,7 @@ with profile_block("Database query", logger):
 7. **Callbacks return stop signal** - `progress_callback()` returns `True` to stop
 8. **EXIF orientation** - use `ImageOps.exif_transpose()` for display
 9. **Config passed to worker** - database settings must be in config dict
-10. **Content hashing images only** - `hash_image_content()` returns `None` for videos
+10. **Content hashing images only** - `hash_image_content()` returns `None` for videos; use `hash_video_content()` for videos
 11. **Dialog worker cleanup** - must implement `closeEvent` with `worker.wait()` (see [CLAUDE_WORKERS.md](CLAUDE_WORKERS.md))
 12. **Large byte values** - use `Signal(object)` not `Signal(int)` for >2GB
 13. **Metadata upgrades protect user edits** - files with `revision_reason='date_correction'` never replaced

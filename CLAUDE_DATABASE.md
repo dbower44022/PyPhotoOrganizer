@@ -56,6 +56,13 @@ All tables in SQLite database (default: `PhotoDB.db`):
 - New table `FileLocations`: tracks where files exist (local, cloud, both)
 - New table `CloudUploadQueue`: offline-capable upload queue with retry logic
 
+### Schema v9
+- Added video content hashing for perceptual duplicate detection
+- New `UniquePhotos` column: `video_content_hash` (perceptual hash of video frames)
+- New `DatabaseMetadata` column: `video_content_hash_enabled`
+- New `FileProcessingLog` column: `video_content_duplicate_of_hash`
+- New index: `idx_unique_photos_video_content` on `video_content_hash`
+
 ## Connection Pattern
 
 All modules use WAL mode for concurrent access:
@@ -87,11 +94,15 @@ CREATE TABLE UniquePhotos (
     date_source TEXT,
     date_reliable INTEGER DEFAULT 1,
     metadata_quality_score INTEGER DEFAULT 0,
+    -- Schema v9
+    video_content_hash TEXT,  -- Perceptual hash for video duplicates
     -- Revision tracking
     revised_photo TEXT,  -- FK to parent file_hash
     revision_reason TEXT,
     revision_timestamp TEXT
 );
+-- Index for video content duplicate lookups
+CREATE INDEX idx_unique_photos_video_content ON UniquePhotos(video_content_hash);
 ```
 
 ### PendingOperations (Crash Recovery)

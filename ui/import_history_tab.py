@@ -119,6 +119,8 @@ class FileLogTableModel(QAbstractTableModel):
                     return QBrush(QColor('orange'))
                 elif status == 'content_duplicate':
                     return QBrush(QColor('#9966CC'))  # Purple for content duplicates
+                elif status == 'video_content_duplicate':
+                    return QBrush(QColor('#CC6699'))  # Magenta-purple for video content duplicates
                 elif status == 'upgraded':
                     return QBrush(QColor('#0088CC'))  # Blue for metadata upgrades
 
@@ -867,6 +869,7 @@ class ImportHistoryTab(QWidget):
             "New Files (Added to Archive)",
             "Duplicates",
             "Content Duplicates",
+            "Video Content Duplicates",
             "Metadata Upgrades",
             "Filtered (Icons/Thumbnails)",
             "Recently Overridden",
@@ -1333,6 +1336,7 @@ class ImportHistoryTab(QWidget):
                 self._new_files_logs = []
                 self._duplicate_logs = []
                 self._content_duplicate_logs = []
+                self._video_content_duplicate_logs = []
                 self._metadata_upgrade_logs = []
                 self._filtered_logs = []
                 self._external_modification_logs = []
@@ -1352,6 +1356,8 @@ class ImportHistoryTab(QWidget):
                         self._duplicate_logs.append(log)
                     elif op == 'content_duplicate_detected':
                         self._content_duplicate_logs.append(log)
+                    elif op == 'video_content_duplicate_detected':
+                        self._video_content_duplicate_logs.append(log)
                     elif op == 'metadata_upgrade':
                         self._metadata_upgrade_logs.append(log)
                     elif op == 'skip_filtered':
@@ -1367,7 +1373,7 @@ class ImportHistoryTab(QWidget):
                     if status == 'failed':
                         self._error_logs.append(log)
 
-            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Content Duplicates: {len(self._content_duplicate_logs)}, Metadata Upgrades: {len(self._metadata_upgrade_logs)}, Filtered: {len(self._filtered_logs)}, External Mods: {len(self._external_modification_logs)}, Bulk Delete: {len(self._bulk_delete_logs)}, Archive Recovery: {len(self._archive_recovery_logs)}, Errors: {len(self._error_logs)}")
+            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Content Duplicates: {len(self._content_duplicate_logs)}, Video Content Duplicates: {len(self._video_content_duplicate_logs)}, Metadata Upgrades: {len(self._metadata_upgrade_logs)}, Filtered: {len(self._filtered_logs)}, External Mods: {len(self._external_modification_logs)}, Bulk Delete: {len(self._bulk_delete_logs)}, Archive Recovery: {len(self._archive_recovery_logs)}, Errors: {len(self._error_logs)}")
 
             # Enrich duplicate logs with archive file paths
             with profile_block("Enrich duplicate logs with archive paths", logger):
@@ -1405,6 +1411,7 @@ class ImportHistoryTab(QWidget):
                 self._new_files_logs = []
                 self._duplicate_logs = []
                 self._content_duplicate_logs = []
+                self._video_content_duplicate_logs = []
                 self._metadata_upgrade_logs = []
                 self._filtered_logs = []
                 self._external_modification_logs = []
@@ -1424,6 +1431,8 @@ class ImportHistoryTab(QWidget):
                         self._duplicate_logs.append(log)
                     elif op == 'content_duplicate_detected':
                         self._content_duplicate_logs.append(log)
+                    elif op == 'video_content_duplicate_detected':
+                        self._video_content_duplicate_logs.append(log)
                     elif op == 'metadata_upgrade':
                         self._metadata_upgrade_logs.append(log)
                     elif op == 'skip_filtered':
@@ -1439,7 +1448,7 @@ class ImportHistoryTab(QWidget):
                     if status == 'failed':
                         self._error_logs.append(log)
 
-            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Content Duplicates: {len(self._content_duplicate_logs)}, Metadata Upgrades: {len(self._metadata_upgrade_logs)}, Filtered: {len(self._filtered_logs)}, External Mods: {len(self._external_modification_logs)}, Bulk Delete: {len(self._bulk_delete_logs)}, Archive Recovery: {len(self._archive_recovery_logs)}, Errors: {len(self._error_logs)}")
+            logger.info(f"📊 Filtered views - New: {len(self._new_files_logs)}, Duplicates: {len(self._duplicate_logs)}, Content Duplicates: {len(self._content_duplicate_logs)}, Video Content Duplicates: {len(self._video_content_duplicate_logs)}, Metadata Upgrades: {len(self._metadata_upgrade_logs)}, Filtered: {len(self._filtered_logs)}, External Mods: {len(self._external_modification_logs)}, Bulk Delete: {len(self._bulk_delete_logs)}, Archive Recovery: {len(self._archive_recovery_logs)}, Errors: {len(self._error_logs)}")
 
             # Enrich duplicate logs with archive file paths
             with profile_block("Enrich duplicate logs with archive paths", logger):
@@ -1472,6 +1481,8 @@ class ImportHistoryTab(QWidget):
             self._model.setData(self._duplicate_logs)
         elif show == "Content Duplicates":
             self._model.setData(getattr(self, '_content_duplicate_logs', []))
+        elif show == "Video Content Duplicates":
+            self._model.setData(getattr(self, '_video_content_duplicate_logs', []))
         elif show == "Metadata Upgrades":
             self._model.setData(getattr(self, '_metadata_upgrade_logs', []))
         elif show == "Filtered (Icons/Thumbnails)":
@@ -1698,9 +1709,9 @@ class ImportHistoryTab(QWidget):
             logger.error(f"Failed to enrich duplicate logs: {e}", exc_info=True)
 
     def _is_duplicate_log(self, log: dict) -> bool:
-        """Check if a log entry is a duplicate (regular or content duplicate)."""
+        """Check if a log entry is a duplicate (regular, content, or video content duplicate)."""
         operation = log.get('operation', '')
-        return operation in ('duplicate detected', 'content_duplicate_detected')
+        return operation in ('duplicate detected', 'content_duplicate_detected', 'video_content_duplicate_detected')
 
     def _compare_selected_duplicate(self):
         """Open comparison dialog for the selected duplicate entry."""
@@ -1709,7 +1720,7 @@ class ImportHistoryTab(QWidget):
             QMessageBox.information(
                 self, "No Selection",
                 "Please select a duplicate entry to compare.\n\n"
-                "Tip: Switch to 'Duplicates' or 'Content Duplicates' view "
+                "Tip: Switch to 'Duplicates', 'Content Duplicates', or 'Video Content Duplicates' view "
                 "and select a file to compare."
             )
             return
@@ -1726,7 +1737,7 @@ class ImportHistoryTab(QWidget):
                 self, "Not a Duplicate",
                 "The selected file is not a duplicate.\n\n"
                 "Comparison is only available for files marked as duplicates. "
-                "Switch to 'Duplicates' or 'Content Duplicates' view to see duplicate files."
+                "Switch to 'Duplicates', 'Content Duplicates', or 'Video Content Duplicates' view to see duplicate files."
             )
             return
 

@@ -30,7 +30,7 @@ from typing import Dict, List, Optional
 import constants
 
 # Current schema version
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Schema version history
 SCHEMA_VERSION_HISTORY = {
@@ -41,7 +41,8 @@ SCHEMA_VERSION_HISTORY = {
     5: "Unified schema - all hashes in UniquePhotos",
     6: "Relative paths for portable archives",
     7: "Metadata quality tracking (date_source, date_reliable, metadata_quality_score)",
-    8: "Cloud storage support (CloudSyncStatus, storage backend tracking)"
+    8: "Cloud storage support (CloudSyncStatus, storage backend tracking)",
+    9: "Video content hashing (video_content_hash column)"
 }
 
 
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS UniquePhotos (
     partial_hash TEXT,
     partial_hash_bytes INTEGER,
     content_hash TEXT,
+    video_content_hash TEXT,
     file_size INTEGER,
     revised_photo TEXT,
     revision_reason TEXT,
@@ -78,6 +80,7 @@ UNIQUE_PHOTOS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_unique_photos_month ON UniquePhotos(create_month)",
     "CREATE INDEX IF NOT EXISTS idx_unique_photos_day ON UniquePhotos(create_day)",
     "CREATE INDEX IF NOT EXISTS idx_unique_photos_content ON UniquePhotos(content_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_unique_photos_video_content ON UniquePhotos(video_content_hash)",
     "CREATE INDEX IF NOT EXISTS idx_unique_photos_revised ON UniquePhotos(revised_photo)",
     "CREATE INDEX IF NOT EXISTS idx_unique_photos_storage ON UniquePhotos(storage_type)",
     "CREATE INDEX IF NOT EXISTS idx_unique_photos_date_source ON UniquePhotos(date_source)",
@@ -100,7 +103,7 @@ CREATE TABLE IF NOT EXISTS ArchiveMetadata (
     total_photos INTEGER DEFAULT 0,
     last_used TEXT,
     created_date TEXT,
-    schema_version INTEGER DEFAULT 8,
+    schema_version INTEGER DEFAULT 9,
     organization_template TEXT DEFAULT '{year}/{month}/{day}',
     file_type_organization TEXT DEFAULT 'combined',
     enable_file_rename INTEGER DEFAULT 0,

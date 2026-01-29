@@ -35,6 +35,10 @@ if TYPE_CHECKING:
     from video_thumbnail import VideoThumbnailExtractor
 from PySide6.QtGui import QPixmap, QImage, QColor, QPainter, QFont
 from PIL import Image, ImageOps
+import pillow_heif
+
+# Register HEIF/HEIC opener so PIL can handle .heic files
+pillow_heif.register_heif_opener()
 
 logger = logging.getLogger(__name__)
 

@@ -206,6 +206,60 @@ class SystemSettingsTab(QWidget):
         # Initialize backfill worker reference
         self._backfill_worker = None
 
+        # Video Content-Based Duplicate Detection Settings
+        video_content_hash_group = QGroupBox("Video Content-Based Duplicate Detection")
+        video_content_hash_group.setStyleSheet(self.groupbox_style)
+        video_content_hash_layout = QVBoxLayout()
+
+        video_content_hash_desc = QLabel(
+            "Video content hashing detects visually identical videos even when re-encoded, "
+            "transcoded, or with different metadata. Uses perceptual hashing of key frames."
+        )
+        video_content_hash_desc.setWordWrap(True)
+        video_content_hash_desc.setStyleSheet("font-style: italic; color: gray; padding: 5px;")
+        video_content_hash_layout.addWidget(video_content_hash_desc)
+
+        self.video_content_hash_enabled_check = QCheckBox("Enable video content duplicate detection during import")
+        self.video_content_hash_enabled_check.setChecked(True)
+        self.video_content_hash_enabled_check.stateChanged.connect(self.on_video_content_hash_enabled_changed)
+        video_content_hash_layout.addWidget(self.video_content_hash_enabled_check)
+
+        # Video backfill section
+        video_backfill_layout = QHBoxLayout()
+        self.video_backfill_btn = QPushButton("Calculate Video Content Hashes for Existing Files")
+        self.video_backfill_btn.setToolTip("Calculate video content hashes for archive videos that don't have them yet")
+        self.video_backfill_btn.clicked.connect(self.start_video_content_hash_backfill)
+        video_backfill_layout.addWidget(self.video_backfill_btn)
+
+        self.cancel_video_backfill_btn = QPushButton("Cancel")
+        self.cancel_video_backfill_btn.setToolTip("Cancel the video content hash calculation")
+        self.cancel_video_backfill_btn.clicked.connect(self.cancel_video_content_hash_backfill)
+        self.cancel_video_backfill_btn.hide()
+        video_backfill_layout.addWidget(self.cancel_video_backfill_btn)
+
+        video_backfill_layout.addStretch()
+        video_content_hash_layout.addLayout(video_backfill_layout)
+
+        # Video progress bar (hidden by default)
+        from PySide6.QtWidgets import QProgressBar
+        self.video_backfill_progress = QProgressBar()
+        self.video_backfill_progress.setRange(0, 100)
+        self.video_backfill_progress.setValue(0)
+        self.video_backfill_progress.hide()
+        video_content_hash_layout.addWidget(self.video_backfill_progress)
+
+        # Video status label
+        self.video_backfill_status_label = QLabel("")
+        self.video_backfill_status_label.setStyleSheet("color: #666;")
+        self.video_backfill_status_label.hide()
+        video_content_hash_layout.addWidget(self.video_backfill_status_label)
+
+        video_content_hash_group.setLayout(video_content_hash_layout)
+        layout.addWidget(video_content_hash_group)
+
+        # Initialize video backfill worker reference
+        self._video_backfill_worker = None
+
         # Metadata-Based Archive Upgrade Settings
         metadata_upgrade_group = QGroupBox("Metadata-Based Archive Upgrades")
         metadata_upgrade_group.setStyleSheet(self.groupbox_style)
@@ -506,6 +560,12 @@ class SystemSettingsTab(QWidget):
         self.metadata_upgrade_enabled_check.blockSignals(True)
         self.metadata_upgrade_enabled_check.setChecked(metadata_upgrade_enabled)
         self.metadata_upgrade_enabled_check.blockSignals(False)
+
+        # Load video content hash settings
+        video_content_hash_enabled = db_metadata.is_video_content_hash_enabled()
+        self.video_content_hash_enabled_check.blockSignals(True)
+        self.video_content_hash_enabled_check.setChecked(video_content_hash_enabled)
+        self.video_content_hash_enabled_check.blockSignals(False)
 
     def refresh_database_statistics(self):
         """Refresh the database statistics display."""
@@ -1062,6 +1122,162 @@ class SystemSettingsTab(QWidget):
 
         self._backfill_worker = None
 
+    # ========== Video Content Hash Methods ==========
+
+    def on_video_content_hash_enabled_changed(self, state):
+        """Handle video content hash enabled checkbox change."""
+        if not self.db_metadata:
+            return
+
+        enabled = state == Qt.Checked
+        success = self.db_metadata.set_video_content_hash_enabled(enabled)
+        if success:
+            logger.info(f"Video content hashing {'enabled' if enabled else 'disabled'}")
+        else:
+            logger.warning("Failed to save video content hash setting")
+            # Revert checkbox
+            self.video_content_hash_enabled_check.blockSignals(True)
+            self.video_content_hash_enabled_check.setChecked(not enabled)
+            self.video_content_hash_enabled_check.blockSignals(False)
+
+    def start_video_content_hash_backfill(self):
+        """Start the video content hash backfill process."""
+        if not self.db_metadata:
+            QMessageBox.warning(self, "No Database", "Please select a database first.")
+            return
+
+        # Check if already running
+        if self._video_backfill_worker is not None and self._video_backfill_worker.isRunning():
+            QMessageBox.information(self, "Already Running",
+                                   "Video content hash calculation is already in progress.")
+            return
+
+        # Confirm with user
+        reply = QMessageBox.question(
+            self, "Calculate Video Content Hashes",
+            "This will calculate video content hashes for all archive videos that don't have them yet.\n\n"
+            "This extracts key frames from each video and may take significantly longer than image hashing.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        # Import worker
+        from ui.video_content_hash_worker import VideoContentHashBackfillWorker
+
+        # Create and start worker
+        self._video_backfill_worker = VideoContentHashBackfillWorker(
+            database_path=self.db_metadata.database_path,
+            batch_size=50  # Lower batch size for videos due to higher processing cost
+        )
+
+        # Connect signals
+        self._video_backfill_worker.progress_update.connect(self._on_video_backfill_progress)
+        self._video_backfill_worker.status_update.connect(self._on_video_backfill_status)
+        self._video_backfill_worker.completed.connect(self._on_video_backfill_completed)
+        self._video_backfill_worker.error_occurred.connect(self._on_video_backfill_error)
+
+        # Update UI
+        self.video_backfill_btn.setEnabled(False)
+        self.cancel_video_backfill_btn.show()
+        self.video_backfill_progress.show()
+        self.video_backfill_progress.setValue(0)
+        self.video_backfill_status_label.setText("Starting...")
+        self.video_backfill_status_label.show()
+
+        # Start worker
+        self._video_backfill_worker.start()
+
+    def cancel_video_content_hash_backfill(self):
+        """Cancel the video content hash backfill process."""
+        if self._video_backfill_worker and self._video_backfill_worker.isRunning():
+            self._video_backfill_worker.stop()
+            self.video_backfill_status_label.setText("Cancelling...")
+
+    def _on_video_backfill_progress(self, current, total, filename):
+        """Handle video backfill progress update."""
+        if total > 0:
+            percent = int((current / total) * 100)
+            self.video_backfill_progress.setValue(percent)
+            self.video_backfill_status_label.setText(f"Processing {current}/{total}: {filename}")
+
+    def _on_video_backfill_status(self, message):
+        """Handle video backfill status update."""
+        self.video_backfill_status_label.setText(message)
+
+    def _on_video_backfill_completed(self, results):
+        """Handle video backfill completion."""
+        # Reset UI
+        self.video_backfill_btn.setEnabled(True)
+        self.cancel_video_backfill_btn.hide()
+        self.video_backfill_progress.hide()
+
+        status = results.get('status', 'unknown')
+        files_updated = results.get('files_updated', 0)
+        files_skipped = results.get('files_skipped', 0)
+        files_failed = results.get('files_failed', 0)
+        discovered_duplicates = results.get('discovered_duplicates', [])
+        dup_count = len(discovered_duplicates)
+
+        if status == 'completed':
+            status_text = f"Complete: {files_updated} updated, {files_skipped} skipped, {files_failed} failed"
+            if dup_count > 0:
+                status_text += f", {dup_count} duplicates discovered"
+            self.video_backfill_status_label.setText(status_text)
+
+            if files_updated > 0 or dup_count > 0:
+                message = (
+                    f"Video content hash calculation complete!\n\n"
+                    f"Videos updated: {files_updated}\n"
+                    f"Videos skipped (missing/failed): {files_skipped}\n"
+                    f"Videos failed: {files_failed}"
+                )
+
+                if dup_count > 0:
+                    message += f"\n\nDiscovered {dup_count} video content duplicate(s)!\n"
+                    message += "These are videos with identical visual content but different file hashes.\n\n"
+
+                    # Show up to 5 examples
+                    examples = discovered_duplicates[:5]
+                    for dup in examples:
+                        file_name = os.path.basename(dup['file_path'])
+                        dup_of_name = os.path.basename(dup['duplicate_of_path'])
+                        message += f"  - {file_name} matches {dup_of_name}\n"
+
+                    if dup_count > 5:
+                        message += f"  ... and {dup_count - 5} more\n"
+
+                    message += "\nYou can find these in the database by querying files with the same video_content_hash."
+
+                QMessageBox.information(self, "Video Backfill Complete", message)
+
+        elif status == 'cancelled':
+            status_text = f"Cancelled: {files_updated} videos updated before cancellation"
+            if dup_count > 0:
+                status_text += f", {dup_count} duplicates discovered"
+            self.video_backfill_status_label.setText(status_text)
+        else:
+            self.video_backfill_status_label.setText(f"Failed: {results.get('error', 'Unknown error')}")
+
+        self._video_backfill_worker = None
+
+    def _on_video_backfill_error(self, error_msg):
+        """Handle video backfill error."""
+        self.video_backfill_btn.setEnabled(True)
+        self.cancel_video_backfill_btn.hide()
+        self.video_backfill_progress.hide()
+        self.video_backfill_status_label.setText(f"Error: {error_msg}")
+
+        QMessageBox.critical(
+            self, "Video Backfill Error",
+            f"Video content hash calculation failed:\n\n{error_msg}"
+        )
+
+        self._video_backfill_worker = None
+
     def cleanup_workers(self):
         """
         Stop and wait for any running worker threads.
@@ -1074,3 +1290,9 @@ class SystemSettingsTab(QWidget):
             self._backfill_worker.stop()
             self._backfill_worker.wait()
             logger.info("Content hash backfill worker stopped")
+
+        if self._video_backfill_worker and self._video_backfill_worker.isRunning():
+            logger.info("Stopping video content hash backfill worker before close...")
+            self._video_backfill_worker.stop()
+            self._video_backfill_worker.wait()
+            logger.info("Video content hash backfill worker stopped")

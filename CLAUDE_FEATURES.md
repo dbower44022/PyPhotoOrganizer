@@ -114,6 +114,108 @@ def hash_image_content(file_path):
 
 ---
 
+## Video Content-Based (Perceptual) Hashing (Schema v9)
+
+Detects visually identical videos even when re-encoded, transcoded, or with different metadata.
+
+### Overview
+
+- **Default:** Enabled (configurable in System Settings)
+- **Dependency:** `imagehash>=4.3.1` for perceptual hashing
+- **Requirement:** `ffmpeg` for frame extraction
+- **Storage:** `UniquePhotos.video_content_hash`
+
+### Algorithm
+
+Two-stage approach for efficiency:
+
+1. **Quick Filter** (future enhancement): Duration (±1s) + Resolution match
+2. **Visual Comparison**: Extract 5 frames → pHash each → combine into signature
+
+```python
+def hash_video_content(file_path):
+    # Extract 5 frames at 10%, 30%, 50%, 70%, 90% of duration
+    extractor = VideoThumbnailExtractor()
+    metadata = extractor.get_video_metadata(file_path)
+
+    frame_hashes = []
+    for timestamp_pct in [0.10, 0.30, 0.50, 0.70, 0.90]:
+        timestamp = metadata.duration * timestamp_pct
+        frame = extractor.extract_thumbnail_pil(file_path, size=64, timestamp=timestamp)
+        frame = frame.convert('L')  # Grayscale
+        phash = imagehash.phash(frame)
+        frame_hashes.append(str(phash))
+
+    # Combine and hash
+    combined = '|'.join(frame_hashes)
+    return hashlib.sha256(combined.encode()).hexdigest()
+```
+
+### Key Behaviors
+
+- Returns `None` for images (videos only)
+- Returns `None` if ffmpeg not available (graceful degradation)
+- Requires at least 3 frames for valid signature
+- Skips videos shorter than 1 second
+- Uses `VideoThumbnailExtractor` from `video_thumbnail.py`
+
+### Configuration Constants (`constants.py`)
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `VIDEO_CONTENT_HASH_FRAME_COUNT` | 5 | Frames to extract |
+| `VIDEO_CONTENT_HASH_TIMESTAMPS` | [0.10, 0.30, 0.50, 0.70, 0.90] | Extraction points |
+| `VIDEO_CONTENT_HASH_FRAME_SIZE` | 64 | Frame resize (NxN) |
+| `VIDEO_CONTENT_HASH_DURATION_TOLERANCE` | 1.0 | Duration match tolerance (seconds) |
+| `VIDEO_CONTENT_HASH_EXTRACTION_TIMEOUT` | 30 | Timeout per frame (seconds) |
+
+### Database Methods (PhotoDatabase)
+
+- `has_video_content_hash(video_content_hash)` - Check existence
+- `get_files_by_video_content_hash(video_content_hash)` - Get matching files
+- `update_video_content_hash(file_hash, video_content_hash)` - Update record
+- `get_videos_without_content_hash(limit)` - For backfill (default limit: 50)
+- `count_videos_without_content_hash()` - Progress display
+
+### Settings (DatabaseMetadata)
+
+- `is_video_content_hash_enabled()` - Check if enabled (default: true)
+- `set_video_content_hash_enabled(enabled)` - Toggle
+
+### UI Integration
+
+- **System Settings**: Enable checkbox + "Calculate Video Content Hashes for Existing Files" button
+- **Import History**: "Video Content Duplicates" filter (magenta-purple #CC6699)
+- **Audit Logging**: Operation `'video_content_duplicate_detected'`, status `'video_content_duplicate'`
+
+### Backfill Worker
+
+`VideoContentHashBackfillWorker` (`ui/video_content_hash_worker.py`):
+
+| Signal | Parameters | Description |
+|--------|------------|-------------|
+| `progress_update` | current, total, filename | Progress update |
+| `status_update` | message | Status text |
+| `completed` | dict (results) | Backfill finished |
+| `error_occurred` | error_msg | Critical error |
+
+**Results dict keys:** `status`, `files_processed`, `files_updated`, `files_skipped`, `files_failed`, `discovered_duplicates`, `was_cancelled`
+
+### Error Handling
+
+- **imagehash not installed**: Log warning, skip video content hashing, import continues
+- **ffmpeg not available**: Log debug, return None, import continues
+- **Frame extraction fails**: Return None, file processed without video content hash
+- **Database errors**: Log error, don't crash import
+
+### Performance Notes
+
+- Batch size: 50 videos (lower than images due to higher processing cost)
+- Memory: ~20KB per video (5 × 64×64 grayscale frames)
+- Frame extraction: Uses existing `VideoThumbnailExtractor` (ffmpeg)
+
+---
+
 ## Override Skip Feature
 
 Import files previously filtered out (skipped due to size/dimensions).

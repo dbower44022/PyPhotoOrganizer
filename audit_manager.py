@@ -112,6 +112,7 @@ class AuditManager:
             error_traceback TEXT,
             duplicate_of_hash TEXT,
             content_duplicate_of_hash TEXT,
+            video_content_duplicate_of_hash TEXT,
             filter_reason TEXT,
             filter_details TEXT,
             album_name TEXT,
@@ -245,6 +246,7 @@ class AuditManager:
                     ("sub_album_name", "TEXT"),
                     ("content_hash", "TEXT"),
                     ("content_duplicate_of_hash", "TEXT"),
+                    ("video_content_duplicate_of_hash", "TEXT"),
                 ]
 
                 for col_name, col_type in new_columns:
@@ -550,6 +552,7 @@ class AuditManager:
         error_traceback: Optional[str] = None,
         duplicate_of_hash: Optional[str] = None,
         content_duplicate_of_hash: Optional[str] = None,
+        video_content_duplicate_of_hash: Optional[str] = None,
         filter_reason: Optional[str] = None,
         filter_details: Optional[Dict] = None,
         album_name: Optional[str] = None,
@@ -562,8 +565,9 @@ class AuditManager:
         Args:
             session_id: Current session ID
             source_path: Source file path
-            operation: 'copy', 'move', 'duplicate detected', 'content_duplicate_detected', 'skip_filtered', 'error'
-            status: 'success', 'failed', 'skipped', 'duplicate', 'content_duplicate'
+            operation: 'copy', 'move', 'duplicate detected', 'content_duplicate_detected',
+                      'video_content_duplicate_detected', 'skip_filtered', 'error'
+            status: 'success', 'failed', 'skipped', 'duplicate', 'content_duplicate', 'video_content_duplicate'
             file_hash: Full SHA-256 hash
             partial_hash: Partial hash (first 16KB)
             content_hash: Content (pixel) hash for images
@@ -578,6 +582,7 @@ class AuditManager:
             error_traceback: Full traceback for debugging
             duplicate_of_hash: Hash of original file (if duplicate)
             content_duplicate_of_hash: Hash of file with matching content (if content duplicate)
+            video_content_duplicate_of_hash: Hash of video with matching visual content (if video content duplicate)
             filter_reason: Why file was filtered
             filter_details: Detailed filter results
             album_name: Name of album file was added to (None if no album)
@@ -600,15 +605,15 @@ class AuditManager:
                         (session_id, source_path, destination_path, file_hash, partial_hash, content_hash,
                          operation, status, file_size, creation_date, date_source, date_reliable,
                          process_timestamp, duration_ms, error_code, error_message, error_traceback,
-                         duplicate_of_hash, content_duplicate_of_hash, filter_reason, filter_details,
-                         album_name, album_path, sub_album_name)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         duplicate_of_hash, content_duplicate_of_hash, video_content_duplicate_of_hash,
+                         filter_reason, filter_details, album_name, album_path, sub_album_name)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         session_id, source_path, destination_path, file_hash, partial_hash, content_hash,
                         operation, status, file_size, creation_date, date_source,
                         1 if date_reliable else 0, process_timestamp, duration_ms,
                         error_code, error_message, error_traceback, duplicate_of_hash,
-                        content_duplicate_of_hash, filter_reason,
+                        content_duplicate_of_hash, video_content_duplicate_of_hash, filter_reason,
                         json.dumps(filter_details) if filter_details else None,
                         album_name, album_path, sub_album_name
                     ))
@@ -1288,8 +1293,8 @@ class AuditManager:
                     'source_path', 'destination_path', 'operation', 'status',
                     'file_hash', 'content_hash', 'file_size', 'creation_date', 'date_source',
                     'duration_ms', 'error_code', 'error_message',
-                    'duplicate_of_hash', 'content_duplicate_of_hash', 'filter_reason',
-                    'album_name', 'album_path', 'sub_album_name'
+                    'duplicate_of_hash', 'content_duplicate_of_hash', 'video_content_duplicate_of_hash',
+                    'filter_reason', 'album_name', 'album_path', 'sub_album_name'
                 ])
 
                 for file_log in files:
@@ -1308,6 +1313,7 @@ class AuditManager:
                         file_log.get('error_message', ''),
                         file_log.get('duplicate_of_hash', ''),
                         file_log.get('content_duplicate_of_hash', ''),
+                        file_log.get('video_content_duplicate_of_hash', ''),
                         file_log.get('filter_reason', ''),
                         file_log.get('album_name', ''),
                         file_log.get('album_path', ''),

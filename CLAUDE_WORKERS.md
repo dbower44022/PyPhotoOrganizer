@@ -26,7 +26,8 @@ class MyWorker(QThread):
 |--------|------|---------|---------------|
 | `ProcessingWorker` | `ui/worker.py` | Main import processing | `scanning_progress`, `processing_progress`, `organizing_progress`, `stage_changed` |
 | `ReprocessWorker` | `ui/reprocess_worker.py` | Reprocess/override skip | `file_processed(str, str)` for real-time updates |
-| `ContentHashBackfillWorker` | `ui/content_hash_worker.py` | Backfill content hashes | - |
+| `ContentHashBackfillWorker` | `ui/content_hash_worker.py` | Backfill image content hashes | - |
+| `VideoContentHashBackfillWorker` | `ui/video_content_hash_worker.py` | Backfill video content hashes | - |
 | `ArchiveChangeScannerWorker` | `ui/archive_change_scanner_worker.py` | Detect external modifications | `file_modified(dict)` |
 | `BulkDeleteWorker` | `ui/bulk_delete_worker.py` | Bulk delete matching files | `scan_completed(dict)`, `delete_completed(dict)` |
 | `ArchiveRecoveryWorker` | `ui/archive_recovery_worker.py` | Recover orphaned files | `file_recovered(dict)` |
@@ -70,7 +71,7 @@ Tabs and main windows provide `cleanup_workers()` called from main window `close
 | Component | Worker(s) | File |
 |-----------|-----------|------|
 | `MainWindow` | `self.worker` | `ui/main_window.py` |
-| `SystemSettingsTab` | `self._backfill_worker` | `ui/system_settings_tab.py` |
+| `SystemSettingsTab` | `self._backfill_worker`, `self._video_backfill_worker` | `ui/system_settings_tab.py` |
 | `ImportHistoryTab` | `self.reprocess_worker`, `self.override_skip_worker` | `ui/import_history_tab.py` |
 | `ArchiveMaintenanceTab` | `self._backup_worker`, `self._verification_worker`, `self._storage_stats_worker`, `self._change_scanner_worker` | `ui/archive_maintenance_tab.py` |
 | `PhotoReviewWindow` | `self.delete_worker` | `photo_review/review_window.py` |

@@ -474,10 +474,21 @@ class PhotoDatabase:
                 logger.info("Upgrading database to Schema v7: adding metadata_quality_score column")
                 self.cursor.execute("ALTER TABLE UniquePhotos ADD COLUMN metadata_quality_score INTEGER DEFAULT 0")
 
+            # Schema v9: Add video_content_hash column for video duplicate detection
+            if 'video_content_hash' not in columns:
+                logger.info("Upgrading database to Schema v9: adding video_content_hash column")
+                self.cursor.execute("ALTER TABLE UniquePhotos ADD COLUMN video_content_hash TEXT")
+
             # Create index for content hash lookups
             self.cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_unique_content_hash
                 ON UniquePhotos(content_hash)
+            ''')
+
+            # Schema v9: Create index for video content hash lookups
+            self.cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_unique_video_content_hash
+                ON UniquePhotos(video_content_hash)
             ''')
 
             # Schema v6: Create index for storage_type lookups
@@ -525,9 +536,10 @@ class PhotoDatabase:
     def insert_unique_photo(self, file_hash, file_path, create_datetime, create_year, create_month, create_day,
                            partial_hash=None, partial_hash_bytes=None, file_size=None, source_path=None,
                            content_hash=None, relative_path=None, storage_type=None,
-                           date_source=None, date_reliable=True, metadata_quality_score=None):
+                           date_source=None, date_reliable=True, metadata_quality_score=None,
+                           video_content_hash=None):
         """
-        Insert a new unique photo record into the database (Schema v7).
+        Insert a new unique photo record into the database (Schema v9).
 
         Parameters:
             file_hash (str): SHA-256 hash of the full file
@@ -546,23 +558,26 @@ class PhotoDatabase:
             date_source (str, optional): Source of the date: 'exif', 'exif_digitized', 'exif_gps', etc. (Schema v7)
             date_reliable (bool, optional): Whether the date is considered reliable (Schema v7)
             metadata_quality_score (int, optional): Computed metadata quality score 0-100 (Schema v7)
+            video_content_hash (str, optional): Perceptual hash of video content (Schema v9)
         """
         try:
-            # Insert into UniquePhotos (v7 schema with metadata quality tracking)
+            # Insert into UniquePhotos (v9 schema with video content hashing)
             # revised_photo=NULL, revision_reason=NULL (this is an original import, not a revision)
             self.cursor.execute(
                 """INSERT INTO UniquePhotos
                    (file_hash, partial_hash, partial_hash_bytes, file_size, file_name, source_path,
                     revised_photo, revision_reason, revision_timestamp,
                     create_datetime, create_year, create_month, create_day, content_hash,
-                    relative_path, storage_type, date_source, date_reliable, metadata_quality_score)
-                   VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    relative_path, storage_type, date_source, date_reliable, metadata_quality_score,
+                    video_content_hash)
+                   VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (file_hash, partial_hash, partial_hash_bytes, file_size, file_path, source_path,
                  create_datetime, create_year, create_month, create_day, content_hash,
-                 relative_path, storage_type, date_source, 1 if date_reliable else 0, metadata_quality_score)
+                 relative_path, storage_type, date_source, 1 if date_reliable else 0, metadata_quality_score,
+                 video_content_hash)
             )
 
-            logger.debug(f"Inserted unique photo: {file_path} (partial_hash: {partial_hash is not None}, source: {source_path}, content_hash: {content_hash is not None}, relative_path: {relative_path}, date_source: {date_source})")
+            logger.debug(f"Inserted unique photo: {file_path} (partial_hash: {partial_hash is not None}, source: {source_path}, content_hash: {content_hash is not None}, video_content_hash: {video_content_hash is not None}, relative_path: {relative_path}, date_source: {date_source})")
         except sqlite3.IntegrityError:
             # Hash already exists (PRIMARY KEY constraint)
             logger.warning(f"Attempted to insert duplicate hash: {file_hash}")
@@ -766,6 +781,146 @@ class PhotoDatabase:
             return result[0] if result else 0
         except Exception as e:
             logger.exception(f"Failed to count files without content hash: {e}")
+            raise
+
+    # =========================================================================
+    # Video Content Hash Methods (Schema v9)
+    # =========================================================================
+
+    def has_video_content_hash(self, video_content_hash):
+        """
+        Check if a video content hash already exists in the database.
+
+        Parameters:
+            video_content_hash (str): Video content hash to check
+
+        Returns:
+            bool: True if video content hash exists, False otherwise
+        """
+        if video_content_hash is None:
+            return False
+        try:
+            self.cursor.execute(
+                "SELECT 1 FROM UniquePhotos WHERE video_content_hash = ? LIMIT 1",
+                (video_content_hash,)
+            )
+            result = self.cursor.fetchone()
+            return result is not None
+        except Exception as e:
+            logger.exception(f"Failed to check if video content hash exists: {e}")
+            raise
+
+    def get_files_by_video_content_hash(self, video_content_hash):
+        """
+        Get all files that have the specified video content hash.
+
+        Parameters:
+            video_content_hash (str): Video content hash to look up
+
+        Returns:
+            list: List of dicts with file_hash, file_name, source_path for matching files
+        """
+        if video_content_hash is None:
+            return []
+        try:
+            self.cursor.execute(
+                """SELECT file_hash, file_name, source_path
+                   FROM UniquePhotos
+                   WHERE video_content_hash = ?""",
+                (video_content_hash,)
+            )
+            results = self.cursor.fetchall()
+            return [
+                {"file_hash": row[0], "file_name": row[1], "source_path": row[2]}
+                for row in results
+            ]
+        except Exception as e:
+            logger.exception(f"Failed to get files by video content hash: {e}")
+            raise
+
+    def update_video_content_hash(self, file_hash, video_content_hash):
+        """
+        Update the video content hash for an existing record.
+        Used for backfilling video content hashes on existing files.
+
+        Parameters:
+            file_hash (str): Primary key of the record to update
+            video_content_hash (str): The video content hash to set
+
+        Returns:
+            bool: True if record was updated, False if not found
+        """
+        try:
+            self.cursor.execute(
+                "UPDATE UniquePhotos SET video_content_hash = ? WHERE file_hash = ?",
+                (video_content_hash, file_hash)
+            )
+            return self.cursor.rowcount > 0
+        except Exception as e:
+            logger.exception(f"Failed to update video content hash: {e}")
+            raise
+
+    def get_videos_without_content_hash(self, limit=50):
+        """
+        Get video files that don't have a video content hash calculated yet.
+        Used for backfilling video content hashes.
+
+        Parameters:
+            limit (int): Maximum number of records to return (default: 50, lower than
+                        images due to higher processing cost)
+
+        Returns:
+            list: List of dicts with file_hash and file_name (archive path)
+        """
+        try:
+            # Get videos by checking file extension in file_name
+            video_extensions = tuple(ext.lower() for ext in constants.VIDEO_EXTENSIONS)
+            # Build pattern for LIKE matching - we'll filter in Python for accuracy
+            self.cursor.execute(
+                """SELECT file_hash, file_name
+                   FROM UniquePhotos
+                   WHERE video_content_hash IS NULL
+                   LIMIT ?""",
+                (limit * 3,)  # Fetch extra to account for non-videos
+            )
+            results = self.cursor.fetchall()
+
+            # Filter to only video files
+            videos = []
+            for row in results:
+                file_name = row[1] or ''
+                if file_name.lower().endswith(video_extensions):
+                    videos.append({"file_hash": row[0], "file_name": row[1]})
+                    if len(videos) >= limit:
+                        break
+
+            return videos
+        except Exception as e:
+            logger.exception(f"Failed to get videos without content hash: {e}")
+            raise
+
+    def count_videos_without_content_hash(self):
+        """
+        Count how many video files don't have a video content hash yet.
+        Used for progress display during backfill.
+
+        Returns:
+            int: Count of video files without video_content_hash
+        """
+        try:
+            # Count all files without video_content_hash, then filter
+            # This is an approximation - exact count would require scanning all filenames
+            self.cursor.execute(
+                "SELECT file_name FROM UniquePhotos WHERE video_content_hash IS NULL"
+            )
+            results = self.cursor.fetchall()
+
+            video_extensions = tuple(ext.lower() for ext in constants.VIDEO_EXTENSIONS)
+            count = sum(1 for row in results
+                       if row[0] and row[0].lower().endswith(video_extensions))
+            return count
+        except Exception as e:
+            logger.exception(f"Failed to count videos without content hash: {e}")
             raise
 
     def get_metadata_quality_for_hash(self, file_hash):
@@ -2532,7 +2687,7 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                    partial_hash_enabled=True, partial_hash_bytes=constants.PARTIAL_HASH_BYTES,
                    partial_hash_min_file_size=constants.PARTIAL_HASH_MIN_FILE_SIZE,
                    config=None, progress_callback=None, audit_manager=None, session_id=None, should_stop=None,
-                   content_hash_enabled=True, metadata_upgrade_enabled=True):
+                   content_hash_enabled=True, metadata_upgrade_enabled=True, video_content_hash_enabled=True):
     """ Looks through a list of files and returns a list of duplicate and original files using two-stage hashing.
 
         Two-Stage Hashing Strategy:
@@ -2568,6 +2723,8 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
         content_hash_enabled - whether to calculate content (pixel) hashes for duplicate detection (default: True)
             Content hashing detects visually identical images with different metadata/EXIF.
         metadata_upgrade_enabled - whether to detect upgrade candidates (duplicates with better metadata) (default: True)
+        video_content_hash_enabled - whether to calculate video content hashes for duplicate detection (default: True)
+            Video content hashing detects visually identical videos even when re-encoded.
 
         Returns:
             results - a dictionary containing:
@@ -2575,6 +2732,7 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                 original_files - list of new unique files that were added to database
                 filtered_files - list of files that were filtered out (not real photos)
                 content_duplicate_files - list of files with same pixel content as existing files
+                video_content_duplicate_files - list of videos with same visual content as existing videos (Schema v9)
                 upgrade_candidates - list of duplicates that have better metadata than archive (Schema v7)
                 status - "completed" if successful, "cancelled" if stopped early
                 files_processed - total number of files processed
@@ -2616,6 +2774,7 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
         original_files = []
         filtered_files = []
         content_duplicate_files = []  # Files with same pixel content as existing files
+        video_content_duplicate_files = []  # Schema v9: Videos with same visual content as existing videos
         upgrade_candidates = []  # Schema v7: Duplicates with better metadata than archive
         protected_files = []  # Schema v7: Duplicates that would upgrade but are user-protected
         files_processed = 0
@@ -3220,6 +3379,27 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                             content_duplicate_of = matching_files[0]  # First match
                                             logger.info(f"Content duplicate detected: {filename} matches content of {content_duplicate_of['file_name']}")
 
+                            # Schema v9: Calculate video content hash for video duplicate detection
+                            video_content_hash = None
+                            is_video_content_duplicate = False
+                            video_content_duplicate_of = None
+                            if video_content_hash_enabled and is_video:
+                                try:
+                                    from hashing import hash_video_content
+                                    video_content_hash = hash_video_content(filename)
+                                    if video_content_hash:
+                                        # Check if this video content hash already exists
+                                        if db.has_video_content_hash(video_content_hash):
+                                            is_video_content_duplicate = True
+                                            matching_videos = db.get_files_by_video_content_hash(video_content_hash)
+                                            if matching_videos:
+                                                video_content_duplicate_of = matching_videos[0]  # First match
+                                                logger.info(f"Video content duplicate detected: {filename} matches content of {video_content_duplicate_of['file_name']}")
+                                except ImportError:
+                                    logger.debug("Could not import hash_video_content - video content hashing disabled")
+                                except Exception as e:
+                                    logger.debug(f"Video content hashing failed for {filename}: {e}")
+
                             original_file = {
                                 "file_hash": file_hash,
                                 "file_path": filename,
@@ -3231,7 +3411,10 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                 "is_content_duplicate": is_content_duplicate,
                                 # Schema v7: Metadata quality tracking
                                 "date_source": date_source,
-                                "date_reliable": is_reliable
+                                "date_reliable": is_reliable,
+                                # Schema v9: Video content hashing
+                                "video_content_hash": video_content_hash,
+                                "is_video_content_duplicate": is_video_content_duplicate
                             }
                             original_files.append(original_file)
 
@@ -3247,10 +3430,38 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                 }
                                 content_duplicate_files.append(content_duplicate_entry)
 
+                            # Schema v9: Track video content duplicates separately
+                            if is_video_content_duplicate and video_content_duplicate_of:
+                                video_content_duplicate_entry = {
+                                    "file_hash": file_hash,
+                                    "file_path": filename,
+                                    "file_create_datetime": file_create_date,
+                                    "video_content_hash": video_content_hash,
+                                    "duplicate_of_hash": video_content_duplicate_of["file_hash"],
+                                    "duplicate_of_path": video_content_duplicate_of["file_name"]
+                                }
+                                video_content_duplicate_files.append(video_content_duplicate_entry)
+
+                                # Log to audit if available
+                                if audit_manager and session_id:
+                                    try:
+                                        db.commit()
+                                        audit_manager.log_file_operation(
+                                            session_id=session_id,
+                                            source_path=filename,
+                                            operation='video_content_duplicate_detected',
+                                            status='video_content_duplicate',
+                                            file_hash=file_hash,
+                                            file_size=file_size,
+                                            content_duplicate_of_hash=video_content_duplicate_of["file_hash"]
+                                        )
+                                    except Exception as audit_err:
+                                        logger.debug(f"Failed to log audit for video content duplicate: {audit_err}")
+
                             # Calculate metadata quality score (Schema v7)
                             metadata_quality_score = calculate_metadata_quality_score(date_source, is_reliable)
 
-                            # Add to database with partial hash info and source path (v7 schema)
+                            # Add to database with partial hash info and source path (v9 schema)
                             db.insert_unique_photo(
                                 file_hash,
                                 filename,  # This will be archive path after organize_files()
@@ -3265,7 +3476,8 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
                                 content_hash=content_hash,
                                 date_source=date_source,  # Schema v7: Track date source
                                 date_reliable=is_reliable,  # Schema v7: Track reliability
-                                metadata_quality_score=metadata_quality_score  # Schema v7: Track quality score
+                                metadata_quality_score=metadata_quality_score,  # Schema v7: Track quality score
+                                video_content_hash=video_content_hash  # Schema v9: Track video content hash
                             )
 
                             files_processed += 1
@@ -3296,6 +3508,7 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
             logger.info(f"Unique files added: {len(original_files)}")
             logger.info(f"Duplicates found: {len(duplicate_files)}")
             logger.info(f"Content duplicates found: {len(content_duplicate_files)}")
+            logger.info(f"Video content duplicates found: {len(video_content_duplicate_files)}")
             logger.info(f"Files skipped (already in DB): {files_skipped}")
             if photo_filter and photo_filter.enabled:
                 logger.info(f"Files filtered (non-photos): {len(filtered_files)}")
@@ -3362,6 +3575,7 @@ def find_duplicates(files, hashes, database_path=constants.DEFAULT_DATABASE_NAME
         results["original_files"] = original_files
         results["filtered_files"] = filtered_files
         results["content_duplicate_files"] = content_duplicate_files
+        results["video_content_duplicate_files"] = video_content_duplicate_files  # Schema v9: Video content duplicates
         results["upgrade_candidates"] = upgrade_candidates  # Schema v7: Duplicates with better metadata
         results["protected_files"] = protected_files  # Schema v7: User-corrected files not upgraded
         results["status"] = "cancelled" if was_cancelled else "completed"

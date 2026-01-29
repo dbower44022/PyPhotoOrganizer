@@ -10,22 +10,24 @@
 6. [Database Health and Recovery](#database-health-and-recovery)
 7. [Source Folders](#source-folders)
 8. [Album Association for Source Folders](#album-association-for-source-folders)
-9. [Processing Photos](#processing-photos)
-10. [How the System Determines Photo Date](#how-the-system-determines-photo-date)
-11. [Import History](#import-history)
-12. [Photo Review App](#photo-review-app)
-13. [Date Corrections (in Photo Review App)](#date-corrections)
-14. [File Version Management](#file-version-management)
-15. [Prior Revision Archive System](#prior-revision-archive-system)
-16. [Archive Change Detection](#archive-change-detection)
-17. [Bulk Delete Matching Files](#bulk-delete-matching-files)
-18. [Delete Vault and File Recovery](#delete-vault-and-file-recovery)
-19. [Cloud Storage](#cloud-storage)
-20. [Auto-Import Service](#auto-import-service)
-21. [Settings](#settings)
-22. [Troubleshooting](#troubleshooting)
-23. [Recovering from Data or Storage Corruption](#recovering-from-data-or-storage-corruption)
-24. [FAQ](#faq)
+9. [Content-Based Duplicate Detection](#content-based-duplicate-detection)
+10. [Video Duplicate Detection](#video-duplicate-detection)
+11. [Processing Photos](#processing-photos)
+12. [How the System Determines Photo Date](#how-the-system-determines-photo-date)
+13. [Import History](#import-history)
+14. [Photo Review App](#photo-review-app)
+15. [Date Corrections (in Photo Review App)](#date-corrections)
+16. [File Version Management](#file-version-management)
+17. [Prior Revision Archive System](#prior-revision-archive-system)
+18. [Archive Change Detection](#archive-change-detection)
+19. [Bulk Delete Matching Files](#bulk-delete-matching-files)
+20. [Delete Vault and File Recovery](#delete-vault-and-file-recovery)
+21. [Cloud Storage](#cloud-storage)
+22. [Auto-Import Service](#auto-import-service)
+23. [Settings](#settings)
+24. [Troubleshooting](#troubleshooting)
+25. [Recovering from Data or Storage Corruption](#recovering-from-data-or-storage-corruption)
+26. [FAQ](#faq)
 
 ---
 
@@ -67,9 +69,15 @@ piexif           # EXIF metadata handling
 tqdm             # Progress bars (CLI mode)
 ```
 
-**Optional (for cloud storage):**
+**Optional:**
 ```
-boto3            # Amazon S3 support
+imagehash        # Video content duplicate detection (perceptual hashing)
+boto3            # Amazon S3 cloud storage support
+```
+
+**External tools (optional but recommended):**
+```
+ffmpeg           # Required for video content hashing and video thumbnails
 ```
 
 Install required dependencies:
@@ -77,9 +85,9 @@ Install required dependencies:
 pip install PySide6 Pillow pillow-heif piexif tqdm
 ```
 
-Install with cloud storage support:
+Install with all optional features:
 ```bash
-pip install PySide6 Pillow pillow-heif piexif tqdm boto3
+pip install PySide6 Pillow pillow-heif piexif tqdm imagehash boto3
 ```
 
 ---
@@ -587,6 +595,107 @@ Features:
 - View content hashes for all files
 - Identify duplicates (highlighted with colors)
 - Export results (TXT, CSV, JSON)
+
+---
+
+## Video Duplicate Detection
+
+PyPhotoOrganizer can detect visually identical videos even when they have been re-encoded, transcoded, or have different metadata. This is especially useful when you have the same video saved in different formats (e.g., original and compressed versions) or from different sources that may have processed the video differently.
+
+### How Video Content Hashing Works
+
+Unlike images where we can directly compare pixel data, videos require a different approach due to their size and complexity. PyPhotoOrganizer uses **perceptual hashing** of key frames:
+
+#### The Algorithm (Step by Step)
+
+1. **Frame Extraction**: Using ffmpeg, the system extracts 5 frames from the video at fixed positions:
+   - 10% of duration
+   - 30% of duration
+   - 50% of duration (middle)
+   - 70% of duration
+   - 90% of duration
+
+2. **Frame Processing**: Each extracted frame is:
+   - Resized to 64×64 pixels
+   - Converted to grayscale
+
+3. **Perceptual Hashing**: Each processed frame gets a perceptual hash (pHash) that captures the visual "essence" of the image. Unlike regular hashing, perceptual hashes remain similar even when images are slightly modified.
+
+4. **Signature Generation**: The 5 frame hashes are combined into a single video signature using SHA-256.
+
+#### What This Detects
+
+| Scenario | Detected as Duplicate? |
+|----------|----------------------|
+| Same video, different filename | Yes |
+| Same video, re-encoded (MP4 → MOV) | Yes |
+| Same video, different resolution | Often yes |
+| Same video, different compression | Often yes |
+| Same video, metadata stripped | Yes |
+| Same video with watermark added | May not match |
+| Different videos with similar scenes | No (5 frames provide good discrimination) |
+
+### Requirements
+
+Video content hashing requires:
+
+- **ffmpeg**: Must be installed and available in system PATH
+- **imagehash library**: Installed automatically with requirements (`pip install imagehash`)
+
+If ffmpeg is not available, video content hashing is silently skipped and videos are still imported normally using file hash detection.
+
+### During Import
+
+When video content hashing is enabled:
+
+1. Regular file hash duplicate detection runs first (fast)
+2. If the video is unique by file hash, the video content hash is calculated
+3. If the video content hash matches an existing video, it's flagged as a "video content duplicate"
+4. Video content duplicates appear with magenta-purple highlighting in Import History
+
+### Viewing Video Content Duplicates
+
+**Import History Tab:**
+- Use the "Show" dropdown and select **"Video Content Duplicates"**
+- Video content duplicates are highlighted in magenta-purple (#CC6699)
+
+### Backfilling Existing Archives
+
+For video archives created before video content hashing was available:
+
+1. Go to **System Settings** tab
+2. Find the "Video Content-Based Duplicate Detection" section
+3. Click **"Calculate Video Content Hashes for Existing Files"**
+4. Progress bar shows backfill status
+5. Click **"Cancel"** to stop if needed
+
+**What the backfill does:**
+- Scans all video files without video content hashes
+- Extracts frames and calculates video content hash for each
+- Detects newly discovered duplicates (same visual content, different files)
+- Reports statistics and discovered duplicates when complete
+
+**Note:** Video backfill is slower than image backfill due to frame extraction. The batch size is smaller (50 videos vs 100 images) to provide better progress feedback.
+
+### Enable/Disable Video Content Hashing
+
+Video content hashing is enabled by default. To toggle:
+
+1. Go to **System Settings** tab
+2. Find "Video Content-Based Duplicate Detection" section
+3. Check/uncheck **"Enable video content duplicate detection during import"**
+
+**Performance Note:** Video content hashing adds processing time during imports (must extract and hash frames from each video). For very large video imports, you may want to disable it temporarily and run the backfill process later.
+
+### Comparison with Image Content Hashing
+
+| Aspect | Image Content Hash | Video Content Hash |
+|--------|-------------------|-------------------|
+| Method | Full pixel data hash | Perceptual hash of 5 key frames |
+| Robustness | Exact pixel match only | Tolerates re-encoding |
+| Speed | Fast (load + hash) | Slower (ffmpeg extraction) |
+| Batch size | 100 files | 50 files |
+| Filter color | Purple (#9966CC) | Magenta-purple (#CC6699) |
 
 ---
 
