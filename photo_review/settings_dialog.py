@@ -296,6 +296,56 @@ class PhotoReviewSettingsDialog(QDialog):
         content_layout.addWidget(cache_card)
 
         # ---------------------------------------------------------------------
+        # Browsing Settings Card
+        # ---------------------------------------------------------------------
+        browsing_card = SettingsCard("Browsing", "\U0001F5B1")  # Mouse icon
+
+        # Scroll speed slider
+        scroll_container = QWidget()
+        scroll_layout = QVBoxLayout(scroll_container)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(8)
+
+        scroll_header = QHBoxLayout()
+        scroll_label = QLabel("Scroll Speed")
+        scroll_label.setObjectName("settingLabel")
+        scroll_header.addWidget(scroll_label)
+        scroll_header.addStretch()
+
+        self.scroll_value_label = QLabel("67%")
+        self.scroll_value_label.setObjectName("settingValue")
+        scroll_header.addWidget(self.scroll_value_label)
+        scroll_layout.addLayout(scroll_header)
+
+        # Scroll speed slider (25% to 100%)
+        self.scroll_slider = QSlider(Qt.Horizontal)
+        self.scroll_slider.setObjectName("settingSlider")
+        self.scroll_slider.setRange(25, 100)
+        self.scroll_slider.setValue(67)  # Default 2/3 speed
+        self.scroll_slider.valueChanged.connect(self._on_scroll_speed_changed)
+        scroll_layout.addWidget(self.scroll_slider)
+
+        # Scroll hint row
+        scroll_hint_row = QHBoxLayout()
+        scroll_min = QLabel("Slower")
+        scroll_min.setObjectName("sliderHint")
+        scroll_hint_row.addWidget(scroll_min)
+        scroll_hint_row.addStretch()
+
+        scroll_default = QLabel("Default: 67%")
+        scroll_default.setObjectName("sliderHint")
+        scroll_hint_row.addWidget(scroll_default)
+        scroll_hint_row.addStretch()
+
+        scroll_max = QLabel("Faster")
+        scroll_max.setObjectName("sliderHint")
+        scroll_hint_row.addWidget(scroll_max)
+        scroll_layout.addLayout(scroll_hint_row)
+
+        browsing_card.add_widget(scroll_container)
+        content_layout.addWidget(browsing_card)
+
+        # ---------------------------------------------------------------------
         # Cache Status Card
         # ---------------------------------------------------------------------
         status_card = SettingsCard("Cache Status", "\U0001F4CA")  # Chart icon
@@ -794,10 +844,15 @@ class PhotoReviewSettingsDialog(QDialog):
             # Update preset selection
             self._update_preset_selection(memory_mb, threads)
 
+            # Load scroll speed setting
+            scroll_speed = self.db_metadata.get_scroll_speed_percent()
+            self.scroll_slider.setValue(scroll_speed)
+            self._on_scroll_speed_changed(scroll_speed)
+
             # Update statistics
             self._update_statistics()
 
-            logger.debug(f"Loaded settings: memory={memory_mb}MB, threads={threads}")
+            logger.debug(f"Loaded settings: memory={memory_mb}MB, threads={threads}, scroll={scroll_speed}%")
 
         except Exception as e:
             logger.error(f"Failed to load settings: {e}")
@@ -814,6 +869,11 @@ class PhotoReviewSettingsDialog(QDialog):
         """Handle threads slider change."""
         self.threads_value_label.setText(str(value))
         self._update_preset_selection(self.memory_slider.value(), value)
+        self._mark_changes()
+
+    def _on_scroll_speed_changed(self, value: int):
+        """Handle scroll speed slider change."""
+        self.scroll_value_label.setText(f"{value}%")
         self._mark_changes()
 
     def _apply_preset(self, preset: str):
@@ -931,11 +991,13 @@ class PhotoReviewSettingsDialog(QDialog):
         try:
             memory_mb = self.memory_slider.value()
             threads = self.threads_slider.value()
+            scroll_speed = self.scroll_slider.value()
 
             self.db_metadata.set_cache_memory_mb(memory_mb)
             self.db_metadata.set_cache_worker_threads(threads)
+            self.db_metadata.set_scroll_speed_percent(scroll_speed)
 
-            logger.info(f"Saved settings: memory={memory_mb}MB, threads={threads}")
+            logger.info(f"Saved settings: memory={memory_mb}MB, threads={threads}, scroll={scroll_speed}%")
 
             self.settings_changed.emit()
             self.changes_label.setText("")

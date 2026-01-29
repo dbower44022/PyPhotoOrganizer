@@ -360,6 +360,11 @@ class DatabaseMetadata:
                     logger.info("Upgrading database: adding cache_worker_threads column")
                     cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN cache_worker_threads INTEGER DEFAULT 8")
 
+                # Add scroll_speed_percent column if missing
+                if 'scroll_speed_percent' not in columns:
+                    logger.info("Upgrading database: adding scroll_speed_percent column")
+                    cursor.execute("ALTER TABLE DatabaseMetadata ADD COLUMN scroll_speed_percent INTEGER DEFAULT 67")
+
                 # Add delete_vault_location column if missing
                 if 'delete_vault_location' not in columns:
                     logger.info("Upgrading database: adding delete_vault_location column")
@@ -2699,6 +2704,58 @@ class DatabaseMetadata:
 
         except Exception as e:
             logger.error(f"Failed to set cache worker threads: {e}")
+            return False
+
+    # ========== Scroll Speed Settings ==========
+
+    def get_scroll_speed_percent(self) -> int:
+        """
+        Get the scroll speed percentage for photo grid.
+
+        Returns:
+            Scroll speed as percentage (25-100, default 67 for 2/3 speed)
+        """
+        try:
+            metadata = self.get_metadata()
+            if metadata is None:
+                return 67  # Default 2/3 speed
+
+            speed = metadata.get('scroll_speed_percent', 67)
+            return int(speed) if speed else 67
+
+        except Exception as e:
+            logger.error(f"Failed to get scroll speed: {e}")
+            return 67
+
+    def set_scroll_speed_percent(self, speed: int) -> bool:
+        """
+        Set the scroll speed percentage for photo grid.
+
+        Args:
+            speed: Scroll speed percentage (25-100)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Clamp to valid range
+            speed = max(25, min(100, speed))
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute("""
+                    UPDATE DatabaseMetadata
+                    SET scroll_speed_percent = ?
+                    WHERE id = 1
+                """, (speed,))
+
+                conn.commit()
+                logger.info(f"Updated scroll speed to {speed}%")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to set scroll speed: {e}")
             return False
 
     # ========== Preview Window Settings ==========

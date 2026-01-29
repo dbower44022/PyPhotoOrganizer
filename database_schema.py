@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS ArchiveMetadata (
     thumbnail_size INTEGER DEFAULT 200,
     cache_memory_mb INTEGER DEFAULT 256,
     cache_worker_threads INTEGER DEFAULT 4,
+    scroll_speed_percent INTEGER DEFAULT 67,
     preview_window_geometry TEXT,
     preview_window_visible INTEGER DEFAULT 0,
     ignored_directories TEXT DEFAULT '[]',

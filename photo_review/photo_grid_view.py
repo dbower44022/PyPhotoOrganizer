@@ -19,7 +19,7 @@ import time
 
 from PySide6.QtWidgets import QListView, QAbstractItemView, QMenu, QApplication
 from PySide6.QtCore import Qt, Signal, QSize, QPoint, QTimer
-from PySide6.QtGui import QKeyEvent, QAction
+from PySide6.QtGui import QKeyEvent, QAction, QWheelEvent
 
 from photo_review.photo_grid_delegate import PhotoGridDelegate
 
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 SCROLL_THROTTLE_MS = 50  # Throttle scroll handling to reduce DB queries
 PREFETCH_FORWARD = 100   # Items to prefetch in scroll direction
 PREFETCH_BACKWARD = 50   # Items to prefetch opposite to scroll direction
+DEFAULT_SCROLL_SPEED_PERCENT = 67  # Default scroll speed (67% = 2/3 speed)
 
 
 class PhotoGridView(QListView):
@@ -93,6 +94,9 @@ class PhotoGridView(QListView):
         self._last_prefetch_time = 0
         self._prefetch_pending = False
         self._last_visible_range = (0, 0)
+
+        # Scroll speed (percentage, 25-100)
+        self._scroll_speed_percent = DEFAULT_SCROLL_SPEED_PERCENT
 
         # Scroll throttle timer (coalesces rapid scroll events)
         self._scroll_timer = QTimer(self)
@@ -160,6 +164,46 @@ class PhotoGridView(QListView):
 
         # Set initial size
         self.set_thumbnail_size('medium')
+
+    def wheelEvent(self, event: QWheelEvent):
+        """
+        Handle mouse wheel scrolling with configurable speed.
+
+        Applies scroll speed percentage to make scrolling smoother,
+        preventing large jumps when scrolling through thumbnails.
+        """
+        # Get the scroll delta
+        delta = event.angleDelta()
+
+        if delta.y() != 0:
+            # Apply scroll speed percentage (100% = full speed, 50% = half speed)
+            adjusted_delta = int(delta.y() * self._scroll_speed_percent / 100)
+
+            # Scroll the view manually
+            scrollbar = self.verticalScrollBar()
+            # Negative delta = scroll down, positive = scroll up
+            scrollbar.setValue(scrollbar.value() - adjusted_delta)
+
+            event.accept()
+        elif delta.x() != 0:
+            # Handle horizontal scroll if needed (usually not for grid)
+            adjusted_delta = int(delta.x() * self._scroll_speed_percent / 100)
+            scrollbar = self.horizontalScrollBar()
+            scrollbar.setValue(scrollbar.value() - adjusted_delta)
+            event.accept()
+        else:
+            # Let parent handle other cases
+            super().wheelEvent(event)
+
+    def set_scroll_speed(self, percent: int):
+        """
+        Set the scroll speed percentage.
+
+        Args:
+            percent: Scroll speed as percentage (25-100)
+        """
+        self._scroll_speed_percent = max(25, min(100, percent))
+        logger.debug(f"Scroll speed set to {self._scroll_speed_percent}%")
 
     def set_thumbnail_size(self, size_name: str):
         """

@@ -1280,6 +1280,11 @@ class PhotoReviewWindow(QMainWindow):
             if hasattr(self, 'grid_view') and self.grid_view:
                 self.grid_view.viewport().update()
 
+        # Update scroll speed setting
+        if hasattr(self, 'grid_view') and self.grid_view:
+            scroll_speed = self.database_metadata.get_scroll_speed_percent()
+            self.grid_view.set_scroll_speed(scroll_speed)
+
         # Clean up old cache if it exists
         if old_cache:
             try:
@@ -1446,6 +1451,11 @@ class PhotoReviewWindow(QMainWindow):
         # Grid model and view
         self.grid_model = PhotoGridModel(self.thumbnail_cache, parent=self)
         self.grid_view = PhotoGridView(self.grid_model, parent=self)
+
+        # Apply scroll speed setting
+        scroll_speed = self.database_metadata.get_scroll_speed_percent()
+        self.grid_view.set_scroll_speed(scroll_speed)
+
         grid_layout.addWidget(self.grid_view)
 
         self.right_splitter.addWidget(grid_container)
