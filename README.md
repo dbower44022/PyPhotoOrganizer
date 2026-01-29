@@ -430,8 +430,9 @@ Organizing files: 100%|████████| 850/850 [02:15<00:00, 6.3file/s
                            ▼
                   ┌────────────────┐
                   │  Extract Date  │
-                  │  - EXIF data   │
-                  │  - File system │
+                  │  - EXIF/IPTC   │
+                  │  - Filename    │
+                  │  - Path/OS     │
                   └────────┬───────┘
                            │
                            ▼
@@ -566,7 +567,7 @@ CREATE TABLE UnreliableDates (
     archive_path TEXT,                    -- Current archive location
     original_archive_path TEXT,           -- Pre-reorganization location (audit trail)
     original_date TEXT,                   -- Date detected during processing
-    date_source TEXT,                     -- 'exif', 'os_metadata', 'fallback'
+    date_source TEXT,                     -- 'exif', 'filename', 'path_ymd', 'os_metadata', 'fallback'
     flag_reason TEXT,                     -- 'no_exif', 'year_1000', 'suspicious', 'user_specified'
     corrected_date TEXT,                  -- User-corrected date (YYYY-MM-DD)
     correction_timestamp TEXT,            -- When correction was made
@@ -899,7 +900,7 @@ A: This feature is in development and will be available in a future release.
 A: Check the Filtered Files tab to see exactly why each file was filtered. Common reasons: file too small, dimensions too small, filename contains excluded pattern, missing EXIF data.
 
 **Q: What are unreliable dates and why are they flagged?**
-A: The system flags files with questionable date information: no EXIF data, year 1000 fallback (all extraction methods failed), suspicious dates (< 1990 or > current year + 1), or files from user-specified unreliable paths (e.g., scanned photos). Check the Date Corrections tab to review and correct them.
+A: The system flags files with questionable date information: no EXIF data, year 1000 fallback (all extraction methods failed), suspicious dates (< 1990 or > current year + 1), or files from user-specified unreliable paths (e.g., scanned photos). The system will also try to extract dates from filenames (e.g., `IMG_20230415_123456.jpg`) and folder paths before falling back to OS timestamps. Check the Date Corrections tab to review and correct them.
 
 **Q: How do I correct dates for scanned photos?**
 A: (1) Add the scanner output folder to "Unreliable Paths" in Date Corrections tab, (2) Process the photos - they'll be auto-flagged, (3) Select flagged photos and use Batch Correct with correct dates, (4) Click "Reorganize All Marked" to move files to correct date folders.

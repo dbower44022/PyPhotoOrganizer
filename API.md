@@ -603,29 +603,60 @@ print(f"Found {len(results['original_files'])} unique files")
 ### Function: `get_creation_date`
 
 ```python
-get_creation_date(file_path: str) -> Tuple[str, str, str]
+get_creation_date(
+    file_path: str,
+    database_path: Optional[str] = None
+) -> Tuple[str, str, str, str, bool]
 ```
 
-Extract creation date from EXIF or file system.
+Extract creation date from multiple sources with reliability tracking.
 
 **Parameters:**
-- `file_path` (str): Image file path
+- `file_path` (str): Image or video file path
+- `database_path` (str, optional): Database path (for future use)
 
 **Returns:**
-- `tuple`: `(year, month, day)` as zero-padded strings
+- `tuple`: `(year, month, day, date_source, is_reliable)`
+  - `year`, `month`, `day`: Zero-padded strings
+  - `date_source`: Source identifier (see below)
+  - `is_reliable`: Boolean indicating if date is trustworthy
 
 **Example:**
 ```python
-year, month, day = DuplicateFileDetection.get_creation_date("/photo.jpg")
-# Returns: ("2024", "11", "25")
+from date_extraction import get_creation_date
+
+year, month, day, source, reliable = get_creation_date("/photo.jpg")
+# Returns: ("2024", "11", "25", "exif", True)
+
+# Filename extraction
+year, month, day, source, reliable = get_creation_date("/IMG_20231225_143022.jpg")
+# Returns: ("2023", "12", "25", "filename", True)
 ```
 
-**Priority:**
+**Priority (Images):**
 1. EXIF DateTimeOriginal
-2. EXIF DateTime
-3. File system creation time
-4. File system modification time
-5. Default: ("1000", "01", "01")
+2. Other EXIF dates (earliest wins: DateTimeDigitized, GPS, DateTime)
+3. IPTC Date Created
+4. XMP CreateDate
+5. Filename patterns (IMG_YYYYMMDD_HHMMSS, etc.)
+6. Path patterns (/YYYY/MM/DD/, etc.)
+7. OS file timestamps
+8. Default: ("1000", "01", "01", "fallback", False)
+
+**Priority (Videos):**
+1. Video metadata (ffprobe/mutagen)
+2. QuickTime atoms
+3. Filename/path patterns
+4. OS timestamps
+5. Default fallback
+
+**Date Source Values:**
+- `exif`, `exif_digitized`, `exif_gps`, `exif_datetime`, `exif_preview`
+- `iptc`, `xmp`
+- `video_metadata`, `video_quicktime`
+- `filename` - Date from filename pattern
+- `path_ymd`, `path_ym`, `path_y` - Date from path (full, year/month, year only)
+- `os_metadata`, `fallback`
 
 ---
 

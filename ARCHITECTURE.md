@@ -267,8 +267,8 @@ find_duplicates(files, hashes, database_path, ...)
   → Batch commits to database
 
 get_creation_date(file_path)
-  → Extracts date from EXIF or file system
-  → Returns (year, month, day) as strings
+  → Extracts date from EXIF, IPTC, XMP, filename, path, or file system
+  → Returns (year, month, day, date_source, is_reliable)
 
 load_photo_hashes(database_path)
   → Loads all existing hashes from database
@@ -417,8 +417,12 @@ invalidate_cache()
 6. FILE ORGANIZATION (unique files only)
    ├─> Extract creation date with reliability check:
    │    ├─> Try EXIF DateTimeOriginal (most reliable)
-   │    ├─> Try IPTC Date Created (fallback)
+   │    ├─> Try other EXIF dates (DateTimeDigitized, GPS, DateTime)
+   │    ├─> Try IPTC Date Created
+   │    ├─> Try XMP CreateDate
    │    ├─> Try video metadata (ffprobe/mutagen/QuickTime atoms)
+   │    ├─> Try filename patterns (IMG_YYYYMMDD_HHMMSS, etc.)
+   │    ├─> Try path patterns (/YYYY/MM/DD/, etc.)
    │    ├─> Fallback to file system date
    │    └─> Returns: (year, month, day, date_source, is_reliable)
    │
@@ -760,36 +764,55 @@ CREATE INDEX idx_unique_content_hash ON UniquePhotos(content_hash);
 
 ### Date Extraction Algorithm
 
-**Priority Order:**
+**Priority Order (Images):**
 ```
-1. EXIF DateTimeOriginal (most accurate)
-2. EXIF DateTime (fallback)
-3. File system creation time (getctime)
-4. File system modification time (getmtime)
-5. Default: 1000-01-01 (invalid date marker)
+1. EXIF DateTimeOriginal (most accurate - when shutter clicked)
+2. Other EXIF dates (DateTimeDigitized, GPSDateTime, DateTime, PreviewDateTime)
+   → Uses earliest valid date among these
+3. IPTC Date Created
+4. XMP CreateDate
+5. Filename patterns (IMG_YYYYMMDD_HHMMSS, Screenshot_*, etc.)
+6. Path patterns (/YYYY/MM/DD/, /YYYY-MM-DD/, etc.)
+7. OS file timestamps (creation/modification time)
+8. Default: 1000-01-01 (invalid date marker)
 ```
 
-**Implementation:**
-```python
-def get_creation_date(file_path):
-    try:
-        # 1. Try EXIF
-        with Image.open(file_path) as img:
-            exif = img._getexif()
-            if exif:
-                date_str = exif.get(36867)  # DateTimeOriginal
-                if date_str:
-                    return parse_date(date_str)
-
-        # 2. Fallback to file system
-        stat = os.stat(file_path)
-        timestamp = stat.st_ctime  # Creation time
-        return format_timestamp(timestamp)
-
-    except:
-        # 3. Default invalid date
-        return ("1000", "01", "01")
+**Priority Order (Videos):**
 ```
+1. Video metadata (ffprobe creation_time)
+2. Mutagen library (©day tag for MP4/MOV)
+3. QuickTime atoms (mvhd atom, handles 1904 epoch)
+4. Filename patterns
+5. Path patterns
+6. OS file timestamps
+7. Default: 1000-01-01
+```
+
+**Filename Patterns Recognized:**
+- `IMG_YYYYMMDD_HHMMSS` (Android cameras)
+- `VID_YYYYMMDD_HHMMSS` (Android video)
+- `PXL_YYYYMMDD_HHMMSS` (Pixel phones)
+- `Screenshot_YYYYMMDD-HHMMSS` (Android screenshots)
+- `YYYY-MM-DD at HH.MM.SS` (iOS sharing)
+- `IMG-YYYYMMDD-WA` (WhatsApp)
+- `YYYY-MM-DD`, `YYYYMMDD` (ISO date formats)
+
+**Path Patterns Recognized:**
+- `/YYYY/MM/DD/` → Full date
+- `/YYYY-MM-DD/` → Full date (ISO folder)
+- `/YYYY/MM/` → Year/month (day defaults to 1)
+- `/YYYY/` → Year only (month/day default to 1)
+
+**Implementation:** See `date_extraction.py` for full implementation.
+
+**Returns:** `(year, month, day, date_source, is_reliable)`
+
+**Date Source Values:**
+- `exif`, `exif_digitized`, `exif_gps`, `exif_datetime`, `exif_preview`
+- `iptc`, `xmp`
+- `video_metadata`, `video_quicktime`
+- `filename`, `path_ymd`, `path_ym`, `path_y`
+- `os_metadata`, `fallback`
 
 ---
 

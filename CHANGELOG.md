@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**Filename and Path Date Extraction**
+
+Enhanced date detection to extract dates from filenames and folder paths when no embedded metadata is available. This improves date accuracy for screenshots, WhatsApp images, and other files that lack EXIF data.
+
+**Filename Patterns Supported:**
+- Android camera: `IMG_20230415_123456.jpg`, `VID_20230415_123456.mp4`
+- Pixel phones: `PXL_20230415_123456.jpg`
+- Screenshots: `Screenshot_20230415-123456.png`
+- iOS sharing: `Photo 2023-04-15 at 12.34.56.jpg`
+- WhatsApp: `IMG-20230415-WA0001.jpg`
+- ISO dates: `2023-04-15.jpg`, `20230415.jpg`
+
+**Path Patterns Supported:**
+- Full date: `/Photos/2023/04/15/` or `/Archive/2023-04-15/`
+- Year/month: `/Photos/2023/04/`
+- Year only: `/Photos/2023/`
+
+**New Date Sources:**
+- `filename` - Date extracted from filename pattern
+- `path_ymd` - Full date from directory path
+- `path_ym` - Year/month from directory path
+- `path_y` - Year only from directory path
+
+**Priority:** Filename dates are checked after XMP metadata but before OS timestamps. Filename takes priority over path when both are available.
+
+---
+
 **Auto-Import Background Service**
 
 A standalone background service that automatically monitors directories for new photos and videos, imports them to your archive, and sends email reports.

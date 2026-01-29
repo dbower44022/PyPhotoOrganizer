@@ -54,7 +54,8 @@ python main.py              # CLI mode
 | Module | Purpose |
 |--------|---------|
 | `main.py` | Orchestration: `organize_files()`, `perform_metadata_upgrades()` |
-| `DuplicateFileDetection.py` | `PhotoDatabase`, `find_duplicates()`, `get_creation_date()`, hashing functions, metadata scoring |
+| `DuplicateFileDetection.py` | `PhotoDatabase`, `find_duplicates()`, hashing functions, metadata scoring |
+| `date_extraction.py` | `get_creation_date()`, EXIF/IPTC/XMP/filename/path date extraction |
 | `database_metadata.py` | `DatabaseMetadata`: archive binding, source dirs, settings |
 | `config.py` | `Config`: settings loading with defaults |
 | `photo_filter.py` | `PhotoFilter`: filters icons/thumbnails by size/dimensions |

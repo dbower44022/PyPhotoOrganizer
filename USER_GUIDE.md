@@ -662,8 +662,11 @@ The system reads dates from multiple embedded metadata sources and uses an intel
 | 4 | **EXIF DateTime** | File modification time in EXIF | Medium |
 | 5 | **EXIF PreviewDateTime** | When preview was generated | Low |
 | 6 | **IPTC Date Created** | Publishing/editorial date | Medium |
-| 7 | **OS File Metadata** | Operating system timestamps | Low |
-| 8 | **Year 1000 Fallback** | Indicates no date found | None |
+| 7 | **XMP CreateDate** | XMP metadata date | Medium |
+| 8 | **Filename Date** | Date extracted from filename pattern | Medium |
+| 9 | **Path Date** | Date from folder structure | Low-Medium |
+| 10 | **OS File Metadata** | Operating system timestamps | Low |
+| 11 | **Year 1000 Fallback** | Indicates no date found | None |
 
 **The Selection Algorithm:**
 
@@ -673,9 +676,13 @@ The system reads dates from multiple embedded metadata sources and uses an intel
 
    *Why earliest?* A photo can only be modified *after* it was created. If a file shows DateTime as 2021 but DateTimeDigitized as 2013, the 2013 date is more likely to be the original capture date.
 
-3. If no valid EXIF dates exist, try IPTC metadata
+3. If no valid EXIF dates exist, try IPTC and XMP metadata
 
-4. If no embedded metadata exists, fall back to OS file timestamps
+4. If no embedded metadata exists, try extracting date from the **filename** (see below)
+
+5. If filename has no date, try extracting from the **folder path**
+
+6. If all else fails, fall back to OS file timestamps
 
 #### For Videos
 
@@ -686,8 +693,69 @@ Videos don't have EXIF data, so the system uses different sources:
 | 1 | **ffprobe** | `creation_time` tag from video metadata |
 | 2 | **mutagen** | `©day` tag for MP4/MOV files |
 | 3 | **QuickTime atoms** | Direct reading of `mvhd` atom |
-| 4 | **OS File Metadata** | Operating system timestamps |
-| 5 | **Year 1000 Fallback** | Indicates no date found |
+| 4 | **Filename Date** | Date extracted from filename pattern |
+| 5 | **Path Date** | Date from folder structure |
+| 6 | **OS File Metadata** | Operating system timestamps |
+| 7 | **Year 1000 Fallback** | Indicates no date found |
+
+### Filename Date Extraction
+
+When a file has no embedded metadata, the system can extract dates from common filename patterns. This is especially useful for:
+- Screenshots (which rarely have EXIF data)
+- WhatsApp images
+- Files exported from apps that strip metadata
+- Renamed files with date prefixes
+
+**Supported Filename Patterns:**
+
+| Pattern | Example | What It Extracts |
+|---------|---------|------------------|
+| `IMG_YYYYMMDD_HHMMSS` | `IMG_20230415_123456.jpg` | Full date and time |
+| `VID_YYYYMMDD_HHMMSS` | `VID_20230415_123456.mp4` | Full date and time |
+| `PXL_YYYYMMDD_HHMMSS` | `PXL_20230415_123456.jpg` | Full date and time (Pixel phones) |
+| `Screenshot_YYYYMMDD-HHMMSS` | `Screenshot_20230415-123456.png` | Full date and time |
+| `YYYY-MM-DD at HH.MM.SS` | `Photo 2023-04-15 at 12.34.56.jpg` | Full date and time (iOS sharing) |
+| `IMG-YYYYMMDD-WA` | `IMG-20230415-WA0001.jpg` | Date only (WhatsApp) |
+| `YYYY-MM-DD` | `2023-04-15_vacation.jpg` | Date only |
+| `YYYYMMDD` | `20230415.jpg` | Date only |
+
+**Example:**
+```
+File: Screenshot_20231225-143022.png
+Metadata: (none - screenshots don't have EXIF)
+Filename: Contains date pattern
+
+Result: Uses 2023-12-25 14:30:22 from filename
+Archived to: 2023/12Dec/25/
+```
+
+### Path Date Extraction
+
+If the filename has no date, the system checks the folder structure. This works well when photos are already organized into date folders:
+
+| Pattern | Example | What It Extracts |
+|---------|---------|------------------|
+| `/YYYY/MM/DD/` | `/Photos/2023/04/15/photo.jpg` | Full date |
+| `/YYYY-MM-DD/` | `/Archive/2023-04-15/photo.jpg` | Full date |
+| `/YYYY/MM/` | `/Photos/2023/04/photo.jpg` | Year and month (day=1) |
+| `/YYYY-MM/` | `/Archive/2023-04/photo.jpg` | Year and month (day=1) |
+| `/YYYY/` | `/Photos/2023/photo.jpg` | Year only (month=1, day=1) |
+
+**Note:** Path dates are less reliable than filename dates because:
+- The path may represent when photos were *organized*, not *taken*
+- Year-only paths provide incomplete information
+
+**Example:**
+```
+File: /Photos/2023/04/15/vacation_beach.jpg
+Metadata: (none)
+Filename: vacation_beach.jpg (no date)
+Path: /2023/04/15/
+
+Result: Uses 2023-04-15 from path
+Archived to: 2023/04Apr/15/
+Status: Flagged for review (date from path)
+```
 
 ### Understanding EXIF Date Fields
 
@@ -799,7 +867,7 @@ After import, you can see which date source was used for each file:
 
 1. **Import History Tab**: Shows date source in file details
 2. **Photo Review App**: Preview panel shows "Detected Date" with source
-3. **Database**: `date_source` field records: `exif`, `exif_digitized`, `exif_gps`, `exif_datetime`, `iptc`, `video_metadata`, `os_metadata`, or `fallback`
+3. **Database**: `date_source` field records: `exif`, `exif_digitized`, `exif_gps`, `exif_datetime`, `iptc`, `xmp`, `video_metadata`, `filename`, `path_ymd`, `path_ym`, `path_y`, `os_metadata`, or `fallback`
 
 ### Tips for Best Results
 
