@@ -41,6 +41,59 @@ class TriageDatabase:
             db_path: Path to SQLite database
         """
         self.db_path = db_path
+        self._read_conn = None  # Persistent read connection
+        self._write_conn = None  # Persistent write connection
+        self._write_count = 0  # Track writes for periodic commit
+
+    def close(self):
+        """Close any open connections."""
+        if hasattr(self, '_read_conn') and self._read_conn is not None:
+            try:
+                self._read_conn.close()
+            except Exception:
+                pass
+            self._read_conn = None
+
+        if hasattr(self, '_write_conn') and self._write_conn is not None:
+            try:
+                self._write_conn.commit()  # Commit any pending writes
+                self._write_conn.close()
+            except Exception:
+                pass
+            self._write_conn = None
+
+    def __del__(self):
+        """Cleanup on deletion."""
+        self.close()
+
+    def _get_write_conn(self):
+        """Get or create persistent write connection."""
+        if self._write_conn is None:
+            import sqlite3
+            self._write_conn = sqlite3.connect(self.db_path, timeout=30)
+            self._write_conn.execute("PRAGMA journal_mode=WAL")
+            self._write_conn.execute("PRAGMA busy_timeout=30000")
+            self._write_conn.execute("PRAGMA synchronous=NORMAL")  # Faster writes
+            self._write_count = 0
+        return self._write_conn
+
+    def _maybe_commit_writes(self, force: bool = False):
+        """Commit writes periodically for better performance."""
+        self._write_count += 1
+        # Commit every 50 writes or when forced
+        if force or self._write_count >= 50:
+            if self._write_conn:
+                self._write_conn.commit()
+            self._write_count = 0
+
+    def flush_writes(self):
+        """Force commit any pending writes."""
+        if self._write_conn and self._write_count > 0:
+            try:
+                self._write_conn.commit()
+                self._write_count = 0
+            except Exception as e:
+                logger.warning(f"Error flushing writes: {e}")
 
     def ensure_triage_tables(self):
         """
@@ -239,6 +292,8 @@ class TriageDatabase:
         """
         Record thumbnail in cache.
 
+        Uses persistent connection with batched commits for performance.
+
         Args:
             file_hash: SHA-256 hash
             thumbnail_path: Path to cached thumbnail file
@@ -248,8 +303,9 @@ class TriageDatabase:
         timestamp = datetime.now().isoformat()
         file_modified = datetime.fromtimestamp(file_modified_time).isoformat()
 
-        with PhotoDatabase(self.db_path) as db:
-            db.cursor.execute("""
+        try:
+            conn = self._get_write_conn()
+            conn.execute("""
                 INSERT OR REPLACE INTO ThumbnailCache
                 (file_hash, thumbnail_path, thumbnail_size,
                  created_timestamp, last_accessed_timestamp, file_modified_timestamp)
@@ -257,15 +313,27 @@ class TriageDatabase:
             """, (file_hash, thumbnail_path, thumbnail_size,
                   timestamp, timestamp, file_modified))
 
-            db.commit()
+            # Batched commit for performance
+            self._maybe_commit_writes()
 
-        logger.debug(f"Added thumbnail to cache: {file_hash[:8]}... size={thumbnail_size}")
+            logger.debug(f"Added thumbnail to cache: {file_hash[:8]}... size={thumbnail_size}")
+
+        except Exception as e:
+            logger.warning(f"Error adding thumbnail to cache: {e}")
+            # Reset connection on error
+            if self._write_conn:
+                try:
+                    self._write_conn.close()
+                except:
+                    pass
+                self._write_conn = None
 
     def get_thumbnail(self, file_hash: str, thumbnail_size: int) -> Optional[Dict[str, Any]]:
         """
         Get thumbnail cache entry.
 
-        Updates last_accessed_timestamp on hit.
+        Note: Does NOT update last_accessed_timestamp on every read for performance.
+        LRU tracking is handled separately via periodic updates.
 
         Args:
             file_hash: SHA-256 hash
@@ -274,35 +342,99 @@ class TriageDatabase:
         Returns:
             Dict with cache entry or None if not found
         """
-        with PhotoDatabase(self.db_path) as db:
-            db.cursor.execute("""
+        # Use persistent connection for read-heavy operations
+        if not hasattr(self, '_read_conn') or self._read_conn is None:
+            import sqlite3
+            self._read_conn = sqlite3.connect(self.db_path, timeout=30)
+            self._read_conn.execute("PRAGMA journal_mode=WAL")
+            self._read_conn.execute("PRAGMA busy_timeout=30000")
+            self._read_conn.row_factory = sqlite3.Row
+
+        try:
+            cursor = self._read_conn.cursor()
+            cursor.execute("""
                 SELECT * FROM ThumbnailCache
                 WHERE file_hash = ? AND thumbnail_size = ?
             """, (file_hash, thumbnail_size))
 
-            row = db.cursor.fetchone()
+            row = cursor.fetchone()
 
             if row:
-                # Update last accessed
-                timestamp = datetime.now().isoformat()
-                db.cursor.execute("""
-                    UPDATE ThumbnailCache
-                    SET last_accessed_timestamp = ?
-                    WHERE file_hash = ? AND thumbnail_size = ?
-                """, (timestamp, file_hash, thumbnail_size))
-                db.commit()
-
+                # Skip last_accessed update for performance
+                # LRU is based on created_timestamp which is sufficient for cleanup
                 return {
-                    'id': row[0],
-                    'file_hash': row[1],
-                    'thumbnail_path': row[2],
-                    'thumbnail_size': row[3],
-                    'created_timestamp': row[4],
-                    'last_accessed_timestamp': row[5],
-                    'file_modified_timestamp': row[6]
+                    'id': row['id'],
+                    'file_hash': row['file_hash'],
+                    'thumbnail_path': row['thumbnail_path'],
+                    'thumbnail_size': row['thumbnail_size'],
+                    'created_timestamp': row['created_timestamp'],
+                    'last_accessed_timestamp': row['last_accessed_timestamp'],
+                    'file_modified_timestamp': row['file_modified_timestamp']
                 }
 
+        except Exception as e:
+            logger.warning(f"Error reading thumbnail cache: {e}")
+            # Reset connection on error
+            try:
+                self._read_conn.close()
+            except:
+                pass
+            self._read_conn = None
+
         return None
+
+    def get_cached_hashes(self, file_hashes: List[str], thumbnail_size: int) -> Set[str]:
+        """
+        Batch check which file hashes have cached thumbnails.
+
+        Much more efficient than calling get_thumbnail() for each hash.
+
+        Args:
+            file_hashes: List of file hashes to check
+            thumbnail_size: Thumbnail size in pixels
+
+        Returns:
+            Set of file hashes that have cached thumbnails
+        """
+        if not file_hashes:
+            return set()
+
+        # Use persistent connection
+        if not hasattr(self, '_read_conn') or self._read_conn is None:
+            import sqlite3
+            self._read_conn = sqlite3.connect(self.db_path, timeout=30)
+            self._read_conn.execute("PRAGMA journal_mode=WAL")
+            self._read_conn.execute("PRAGMA busy_timeout=30000")
+            self._read_conn.row_factory = sqlite3.Row
+
+        cached_hashes = set()
+
+        try:
+            cursor = self._read_conn.cursor()
+
+            # Query in batches to avoid SQL parameter limits
+            batch_size = 500
+            for i in range(0, len(file_hashes), batch_size):
+                batch = file_hashes[i:i + batch_size]
+                placeholders = ','.join(['?' for _ in batch])
+
+                cursor.execute(f"""
+                    SELECT file_hash FROM ThumbnailCache
+                    WHERE file_hash IN ({placeholders}) AND thumbnail_size = ?
+                """, batch + [thumbnail_size])
+
+                for row in cursor.fetchall():
+                    cached_hashes.add(row['file_hash'])
+
+        except Exception as e:
+            logger.warning(f"Error batch checking thumbnail cache: {e}")
+            try:
+                self._read_conn.close()
+            except:
+                pass
+            self._read_conn = None
+
+        return cached_hashes
 
     def cleanup_lru_thumbnails(self, max_size_bytes: int) -> int:
         """

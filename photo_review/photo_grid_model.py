@@ -247,6 +247,14 @@ class PhotoGridModel(QAbstractListModel):
         """
         logger.info(f"Loading {len(records)} records into PhotoGridModel")
 
+        # Stop any ongoing cache warming from previous data
+        if self.thumbnail_cache and hasattr(self.thumbnail_cache, 'stop_warming'):
+            self.thumbnail_cache.stop_warming()
+
+        # Cancel pending thumbnail generations from previous data
+        if self.thumbnail_cache and hasattr(self.thumbnail_cache, 'cancel_all_generation'):
+            self.thumbnail_cache.cancel_all_generation()
+
         # Clear memory thumbnail cache to force fresh thumbnails
         if self.thumbnail_cache:
             self.thumbnail_cache.clear_memory_cache()
@@ -270,6 +278,10 @@ class PhotoGridModel(QAbstractListModel):
 
         self.data_loaded.emit(len(records))
         logger.info(f"PhotoGridModel loaded {len(records)} records")
+
+        # Start background cache warming for all items
+        # This runs in a background thread and won't block the UI
+        self._start_background_warming()
 
     def get_record_at(self, index: QModelIndex) -> Optional[Dict[str, Any]]:
         """Get record at model index."""
@@ -399,3 +411,57 @@ class PhotoGridModel(QAbstractListModel):
             self.file_items[row].update(updates)
             index = self.index(row, 0)
             self.dataChanged.emit(index, index)
+
+    def _start_background_warming(self):
+        """
+        Start background cache warming for loaded items.
+
+        Uses a delayed start to let the UI settle first, then warms
+        thumbnails gradually in the background without blocking.
+        """
+        if not self.thumbnail_cache:
+            return
+
+        if not self.file_items:
+            return
+
+        if not hasattr(self.thumbnail_cache, 'warm_cache_async'):
+            logger.debug("Thumbnail cache doesn't support async warming")
+            return
+
+        # Prepare items for warming - need file_hash and file_path
+        warming_items = []
+        for item in self.file_items:
+            file_hash = item.get('file_hash')
+            file_path = item.get('archive_path') or item.get('source_path')
+            if file_hash and file_path:
+                warming_items.append({
+                    'file_hash': file_hash,
+                    'file_path': file_path
+                })
+
+        if not warming_items:
+            return
+
+        # Limit warming to prevent resource exhaustion
+        # Start with first 2000 items - enough for most browsing sessions
+        max_warming_items = 2000
+        if len(warming_items) > max_warming_items:
+            logger.info(f"Limiting cache warming to first {max_warming_items} of {len(warming_items)} items")
+            warming_items = warming_items[:max_warming_items]
+
+        # Use a timer to delay warming start, letting the UI render first
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(500, lambda: self._do_background_warming(warming_items))
+
+    def _do_background_warming(self, warming_items):
+        """Execute background warming after delay."""
+        if not self.thumbnail_cache:
+            return
+
+        # Check if data has changed (user loaded different query)
+        if not self.file_items:
+            return
+
+        logger.info(f"Starting background cache warming for {len(warming_items)} items")
+        self.thumbnail_cache.warm_cache_async(warming_items, size=self.thumbnail_size)

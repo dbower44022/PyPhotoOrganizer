@@ -299,12 +299,14 @@ class VideoThumbnailExtractor:
                 # -ss before -i for fast seeking
                 # -vf scale for resizing with aspect ratio preservation
                 # -vframes 1 for single frame
+                # -pix_fmt yuvj420p for full-range YUV (required by mjpeg encoder)
                 cmd = [
                     self._ffmpeg_path,
                     '-ss', str(timestamp),
                     '-i', video_path,
                     '-vf', f'scale={size}:{size}:force_original_aspect_ratio=decrease',
                     '-vframes', '1',
+                    '-pix_fmt', 'yuvj420p',  # Full-range YUV for JPEG compatibility
                     '-q:v', str(max(1, min(31, 31 - int(quality * 0.3)))),  # ffmpeg quality (1=best, 31=worst)
                     '-y',  # Overwrite output
                     temp_path

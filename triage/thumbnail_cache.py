@@ -614,7 +614,7 @@ class ThumbnailCache(QObject):
         Background thread that processes database writes from queue.
 
         This eliminates database lock contention by ensuring only one thread
-        writes to the database at a time.
+        writes to the database at a time. Uses batched commits for performance.
         """
         logger.info("Database writer thread started")
 
@@ -638,10 +638,16 @@ class ThumbnailCache(QObject):
                 self._db_write_queue.task_done()
 
             except queue.Empty:
-                # Timeout - continue loop (allows graceful shutdown)
+                # Queue is empty - flush any pending writes
+                if hasattr(self.triage_db, 'flush_writes'):
+                    self.triage_db.flush_writes()
                 continue
             except Exception as e:
                 logger.error(f"Database writer thread error: {e}", exc_info=True)
+
+        # Final flush on shutdown
+        if hasattr(self.triage_db, 'flush_writes'):
+            self.triage_db.flush_writes()
 
         logger.info("Database writer thread stopped")
 
@@ -682,31 +688,22 @@ class ThumbnailCache(QObject):
     warming_complete = Signal(int, int, int)  # generated, skipped, errors
 
     def warm_cache(self, file_items: List[Dict[str, Any]], size: int = 256,
-                   batch_size: int = 50, progress_callback=None) -> Dict[str, int]:
+                   batch_size: int = 100, progress_callback=None) -> Dict[str, int]:
         """
         Pre-generate thumbnails for a list of files (cache warming).
 
-        This method processes files in batches, checking if each file already
-        has a cached thumbnail before generating. Useful for startup or idle
-        time to improve user experience when browsing.
+        Uses batch lookup to minimize database queries for better performance.
 
         Args:
             file_items: List of file dicts with 'file_hash' and 'file_path' keys
             size: Thumbnail size to generate (default: 256)
-            batch_size: Number of files to queue before yielding (default: 50)
+            batch_size: Number of files to queue before yielding (default: 100)
             progress_callback: Optional callback(current, total, file_hash) for progress
 
         Returns:
-            Dict with warming statistics:
-                - queued: Number of thumbnails queued for generation
-                - skipped: Number already cached (skipped)
-                - errors: Number that failed
-                - total: Total files processed
-
-        Note:
-            This method queues generation in the background. To wait for
-            completion, call wait_for_completion() after warming.
+            Dict with warming statistics
         """
+        import time
         self._warming_stop_requested = False
 
         stats = {
@@ -722,32 +719,43 @@ class ThumbnailCache(QObject):
 
         logger.info(f"Cache warming: Starting for {len(file_items)} files, size={size}")
 
-        for idx, item in enumerate(file_items):
-            # Check for stop request
+        # Build list of valid items with hash and path
+        valid_items = []
+        for item in file_items:
+            file_hash = item.get('file_hash')
+            file_path = item.get('file_path') or item.get('archive_path')
+            if file_hash and file_path:
+                valid_items.append((file_hash, file_path))
+            else:
+                stats['errors'] += 1
+
+        if not valid_items:
+            return stats
+
+        # Batch lookup: get all hashes that are already in disk cache
+        all_hashes = [h for h, _ in valid_items]
+        cached_hashes = self.triage_db.get_cached_hashes(all_hashes, size)
+        logger.debug(f"Cache warming: {len(cached_hashes)} already cached in disk")
+
+        # Also check memory cache
+        memory_cached = set()
+        for file_hash, _ in valid_items:
+            cache_key = f"{file_hash}_{size}"
+            if cache_key in self.memory_cache:
+                memory_cached.add(file_hash)
+
+        # Process items that need generation
+        for idx, (file_hash, file_path) in enumerate(valid_items):
             if self._warming_stop_requested:
                 logger.info(f"Cache warming: Stopped after {idx} files")
                 break
 
-            file_hash = item.get('file_hash')
-            file_path = item.get('file_path') or item.get('archive_path')
-
-            if not file_hash or not file_path:
-                stats['errors'] += 1
-                continue
-
-            # Check if already in memory cache
-            cache_key = f"{file_hash}_{size}"
-            if cache_key in self.memory_cache:
+            # Skip if already cached
+            if file_hash in memory_cached or file_hash in cached_hashes:
                 stats['skipped'] += 1
                 continue
 
-            # Check if already in disk cache
-            cache_entry = self.triage_db.get_thumbnail(file_hash, size)
-            if cache_entry and os.path.exists(cache_entry['thumbnail_path']):
-                stats['skipped'] += 1
-                continue
-
-            # Check if file exists
+            # Check if file exists (quick filesystem check)
             if not os.path.exists(file_path):
                 stats['errors'] += 1
                 continue
@@ -758,16 +766,15 @@ class ThumbnailCache(QObject):
 
             # Progress callback
             if progress_callback:
-                progress_callback(idx + 1, len(file_items), file_hash)
+                progress_callback(idx + 1, len(valid_items), file_hash)
 
-            # Emit progress signal
-            self.warming_progress.emit(idx + 1, len(file_items), file_hash)
+            # Emit progress signal periodically (not every item)
+            if idx % 100 == 0:
+                self.warming_progress.emit(idx + 1, len(valid_items), file_hash)
 
             # Yield periodically to allow other operations
-            if stats['queued'] % batch_size == 0:
-                # Brief pause to prevent overwhelming the thread pool
-                import time
-                time.sleep(0.01)
+            if stats['queued'] % batch_size == 0 and stats['queued'] > 0:
+                time.sleep(0.05)  # Longer pause between batches
 
         # Emit completion signal
         self.warming_complete.emit(stats['queued'], stats['skipped'], stats['errors'])

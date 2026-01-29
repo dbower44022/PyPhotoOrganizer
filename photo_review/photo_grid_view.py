@@ -26,7 +26,7 @@ from photo_review.photo_grid_delegate import PhotoGridDelegate
 logger = logging.getLogger(__name__)
 
 # Performance constants
-SCROLL_THROTTLE_MS = 33  # ~30fps scroll handling
+SCROLL_THROTTLE_MS = 50  # Throttle scroll handling to reduce DB queries
 PREFETCH_FORWARD = 100   # Items to prefetch in scroll direction
 PREFETCH_BACKWARD = 50   # Items to prefetch opposite to scroll direction
 

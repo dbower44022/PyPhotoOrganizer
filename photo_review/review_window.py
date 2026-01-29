@@ -1260,14 +1260,25 @@ class PhotoReviewWindow(QMainWindow):
         # Store current state
         old_cache = getattr(self, 'thumbnail_cache', None)
 
+        # Disconnect old cache signal from model if it exists
+        if old_cache and hasattr(self, 'grid_model') and self.grid_model:
+            try:
+                old_cache.thumbnail_ready.disconnect(self.grid_model._on_thumbnail_ready)
+            except Exception:
+                pass  # Signal may not be connected
+
         # Reinitialize the thumbnail cache with new settings
         self._init_thumbnail_cache()
 
-        # Update grid view with new cache if it exists
-        if hasattr(self, 'grid_view') and self.grid_view:
-            self.grid_view.set_thumbnail_cache(self.thumbnail_cache)
+        # Update grid model with new cache if it exists
+        if hasattr(self, 'grid_model') and self.grid_model:
+            self.grid_model.thumbnail_cache = self.thumbnail_cache
+            # Reconnect the thumbnail_ready signal
+            if self.thumbnail_cache:
+                self.thumbnail_cache.thumbnail_ready.connect(self.grid_model._on_thumbnail_ready)
             # Refresh the current view to use new cache
-            self.grid_view.viewport().update()
+            if hasattr(self, 'grid_view') and self.grid_view:
+                self.grid_view.viewport().update()
 
         # Clean up old cache if it exists
         if old_cache:
