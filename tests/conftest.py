@@ -417,6 +417,17 @@ def capture_logs(caplog):
 # Marker Helpers
 # ============================================================================
 
+def pytest_addoption(parser):
+    """Register custom command-line options."""
+    parser.addoption(
+        "--keep-files",
+        action="store_true",
+        default=False,
+        help="Preserve test source images, archive output, and database on disk "
+             "under tests/output/ for manual review after the test run.",
+    )
+
+
 def pytest_configure(config):
     """Configure custom markers."""
     config.addinivalue_line(

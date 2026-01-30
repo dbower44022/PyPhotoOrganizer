@@ -47,7 +47,13 @@
       "Bash(\"/home/doug/Dropbox/Projects/python Projects/PyPhotoOrganizer/PyPhotoOrganizer/dist/PyPhotoOrganizer/PyPhotoOrganizer\" --version)",
       "Bash(apt list:*)",
       "Bash(./venv/bin/python -m pytest tests/unit/test_heic_conversion.py -v)",
-      "Bash(xargs cat:*)"
+      "Bash(xargs cat:*)",
+      "Bash(curl:*)",
+      "Bash(bash)",
+      "Bash(claude doctor:*)",
+      "Bash(claude update:*)",
+      "Bash(claude:*)",
+      "Bash(pip3 list:*)"
     ]
   }
 }
