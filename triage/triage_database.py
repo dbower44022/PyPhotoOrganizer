@@ -11,6 +11,7 @@ Reuses PhotoDatabase context manager from DuplicateFileDetection.py
 
 import sqlite3
 import logging
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Set
@@ -41,18 +42,18 @@ class TriageDatabase:
             db_path: Path to SQLite database
         """
         self.db_path = db_path
-        self._read_conn = None  # Persistent read connection
-        self._write_conn = None  # Persistent write connection
+        self._local = threading.local()  # Thread-local storage for read connections
+        self._write_conn = None  # Persistent write connection (writer thread only)
         self._write_count = 0  # Track writes for periodic commit
 
     def close(self):
-        """Close any open connections."""
-        if hasattr(self, '_read_conn') and self._read_conn is not None:
+        """Close any open connections for the current thread."""
+        if hasattr(self, '_local') and hasattr(self._local, 'read_conn') and self._local.read_conn is not None:
             try:
-                self._read_conn.close()
+                self._local.read_conn.close()
             except Exception:
                 pass
-            self._read_conn = None
+            self._local.read_conn = None
 
         if hasattr(self, '_write_conn') and self._write_conn is not None:
             try:
@@ -65,6 +66,31 @@ class TriageDatabase:
     def __del__(self):
         """Cleanup on deletion."""
         self.close()
+
+    def _get_read_conn(self):
+        """Get or create a thread-local persistent read connection.
+
+        Each thread gets its own SQLite connection since SQLite connections
+        can only be used in the thread that created them.
+        """
+        conn = getattr(self._local, 'read_conn', None)
+        if conn is None:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.row_factory = sqlite3.Row
+            self._local.read_conn = conn
+        return conn
+
+    def _close_read_conn(self):
+        """Close and reset the current thread's read connection."""
+        conn = getattr(self._local, 'read_conn', None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.read_conn = None
 
     def _get_write_conn(self):
         """Get or create persistent write connection."""
@@ -342,16 +368,9 @@ class TriageDatabase:
         Returns:
             Dict with cache entry or None if not found
         """
-        # Use persistent connection for read-heavy operations
-        if not hasattr(self, '_read_conn') or self._read_conn is None:
-            import sqlite3
-            self._read_conn = sqlite3.connect(self.db_path, timeout=30)
-            self._read_conn.execute("PRAGMA journal_mode=WAL")
-            self._read_conn.execute("PRAGMA busy_timeout=30000")
-            self._read_conn.row_factory = sqlite3.Row
-
         try:
-            cursor = self._read_conn.cursor()
+            conn = self._get_read_conn()
+            cursor = conn.cursor()
             cursor.execute("""
                 SELECT * FROM ThumbnailCache
                 WHERE file_hash = ? AND thumbnail_size = ?
@@ -374,12 +393,7 @@ class TriageDatabase:
 
         except Exception as e:
             logger.warning(f"Error reading thumbnail cache: {e}")
-            # Reset connection on error
-            try:
-                self._read_conn.close()
-            except:
-                pass
-            self._read_conn = None
+            self._close_read_conn()
 
         return None
 
@@ -399,18 +413,11 @@ class TriageDatabase:
         if not file_hashes:
             return set()
 
-        # Use persistent connection
-        if not hasattr(self, '_read_conn') or self._read_conn is None:
-            import sqlite3
-            self._read_conn = sqlite3.connect(self.db_path, timeout=30)
-            self._read_conn.execute("PRAGMA journal_mode=WAL")
-            self._read_conn.execute("PRAGMA busy_timeout=30000")
-            self._read_conn.row_factory = sqlite3.Row
-
         cached_hashes = set()
 
         try:
-            cursor = self._read_conn.cursor()
+            conn = self._get_read_conn()
+            cursor = conn.cursor()
 
             # Query in batches to avoid SQL parameter limits
             batch_size = 500
@@ -428,11 +435,7 @@ class TriageDatabase:
 
         except Exception as e:
             logger.warning(f"Error batch checking thumbnail cache: {e}")
-            try:
-                self._read_conn.close()
-            except:
-                pass
-            self._read_conn = None
+            self._close_read_conn()
 
         return cached_hashes
 

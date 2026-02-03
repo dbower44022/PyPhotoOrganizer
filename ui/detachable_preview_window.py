@@ -184,6 +184,11 @@ class DetachablePreviewWindow(QMainWindow):
     # Signal when correct date button is clicked
     correct_date_clicked = Signal(dict)  # Emits current record
 
+    # Signals for file actions from preview window
+    rotate_clicked = Signal(dict)  # Emits current record
+    edit_clicked = Signal(dict)  # Emits current record
+    delete_clicked = Signal(dict)  # Emits current record
+
     def __init__(self, db_metadata, parent=None):
         """
         Initialize preview window.
@@ -362,12 +367,39 @@ class DetachablePreviewWindow(QMainWindow):
 
         actions_layout.addStretch()
 
+        # Rotate button
+        self.rotate_btn = QPushButton("🔄 Rotate...")
+        self.rotate_btn.setMinimumHeight(36)
+        self.rotate_btn.clicked.connect(self._on_rotate)
+        self.rotate_btn.setEnabled(False)
+        actions_layout.addWidget(self.rotate_btn)
+
+        # Edit button
+        self.edit_btn = QPushButton("✏️ Edit...")
+        self.edit_btn.setMinimumHeight(36)
+        self.edit_btn.clicked.connect(self._on_edit)
+        self.edit_btn.setEnabled(False)
+        actions_layout.addWidget(self.edit_btn)
+
         # Correct date button
         self.correct_btn = QPushButton("📅 Correct Date...")
         self.correct_btn.setMinimumHeight(36)
         self.correct_btn.clicked.connect(self.on_correct_date)
         self.correct_btn.setEnabled(False)
         actions_layout.addWidget(self.correct_btn)
+
+        # Delete button
+        self.delete_btn = QPushButton("🗑 Delete...")
+        self.delete_btn.setMinimumHeight(36)
+        self.delete_btn.clicked.connect(self._on_delete)
+        self.delete_btn.setEnabled(False)
+        actions_layout.addWidget(self.delete_btn)
+
+        # Separator before close
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.VLine)
+        sep2.setStyleSheet(f"background-color: {c.border_light};")
+        actions_layout.addWidget(sep2)
 
         # Close button
         self.close_btn = QPushButton("Close")
@@ -457,8 +489,8 @@ class DetachablePreviewWindow(QMainWindow):
         self.open_archive_folder_btn.setStyleSheet(action_button_style)
         self.copy_archive_path_btn.setStyleSheet(action_button_style)
 
-        # Correct date button (primary action)
-        self.correct_btn.setStyleSheet(f"""
+        # Primary action buttons (Rotate, Edit, Correct Date)
+        primary_action_style = f"""
             QPushButton {{
                 background-color: {c.primary};
                 color: white;
@@ -468,6 +500,27 @@ class DetachablePreviewWindow(QMainWindow):
             }}
             QPushButton:hover {{
                 background-color: {c.primary_hover};
+            }}
+            QPushButton:disabled {{
+                background-color: {c.gray_400};
+                color: {c.text_disabled};
+            }}
+        """
+        self.rotate_btn.setStyleSheet(primary_action_style)
+        self.edit_btn.setStyleSheet(primary_action_style)
+        self.correct_btn.setStyleSheet(primary_action_style)
+
+        # Delete button (warning color)
+        self.delete_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.warning};
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                border: none;
+            }}
+            QPushButton:hover {{
+                background-color: {c.error};
             }}
             QPushButton:disabled {{
                 background-color: {c.gray_400};
@@ -563,6 +616,9 @@ class DetachablePreviewWindow(QMainWindow):
             self.copy_archive_path_btn.setEnabled(bool(archive_path))
 
             self.correct_btn.setEnabled(True)
+            self.rotate_btn.setEnabled(True)
+            self.edit_btn.setEnabled(True)
+            self.delete_btn.setEnabled(True)
 
             # Load revisions
             self._load_revisions(file_hash)
@@ -1229,6 +1285,56 @@ class DetachablePreviewWindow(QMainWindow):
             return
         # Emit signal for parent to handle (opens dialog)
         self.correct_date_clicked.emit(self.current_record)
+
+    def _on_rotate(self):
+        """Handle rotate button click."""
+        if not self.current_record:
+            return
+        self.rotate_clicked.emit(self.current_record)
+
+    def _on_edit(self):
+        """Handle edit button click."""
+        if not self.current_record:
+            return
+        self.edit_clicked.emit(self.current_record)
+
+    def _on_delete(self):
+        """Handle delete button click."""
+        if not self.current_record:
+            return
+        self.delete_clicked.emit(self.current_record)
+
+    def clear_preview(self):
+        """Clear the preview after a file has been deleted."""
+        # Clear viewer
+        if hasattr(self.viewer, 'clear'):
+            self.viewer.clear()
+
+        # Reset header
+        self.filename_label.setText("No file selected")
+
+        # Disable action buttons
+        self.correct_btn.setEnabled(False)
+        self.rotate_btn.setEnabled(False)
+        self.edit_btn.setEnabled(False)
+        self.delete_btn.setEnabled(False)
+        self.open_source_file_btn.setEnabled(False)
+        self.open_source_folder_btn.setEnabled(False)
+        self.copy_source_path_btn.setEnabled(False)
+        self.open_archive_file_btn.setEnabled(False)
+        self.open_archive_folder_btn.setEnabled(False)
+        self.copy_archive_path_btn.setEnabled(False)
+
+        # Clear detail sections
+        self.db_section.clear_content()
+        self.file_section.clear_content()
+        self.image_section.clear_content()
+        self.exif_section.clear_content()
+        self.revisions_list.clear()
+        self.revision_info_label.setText("No file selected")
+
+        # Clear current record
+        self.current_record = None
 
     def closeEvent(self, event: QCloseEvent):
         """Handle window close event - save geometry."""

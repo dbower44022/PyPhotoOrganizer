@@ -241,12 +241,12 @@ class PhotoQueryBuilder:
         # Version filter (current/all/prior)
         # -----------------------------------------------------------------
         version_filter = filters.get('version_filter', 'current')
-        if version_filter == 'current' and self.archive_base:
-            # Only files in main archive (not prior revision archive)
-            conditions.append("up.file_name LIKE ?")
-            params.append(f"{self.archive_base}%")
+        if version_filter == 'current':
+            # Exclude prior revision archive files (superseded versions)
+            # Note: file_name may contain source paths OR archive paths,
+            # so we only exclude known prior-revision files rather than
+            # requiring a specific archive path prefix.
             if self.prior_archive_base:
-                # Explicitly exclude prior archive files
                 conditions.append("up.file_name NOT LIKE ?")
                 params.append(f"{self.prior_archive_base}%")
         elif version_filter == 'prior' and self.prior_archive_base:
@@ -443,27 +443,57 @@ class PhotoQueryBuilder:
         """
         return self.execute_query({}, limit=limit)
 
+    def _build_folder_count_conditions(self) -> Tuple[str, List]:
+        """
+        Build WHERE clause fragments that match the grid query filters.
+
+        Ensures folder tree counts are consistent with what the grid displays:
+        - Excludes deleted files (handled by caller's LEFT JOIN)
+        - Excludes prior revision archive files (superseded versions)
+
+        Returns:
+            tuple: (where_clause, params) - clause includes leading AND
+        """
+        clauses = []
+        params = []
+
+        # Exclude prior revision archive (same as version_filter='current')
+        if self.prior_archive_base:
+            clauses.append("up.file_name NOT LIKE ?")
+            params.append(f"{self.prior_archive_base}%")
+
+        where = ""
+        if clauses:
+            where = " AND " + " AND ".join(clauses)
+        return where, params
+
     def get_archive_folders(self) -> List[Dict[str, Any]]:
         """
         Get list of unique archive folders with photo counts.
 
+        Counts match grid query filters (excludes deleted and prior-revision files).
+
         Returns:
-            List of dicts with 'folder' and 'count' keys
+            List of dicts with 'year' and 'count' keys
         """
-        # Get unique year folders
-        sql = """
-            SELECT create_year as year, COUNT(*) as count
-            FROM UniquePhotos
-            WHERE create_year IS NOT NULL
-            GROUP BY create_year
-            ORDER BY create_year DESC
+        extra_where, extra_params = self._build_folder_count_conditions()
+
+        sql = f"""
+            SELECT up.create_year as year, COUNT(*) as count
+            FROM UniquePhotos up
+            LEFT JOIN DeletedFiles df ON up.file_hash = df.file_hash AND df.is_restored = 0
+            WHERE df.file_hash IS NULL
+              AND up.create_year IS NOT NULL
+              {extra_where}
+            GROUP BY up.create_year
+            ORDER BY up.create_year DESC
         """
 
         results = []
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute(sql)
+                cursor.execute(sql, extra_params)
 
                 for row in cursor.fetchall():
                     results.append({
@@ -480,25 +510,32 @@ class PhotoQueryBuilder:
         """
         Get list of months with photos in a specific year.
 
+        Counts match grid query filters (excludes deleted and prior-revision files).
+
         Args:
             year: Year string
 
         Returns:
             List of dicts with 'month' and 'count' keys
         """
-        sql = """
-            SELECT create_month as month, COUNT(*) as count
-            FROM UniquePhotos
-            WHERE create_year = ?
-            GROUP BY create_month
-            ORDER BY create_month ASC
+        extra_where, extra_params = self._build_folder_count_conditions()
+
+        sql = f"""
+            SELECT up.create_month as month, COUNT(*) as count
+            FROM UniquePhotos up
+            LEFT JOIN DeletedFiles df ON up.file_hash = df.file_hash AND df.is_restored = 0
+            WHERE df.file_hash IS NULL
+              AND up.create_year = ?
+              {extra_where}
+            GROUP BY up.create_month
+            ORDER BY up.create_month ASC
         """
 
         results = []
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute(sql, (year,))
+                cursor.execute(sql, [year] + extra_params)
 
                 for row in cursor.fetchall():
                     results.append({
@@ -515,6 +552,8 @@ class PhotoQueryBuilder:
         """
         Get list of days with photos in a specific year/month.
 
+        Counts match grid query filters (excludes deleted and prior-revision files).
+
         Args:
             year: Year string
             month: Month string
@@ -522,19 +561,24 @@ class PhotoQueryBuilder:
         Returns:
             List of dicts with 'day' and 'count' keys
         """
-        sql = """
-            SELECT create_day as day, COUNT(*) as count
-            FROM UniquePhotos
-            WHERE create_year = ? AND create_month = ?
-            GROUP BY create_day
-            ORDER BY create_day ASC
+        extra_where, extra_params = self._build_folder_count_conditions()
+
+        sql = f"""
+            SELECT up.create_day as day, COUNT(*) as count
+            FROM UniquePhotos up
+            LEFT JOIN DeletedFiles df ON up.file_hash = df.file_hash AND df.is_restored = 0
+            WHERE df.file_hash IS NULL
+              AND up.create_year = ? AND up.create_month = ?
+              {extra_where}
+            GROUP BY up.create_day
+            ORDER BY up.create_day ASC
         """
 
         results = []
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute(sql, (year, month))
+                cursor.execute(sql, [year, month] + extra_params)
 
                 for row in cursor.fetchall():
                     results.append({

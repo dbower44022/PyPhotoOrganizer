@@ -589,3 +589,103 @@ class ConflictResolution(Enum):
 - Unit tests: `tests/unit/test_storage_backend.py` (50 tests)
 - S3 tests: `tests/unit/test_storage_backend_s3.py` (uses moto mock)
 - Sync tests: `tests/unit/test_cloud_sync.py` (12 tests)
+
+## Thumbnail Cache System
+
+Three-tier LRU cache for high-performance thumbnail display in the Photo Review app.
+
+### Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  PhotoGridModel / PhotoGridView                           │
+│  (requests thumbnails by file_hash + size)                │
+├──────────────────────────────────────────────────────────┤
+│                    ThumbnailCache                          │
+│  L1: Memory (OrderedDict LRU, ~500 items, <1ms)          │
+│  L2: Disk (JPEG files, 50-100ms)                          │
+│  L3: Generate (ThumbnailWorker via QThreadPool, async)    │
+├──────────────────────────────────────────────────────────┤
+│  ThumbnailWorker          │  DB Writer Thread             │
+│  (QRunnable, PIL resize)  │  (queue.Queue, batched writes)│
+├──────────────────────────────────────────────────────────┤
+│  TriageDatabase (thread-local read connections)           │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Cache Flow
+
+1. `get_thumbnail(file_hash, file_path, size)` checks L1 (memory), then L2 (disk)
+2. On miss: returns `None`, queues `ThumbnailWorker` in `QThreadPool`
+3. Worker generates thumbnail with PIL, saves to disk as JPEG
+4. Worker emits `finished` signal → `ThumbnailCache._on_thumbnail_generated()` (main thread)
+5. Main thread loads `QPixmap` from disk, stores in L1 memory cache
+6. `thumbnail_ready` signal notifies grid model → `dataChanged` triggers repaint
+
+### Key Modules
+
+| Module | Class | Purpose |
+|--------|-------|---------|
+| `triage/thumbnail_cache.py` | `ThumbnailCache` | Three-tier cache, prefetching, warming |
+| `triage/thumbnail_generator.py` | `ThumbnailWorker` | QRunnable PIL thumbnail generation |
+| `triage/thumbnail_generator.py` | `PlaceholderGenerator` | Loading/error placeholder pixmaps |
+| `triage/triage_database.py` | `TriageDatabase` | Disk cache tracking, thread-safe DB |
+
+### Thread Safety
+
+- **QPixmap creation**: Only in main GUI thread (worker emits disk path, not QPixmap)
+- **Worker references**: `ThumbnailCache._active_workers` dict prevents GC from destroying `ThumbnailWorkerSignals` before thread completes
+- **Database reads**: `TriageDatabase` uses `threading.local()` so each thread gets its own SQLite connection
+- **Database writes**: Async `queue.Queue` processed by dedicated writer thread
+
+### Key Gotchas
+
+1. **Never create QPixmap in worker thread** - emit disk path, load in main thread
+2. **Must retain worker references** - `_active_workers[cache_key] = worker` before `thread_pool.start()`
+3. **Clean up on all exit paths** - `_active_workers.pop(cache_key, None)` in success, error, AND stale handlers
+4. **Thread-local read connections** - `_get_read_conn()` uses `threading.local()`, not instance attributes
+
+## Photo Review Query Builder
+
+Builds filtered SQL queries for the Photo Review app's grid view and folder tree.
+
+### Module
+
+`photo_review/query_builder.py` - `PhotoQueryBuilder`
+
+### Version Filter
+
+Controls which files are shown based on archive location:
+
+| Value | Behavior |
+|-------|----------|
+| `'current'` (default) | Excludes prior-revision archive files only |
+| `'prior'` | Shows only prior-revision archive files |
+| `'all'` | No filtering |
+
+**Critical:** `file_name` in `UniquePhotos` may contain source paths OR archive paths. The `'current'` filter must NOT require `file_name LIKE archive_base%` — it only excludes `file_name NOT LIKE prior_archive_base%`.
+
+### Folder Tree Counts
+
+`_build_folder_count_conditions()` mirrors the `build_query()` version filter to ensure tree counts match grid results. Both exclude:
+- Deleted files (via `LEFT JOIN DeletedFiles`)
+- Prior-revision archive files (via `NOT LIKE prior_archive_base%`)
+
+Tree counting methods: `get_archive_folders()`, `get_months_in_year()`, `get_days_in_month()`
+
+### Available Filters
+
+| Filter | Type | Description |
+|--------|------|-------------|
+| `creation_date_from/to` | `str` (YYYY-MM-DD) | Creation date range |
+| `import_date_from/to` | `str` (YYYY-MM-DD) | Import date range (via session join) |
+| `correction_date_from/to` | `str` (YYYY-MM-DD) | Date correction range |
+| `has_unreliable_date` | `bool` | Files with unreliable dates |
+| `has_corrected_date` | `bool` | Files with/without corrected dates |
+| `needs_reorganization` | `bool` | Files needing folder reorganization |
+| `has_revisions` | `bool` | Files with prior revisions |
+| `hide_videos` | `bool` | Exclude video file extensions |
+| `version_filter` | `str` | `'current'`, `'prior'`, `'all'` |
+| `filename_pattern` | `str` | Substring match on filename |
+| `folder_path` | `str` | Exact folder prefix match |
+| `search_text` | `str` | Full-text search (filename, path, date, flag) |

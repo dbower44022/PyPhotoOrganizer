@@ -68,6 +68,24 @@ python main.py              # CLI mode
 | `cloud_sync_manager.py` | `CloudSyncManager`: upload queue, sync tracking |
 | `cloud_sync.py` | `CloudSync`: high-level sync orchestration, conflict resolution |
 
+### Triage / Photo Review Modules (triage/)
+
+| Module | Purpose |
+|--------|---------|
+| `thumbnail_cache.py` | `ThumbnailCache`: three-tier LRU cache (memory→disk→generate) |
+| `thumbnail_generator.py` | `ThumbnailWorker`: QRunnable background thumbnail generation |
+| `triage_database.py` | `TriageDatabase`: triage tables, thread-safe read connections |
+
+### Photo Review Modules (photo_review/)
+
+| Module | Purpose |
+|--------|---------|
+| `review_window.py` | Main review window, grid view, toolbar |
+| `query_builder.py` | `PhotoQueryBuilder`: filtered SQL queries, folder tree counts |
+| `query_panel.py` | `QueryPanel`: filter UI, archive folder tree browser |
+| `photo_grid_model.py` | `PhotoGridModel`: thumbnail grid data model |
+| `photo_grid_view.py` | `PhotoGridView`: grid rendering with thumbnail display |
+
 ### Auto-Import Service (auto_import/)
 
 | Module | Purpose |
@@ -107,6 +125,8 @@ See [CLAUDE_WORKERS.md](CLAUDE_WORKERS.md) for full worker list and patterns.
 | `Albums` / `AlbumPhotos` | Album system |
 | `ImportSession` / `FileProcessingLog` | Audit trail |
 | `MetadataUpgradeHistory` | Archive upgrade tracking |
+| `ThumbnailCache` | Disk-cached thumbnail tracking (triage module) |
+| `TriageActions` | File marking/unmarking for triage |
 
 See [CLAUDE_DATABASE.md](CLAUDE_DATABASE.md) for full schema details.
 
@@ -131,6 +151,7 @@ See [CLAUDE_DATABASE.md](CLAUDE_DATABASE.md) for full schema details.
 | Album Association | Auto-add to albums during import | [CLAUDE_FEATURES.md](CLAUDE_FEATURES.md) |
 | Archive Change Detection | Detect external file modifications | [CLAUDE_FEATURES.md](CLAUDE_FEATURES.md) |
 | Cloud Storage | Store archive in S3 with sync support | [CLAUDE_FEATURES.md](CLAUDE_FEATURES.md) |
+| Thumbnail Cache | Three-tier LRU cache with async generation | [CLAUDE_FEATURES.md](CLAUDE_FEATURES.md) |
 
 ## Photo Filtering
 
@@ -222,6 +243,11 @@ with profile_block("Database query", logger):
 12. **Large byte values** - use `Signal(object)` not `Signal(int)` for >2GB
 13. **Metadata upgrades protect user edits** - files with `revision_reason='date_correction'` never replaced
 14. **Metadata quality stored at import** - `date_source`, `date_reliable`, `metadata_quality_score` set in `insert_unique_photo()`
+15. **ThumbnailWorker references** - `ThumbnailCache._active_workers` must hold Python references to prevent GC from destroying QRunnable signals before thread completes
+16. **TriageDatabase read connections** - use `threading.local()` for read connections; SQLite connections can only be used in the thread that created them
+17. **`file_name` stores source paths** - `UniquePhotos.file_name` may contain source paths OR archive paths; never filter with `LIKE archive_base%` to find "current" files
+18. **Version filter excludes prior revisions only** - `build_query()` version_filter `'current'` excludes prior-revision archive files, not non-archive paths
+19. **Folder tree counts must match grid** - `_build_folder_count_conditions()` must mirror `build_query()` version_filter logic exactly
 
 ## Known Issues
 

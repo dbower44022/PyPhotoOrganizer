@@ -32,6 +32,58 @@ class MyWorker(QThread):
 | `BulkDeleteWorker` | `ui/bulk_delete_worker.py` | Bulk delete matching files | `scan_completed(dict)`, `delete_completed(dict)` |
 | `ArchiveRecoveryWorker` | `ui/archive_recovery_worker.py` | Recover orphaned files | `file_recovered(dict)` |
 
+## Thumbnail Cache Workers (QRunnable Pattern)
+
+`ThumbnailWorker` uses `QRunnable` (not `QThread`) for threadpool-based thumbnail generation.
+
+### Key Differences from QThread Workers
+
+| Aspect | QThread Workers | ThumbnailWorker (QRunnable) |
+|--------|----------------|----------------------------|
+| Base class | `QThread` (is a `QObject`) | `QRunnable` (NOT a `QObject`) |
+| Signal ownership | Signals on `self` | Signals on separate `ThumbnailWorkerSignals(QObject)` |
+| Lifecycle | Managed by parent | Managed by `QThreadPool` with `setAutoDelete(True)` |
+| Reference safety | Qt parent-child prevents GC | **Must hold Python reference** to prevent GC |
+
+### Worker Reference Retention (Critical)
+
+`ThumbnailCache._active_workers` dict holds Python references to in-flight workers. Without this, Python's GC can destroy the `ThumbnailWorkerSignals` QObject before the thread finishes, causing `RuntimeError: Signal source has been deleted`.
+
+```python
+# In ThumbnailCache._queue_generation():
+self._active_workers[cache_key] = worker  # Prevent GC
+self.thread_pool.start(worker)
+
+# In _on_thumbnail_generated() / _on_generation_error():
+self._active_workers.pop(cache_key, None)  # Release after completion
+```
+
+### Worker Implementations
+
+| Worker | File | Pattern | Signals |
+|--------|------|---------|---------|
+| `ThumbnailWorker` | `triage/thumbnail_generator.py` | `QRunnable` + `QThreadPool` | `finished(str,int,str)`, `error(str,str)`, `progress(str,str)` |
+| DB Writer Thread | `triage/thumbnail_cache.py` | `threading.Thread` (daemon) | N/A (uses `queue.Queue`) |
+| Cache Warming Thread | `triage/thumbnail_cache.py` | `threading.Thread` (daemon) | N/A |
+
+### Thread Safety: TriageDatabase
+
+`TriageDatabase` uses `threading.local()` for read connections because SQLite connections can only be used in the thread that created them. Multiple threads (main GUI, warming thread, worker threads) access the database concurrently.
+
+```python
+# Each thread gets its own read connection via _get_read_conn()
+self._local = threading.local()  # Thread-local storage
+
+def _get_read_conn(self):
+    conn = getattr(self._local, 'read_conn', None)
+    if conn is None:
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        self._local.read_conn = conn
+    return conn
+```
+
+Write connections use a dedicated async queue processed by a single writer thread.
+
 ## Dialog Worker Cleanup
 
 **Critical:** Dialogs with QThread workers must implement `closeEvent` to prevent thread destruction errors and database locks.

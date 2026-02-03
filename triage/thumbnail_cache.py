@@ -97,6 +97,11 @@ class ThumbnailCache(QObject):
         # Track in-progress generations to avoid duplicates
         self._generating: set = set()  # Set of cache keys being generated
 
+        # Keep Python references to active workers to prevent GC from
+        # destroying their signals QObject before the thread completes.
+        # Key: cache_key, Value: ThumbnailWorker
+        self._active_workers: dict = {}
+
         # Async database write queue (eliminates contention and UI blocking)
         self._db_write_queue = queue.Queue()
         self._db_writer_thread = threading.Thread(
@@ -361,6 +366,10 @@ class ThumbnailCache(QObject):
         worker.signals.finished.connect(self._on_thumbnail_generated)
         worker.signals.error.connect(self._on_generation_error)
 
+        # Keep a Python reference to prevent GC from destroying the
+        # worker's signals QObject before the thread completes
+        self._active_workers[cache_key] = worker
+
         # Queue with priority
         # QThreadPool priority: higher number = higher priority
         priority_map = {'high': 10, 'normal': 5, 'low': 0}
@@ -387,6 +396,7 @@ class ThumbnailCache(QObject):
             # Check if this thumbnail is still needed (might have switched folders)
             if cache_key not in self._generating:
                 logger.debug(f"Ignoring stale thumbnail generation: {file_hash[:8]}... size={size}")
+                self._active_workers.pop(cache_key, None)
                 return
 
             # CRITICAL: Validate file exists before trying to load QPixmap
@@ -394,6 +404,7 @@ class ThumbnailCache(QObject):
             if not os.path.exists(disk_path):
                 logger.error(f"Thumbnail file does not exist: {disk_path}")
                 self._generating.discard(cache_key)
+                self._active_workers.pop(cache_key, None)
                 self.stats['errors'] += 1
                 return
 
@@ -403,6 +414,7 @@ class ThumbnailCache(QObject):
                 if file_size == 0:
                     logger.error(f"Thumbnail file is 0 bytes (failed write): {disk_path}")
                     self._generating.discard(cache_key)
+                    self._active_workers.pop(cache_key, None)
                     self.stats['errors'] += 1
                     # Delete the empty file
                     try:
@@ -413,6 +425,7 @@ class ThumbnailCache(QObject):
             except OSError as e:
                 logger.error(f"Cannot access thumbnail file {disk_path}: {e}")
                 self._generating.discard(cache_key)
+                self._active_workers.pop(cache_key, None)
                 self.stats['errors'] += 1
                 return
 
@@ -422,6 +435,7 @@ class ThumbnailCache(QObject):
             if pixmap.isNull():
                 logger.warning(f"QPixmap failed to load thumbnail from {disk_path} (file exists but is invalid)")
                 self._generating.discard(cache_key)
+                self._active_workers.pop(cache_key, None)
                 self.stats['errors'] += 1
                 # Delete the corrupted file
                 try:
@@ -434,8 +448,9 @@ class ThumbnailCache(QObject):
             # Add to memory cache
             self._add_to_memory_cache(cache_key, pixmap)
 
-            # Mark as no longer generating
+            # Mark as no longer generating and release worker reference
             self._generating.discard(cache_key)
+            self._active_workers.pop(cache_key, None)
 
             self.stats['generated'] += 1
             logger.debug(f"Thumbnail generated: {file_hash[:8]}... size={size}")
@@ -445,9 +460,11 @@ class ThumbnailCache(QObject):
 
         except Exception as e:
             logger.error(f"Error loading generated thumbnail: {e}", exc_info=True)
-            # Ensure we always clean up the generating flag
+            # Ensure we always clean up the generating flag and worker reference
             try:
-                self._generating.discard(f"{file_hash}_{size}")
+                cache_key = f"{file_hash}_{size}"
+                self._generating.discard(cache_key)
+                self._active_workers.pop(cache_key, None)
             except:
                 pass
             self.stats['errors'] += 1
@@ -461,11 +478,12 @@ class ThumbnailCache(QObject):
             error_msg: Error message
         """
         try:
-            # Remove from generating set (allow retry later)
+            # Remove from generating set and release worker references (allow retry later)
             # Use list() to create a copy before iterating (thread-safe)
             for cache_key in list(self._generating):
                 if cache_key.startswith(file_hash):
                     self._generating.discard(cache_key)
+                    self._active_workers.pop(cache_key, None)
 
             self.stats['errors'] += 1
             logger.warning(f"Thumbnail generation error for {file_hash[:8]}...: {error_msg}")
@@ -674,6 +692,9 @@ class ThumbnailCache(QObject):
         # Wait for thread to finish
         if self._db_writer_thread.is_alive():
             self._db_writer_thread.join(timeout=2.0)
+
+        # Release all worker references
+        self._active_workers.clear()
 
         logger.info(f"Thumbnail cache shutdown complete. "
                    f"Queued: {self.stats['db_writes_queued']}, "

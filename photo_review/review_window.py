@@ -1738,6 +1738,9 @@ class PhotoReviewWindow(QMainWindow):
             )
             self.detached_preview.setWindowTitle("Photo Preview - Photo Review")
             self.detached_preview.correct_date_clicked.connect(self._on_preview_correct_date)
+            self.detached_preview.rotate_clicked.connect(self._on_preview_rotate)
+            self.detached_preview.edit_clicked.connect(self._on_preview_edit)
+            self.detached_preview.delete_clicked.connect(self._on_preview_delete)
 
         self.detached_preview.update_preview(record)
         self.detached_preview.show()
@@ -1751,6 +1754,148 @@ class PhotoReviewWindow(QMainWindow):
         dialog = DateCorrectionDialog(self, [record], batch_mode=False)
         dialog.exec()
         self.run_current_query()
+
+    def _on_preview_rotate(self, record: dict):
+        """Handle rotate request from preview window."""
+        prior_archive = self.database_metadata.get_prior_revision_archive_location()
+        if not prior_archive:
+            QMessageBox.warning(
+                self, "Prior Revision Archive Not Configured",
+                "Please configure Prior Revision Archive location in the main application settings."
+            )
+            return
+
+        from ui.rotate_image_dialog import RotateImageDialog
+
+        dialog = RotateImageDialog(
+            parent=self,
+            selected_records=[record],
+            db_metadata=self.database_metadata,
+            logger=logger
+        )
+        dialog.exec()
+        self._refresh_after_preview_action(record)
+
+    def _on_preview_edit(self, record: dict):
+        """Handle edit request from preview window."""
+        prior_archive = self.database_metadata.get_prior_revision_archive_location()
+        if not prior_archive:
+            QMessageBox.warning(
+                self, "Prior Revision Archive Not Configured",
+                "Please configure Prior Revision Archive location in the main application settings."
+            )
+            return
+
+        from ui.edit_image_dialog import EditImageDialog
+
+        dialog = EditImageDialog(
+            parent=self,
+            record=record,
+            db_metadata=self.database_metadata,
+            logger_instance=logger
+        )
+        dialog.exec()
+        self._refresh_after_preview_action(record)
+
+    def _on_preview_delete(self, record: dict):
+        """Handle delete request from preview window."""
+        delete_vault = self.database_metadata.get_delete_vault_location()
+        if not delete_vault:
+            QMessageBox.warning(
+                self, "Delete Vault Not Configured",
+                "Please configure Delete Vault location in the main application settings."
+            )
+            return
+
+        filename = os.path.basename(
+            record.get('archive_path') or record.get('source_path', '') or record.get('file_name', '')
+        )
+        reply = QMessageBox.question(
+            self, "Confirm Delete",
+            f"Delete \"{filename}\" to Delete Vault?\n\n"
+            f"Files will be moved to:\n{delete_vault}\n\n"
+            f"Files can be restored later.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        from ui.delete_worker import DeleteWorker
+
+        self._preview_delete_worker = DeleteWorker(
+            records=[record],
+            delete_vault_path=delete_vault,
+            db_path=self.current_database_path,
+            worker_logger=logger
+        )
+
+        self._preview_delete_progress = QProgressDialog(
+            "Deleting file...", "Cancel", 0, 1, self
+        )
+        self._preview_delete_progress.setWindowModality(Qt.WindowModal)
+        self._preview_delete_progress.show()
+
+        self._preview_delete_worker.progress.connect(self._on_delete_progress)
+        self._preview_delete_worker.finished.connect(self._on_preview_delete_finished)
+        self._preview_delete_worker.start()
+
+    def _on_preview_delete_finished(self, results):
+        """Handle delete completion from preview window."""
+        self._preview_delete_progress.close()
+
+        success = results.get('success', 0)
+        errors = results.get('errors', [])
+        deleted_hashes = results.get('deleted_hashes', [])
+
+        if deleted_hashes and self.grid_model:
+            self.grid_model.remove_items(deleted_hashes)
+
+        if errors:
+            QMessageBox.warning(
+                self, "Delete Complete with Errors",
+                f"Deleted {success} files.\n\n"
+                f"{len(errors)} errors occurred."
+            )
+        else:
+            self.status_bar.showMessage(f"Deleted {success} files")
+
+        if self.grid_model:
+            count = len(self.grid_model.file_items)
+            self.photo_count_label.setText(f"{count:,} photos")
+
+        # Clear the preview since the file was deleted
+        if self.detached_preview:
+            self.detached_preview.clear_preview()
+
+    def _refresh_after_preview_action(self, record: dict):
+        """Refresh grid and preview after a rotate/edit action from the preview window."""
+        file_hash = record.get('file_hash', '')
+
+        # Invalidate thumbnail cache for the old hash
+        if file_hash and self.thumbnail_cache:
+            self.thumbnail_cache.invalidate_hash(file_hash)
+
+        # Re-run query to refresh grid
+        self.run_current_query()
+
+        # Try to find the refreshed record and update the preview
+        if self.detached_preview and self.detached_preview.isVisible():
+            refreshed = None
+            if self.grid_model:
+                # Try by hash first (hash may change after rotation/edit)
+                if file_hash:
+                    refreshed = self.grid_model.get_record_by_hash(file_hash)
+                # Fallback: find by archive path
+                if not refreshed:
+                    archive_path = record.get('archive_path', '')
+                    if archive_path:
+                        for item in self.grid_model.file_items:
+                            if item.get('archive_path') == archive_path:
+                                refreshed = item
+                                break
+            if refreshed:
+                self.detached_preview.update_preview(refreshed)
 
     # -------------------------------------------------------------------------
     # Query Actions

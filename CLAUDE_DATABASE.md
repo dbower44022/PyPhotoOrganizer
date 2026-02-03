@@ -179,6 +179,45 @@ CREATE TABLE SourceDirectorySubAlbums (
 );
 ```
 
+## Triage Tables (triage/migrate_database.sql)
+
+### ThumbnailCache
+```sql
+CREATE TABLE IF NOT EXISTS ThumbnailCache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash TEXT NOT NULL,
+    thumbnail_path TEXT NOT NULL,
+    thumbnail_size INTEGER NOT NULL,  -- 256, 512, or 1024
+    created_timestamp TEXT NOT NULL,
+    last_accessed_timestamp TEXT NOT NULL,
+    file_modified_timestamp TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX idx_thumbnail_cache_hash ON ThumbnailCache(file_hash, thumbnail_size);
+CREATE INDEX idx_thumbnail_cache_accessed ON ThumbnailCache(last_accessed_timestamp);
+```
+
+### TriageActions
+```sql
+CREATE TABLE IF NOT EXISTS TriageActions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash TEXT NOT NULL,
+    action_type TEXT NOT NULL,  -- 'delete', 'favorite', 'date_correction'
+    marked_timestamp TEXT NOT NULL,
+    unmarked_timestamp TEXT,    -- NULL = still active
+    notes TEXT
+);
+```
+
+### TriageDatabase Thread Safety
+
+`TriageDatabase` (`triage/triage_database.py`) uses `threading.local()` for read connections. This is required because multiple threads access the database:
+
+- **Main GUI thread**: `get_thumbnail()` for cache lookups
+- **Cache warming thread**: `get_cached_hashes()` for batch checks
+- **DB writer thread**: `add_thumbnail()` for async writes (uses separate `_write_conn`)
+
+Each thread gets its own read connection via `_get_read_conn()`. Write connections are accessed only from the dedicated writer thread via `_get_write_conn()`.
+
 ## Database Health System
 
 ### Health Check Method
